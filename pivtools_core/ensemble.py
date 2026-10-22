@@ -34,6 +34,7 @@ import numpy as np
 from dask.distributed import Client
 
 from pivtools_cli.piv.piv_backend.factory import make_correlator_backend
+from pivtools_cli.piv.piv_backend.infilling import fill_masked_predictor
 from pivtools_cli.piv.piv_backend.single_pass_accumulator import SinglePassAccumulator
 from pivtools_cli.piv.piv_result import PIVEnsembleResult
 from pivtools_cli.piv.save_results import (
@@ -646,10 +647,36 @@ def run_ensemble_piv(
         logger.info("")
         logger.info(f"======== PASS {pass_idx + 1}/{num_passes} ========")
 
-        # Scatter predictor for this pass
+        # Scatter predictor for this pass. Masked windows of the previous pass are
+        # stored as 0; fill them first (masking.predictor_fill) so the zeros are not
+        # spread into valid windows by the workers' padding, smoothing and warp.
         scattered_predictor = None
         if predictor_field is not None:
-            scattered_predictor = client.scatter(predictor_field, broadcast=True)
+            warp_predictor = predictor_field
+            if vector_masks:
+                prev = pass_idx - 1
+                prev_mask = np.asarray(vector_masks[prev], dtype=bool)
+                if prev_mask.shape != predictor_field.shape[:2]:
+                    raise ValueError(
+                        f"Pass {pass_idx + 1}: vector mask of pass {prev + 1} has shape "
+                        f"{prev_mask.shape} but the predictor grid is "
+                        f"{predictor_field.shape[:2]}"
+                    )
+                warp_predictor = fill_masked_predictor(
+                    predictor_field,
+                    prev_mask,
+                    spacing=(
+                        float(correlator_cache["win_spacing_y"][prev]),
+                        float(correlator_cache["win_spacing_x"][prev]),
+                    ),
+                    method=config.masking_predictor_fill,
+                )
+                if warp_predictor is not predictor_field:
+                    logger.info(
+                        f"  Filled {int(prev_mask.sum())} masked windows in the "
+                        f"predictor ({config.masking_predictor_fill})"
+                    )
+            scattered_predictor = client.scatter(warp_predictor, broadcast=True)
             logger.info("  Broadcast predictor field from previous pass")
 
         workers = list(client.ncores().keys())

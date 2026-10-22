@@ -735,6 +735,7 @@ instantaneous_piv:
   peak_fit_impl: batch
   secondary_peak: false
   predictor_smoothing: true
+  predictor_boundary_conditions: []
   image_warp_interpolation: cubic
   save_mode: minimal
   save_compression: false
@@ -824,6 +825,10 @@ masking:
     bottom: 0
     left: 0
     right: 0
+  # Fill for masked vector windows before they seed the next pass's predictor:
+  # harmonic | nearest | none ('none' = masked windows stay 0, old behaviour).
+  # Saved outputs keep masked windows at 0 regardless.
+  predictor_fill: harmonic
 merging:
   type_name: instantaneous
   base_path_idx: 0

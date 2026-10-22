@@ -6,6 +6,9 @@ This module provides various methods for detecting outliers in PIV data:
 - Median-based 2D outlier detection
 - Sigma-based outlier detection
 - Divergence/vorticity-based outlier detection
+
+Masked vector windows (stored as 0 by both pipelines) are excluded from every
+test via the ``masked`` argument of ``apply_outlier_detection``.
 """
 
 import bottleneck as bn
@@ -13,6 +16,41 @@ import numpy as np
 from numpy.lib.stride_tricks import sliding_window_view
 from scipy import ndimage as ndi
 from scipy.signal import convolve2d
+
+# Border/hole guard of median_outlier_detection. The guard window is the
+# immediate 3x3 around a node (the node itself included) and is deliberately
+# independent of the median window ``size``. A node is rejected when fewer
+# than GUARD_MIN_PRESENT of those 9 cells hold a present vector.
+GUARD_WINDOW = 3
+GUARD_MIN_PRESENT = 6
+
+
+def _as_mask(masked: np.ndarray, shape: tuple) -> np.ndarray:
+    """Validate a vector-window mask against the field shape and cast to bool.
+
+    Parameters
+    ----------
+    masked : np.ndarray
+        Mask of masked vector windows (True = masked).
+    shape : tuple
+        Expected shape (that of the velocity field).
+
+    Returns
+    -------
+    np.ndarray
+        Boolean mask of ``shape``.
+
+    Raises
+    ------
+    ValueError
+        If ``masked`` does not have ``shape``.
+    """
+    masked = np.asarray(masked)
+    if masked.shape != tuple(shape):
+        raise ValueError(
+            f"masked shape {masked.shape} does not match field shape {tuple(shape)}"
+        )
+    return masked.astype(bool, copy=False)
 
 
 def peak_magnitude_detection(
@@ -53,6 +91,7 @@ def median_outlier_detection(
     threshold: float = 2.0,
     size: int = 5,
     combine: str = "norm",
+    masked: np.ndarray | None = None,
 ) -> np.ndarray:
     """
     Normalized-median (universal) outlier detection for 2D PIV velocity
@@ -103,16 +142,29 @@ def median_outlier_detection(
         finds. Velocity does not have this problem — its components share a
         single failure mode (one bad correlation peak corrupts both), so the
         norm misses nothing there and ``"norm"`` remains correct for ``(ux, uy)``.
+    masked : np.ndarray or None, optional
+        Boolean mask of masked vector windows (True = masked), same shape as
+        ``ux``. Masked nodes are set to NaN internally, so they drop out of
+        every neighbourhood median and residual median, and they are never
+        flagged. In the 3x3 border/hole guard a masked neighbour counts as
+        PRESENT, otherwise every node along a curved or stair-step mask edge
+        would fall below ``GUARD_MIN_PRESENT`` and be auto-flagged. A node
+        whose entire neighbourhood is masked or missing has a NaN median and
+        is still flagged. ``None`` (default) leaves the behaviour unchanged.
 
     Returns
     -------
     np.ndarray
-        Boolean mask of outliers (True = outlier).
+        Boolean mask of outliers (True = outlier). Never True at masked nodes.
+
+    Raises
+    ------
+    ValueError
+        If ``combine`` or ``size`` is invalid, or ``ux``, ``uy`` and
+        ``masked`` shapes disagree.
     """
     if combine not in ("norm", "per_component"):
-        raise ValueError(
-            f"combine must be 'norm' or 'per_component', got {combine!r}"
-        )
+        raise ValueError(f"combine must be 'norm' or 'per_component', got {combine!r}")
     if ux.shape != uy.shape:
         raise ValueError("ux and uy must have identical shapes")
     if not isinstance(size, (int, np.integer)) or size < 3 or size % 2 == 0:
@@ -120,6 +172,10 @@ def median_outlier_detection(
 
     ux = ux.astype(np.float32, copy=False)
     uy = uy.astype(np.float32, copy=False)
+    if masked is not None:
+        masked = _as_mask(masked, ux.shape)
+        ux = np.where(masked, np.float32(np.nan), ux)
+        uy = np.where(masked, np.float32(np.nan), uy)
 
     def _neighbours(U):
         """Stack the size*size-1 neighbours of every node (self excluded,
@@ -146,9 +202,7 @@ def median_outlier_detection(
 
         # Normalize by the median of the neighbour residual norms (relative to the
         # same neighbour median) plus epsilon (PIVware pwMedian of the residual).
-        r_i = np.sqrt(
-            (ux_nn - med_u[..., None]) ** 2 + (uy_nn - med_v[..., None]) ** 2
-        )
+        r_i = np.sqrt((ux_nn - med_u[..., None]) ** 2 + (uy_nn - med_v[..., None]) ** 2)
         r_m = bn.nanmedian(r_i, axis=-1)
 
         norm_resid = r_0 / (r_m + epsilon)
@@ -167,14 +221,25 @@ def median_outlier_detection(
     # Border/hole guard on the immediate 3×3 (deliberately independent of the
     # median window `size`): reject a node only when its closest neighbours are
     # missing, so a wall-row node whose larger window pokes past the grid edge
-    # is not thrown out just for being near the wall. Both components must be
-    # finite for a cell to count.
-    valid = (np.isfinite(ux) & np.isfinite(uy)).astype(np.float32)
-    ones3 = np.ones((3, 3), dtype=np.float32)
-    n_neigh = convolve2d(valid, ones3, mode="same", boundary="fill", fillvalue=0.0)
+    # is not thrown out just for being near the wall. A cell is present when
+    # both components are finite, or when it is masked (a mask edge is not a
+    # hole in the measurement).
+    present = np.isfinite(ux) & np.isfinite(uy)
+    if masked is not None:
+        present |= masked
+    guard_kernel = np.ones((GUARD_WINDOW, GUARD_WINDOW), dtype=np.float32)
+    n_present = convolve2d(
+        present.astype(np.float32),
+        guard_kernel,
+        mode="same",
+        boundary="fill",
+        fillvalue=0.0,
+    )
 
     # Boolean mask: true = outlier
-    b_filter = exceeded | (n_neigh < 6)
+    b_filter = exceeded | (n_present < GUARD_MIN_PRESENT)
+    if masked is not None:
+        b_filter &= ~masked
     return b_filter
 
 
@@ -205,9 +270,7 @@ def sigma_outlier_detection(
         Boolean mask of outliers (True = outlier).
     """
     if combine not in ("norm", "per_component"):
-        raise ValueError(
-            f"combine must be 'norm' or 'per_component', got {combine!r}"
-        )
+        raise ValueError(f"combine must be 'norm' or 'per_component', got {combine!r}")
     if combine == "norm":
         return _sigma_single(np.sqrt(ux**2 + uy**2), sigma_threshold)
     # Independent verdicts — see median_outlier_detection's `combine` docs for
@@ -322,6 +385,7 @@ def apply_outlier_detection(
     methods: list,
     peak_mag: np.ndarray = None,
     combine: str = "norm",
+    masked: np.ndarray | None = None,
 ) -> np.ndarray:
     """
     Apply multiple outlier detection methods and combine results.
@@ -345,12 +409,42 @@ def apply_outlier_detection(
         genuine vector. Defaults to ``"norm"``. The ensemble stress call site
         passes ``"per_component"`` because ``(UU, VV)`` are not vector
         components — see ``median_outlier_detection``.
+    masked : np.ndarray or None, optional
+        Boolean mask of masked vector windows (True = masked), same shape as
+        ``ux``. Masked windows are stored as 0 by the pipelines, and a 0 would
+        otherwise count as a real neighbour. When given, every method runs on
+        float copies of ``ux``/``uy`` with masked nodes set to NaN, and masked
+        nodes are removed from the combined result. Per method:
+
+        - ``peak_mag`` is unaffected except that masked nodes cannot be flagged.
+        - ``median_2d`` excludes masked nodes from the neighbourhood and
+          residual medians, and counts them as present in its 3x3 border/hole
+          guard (``masked`` is forwarded).
+        - ``sigma`` excludes masked nodes from the 8-neighbour mean, standard
+          deviation and neighbour count.
+        - ``div_vort`` yields NaN derivatives wherever a central-difference
+          stencil touches a masked node, so those nodes are not flagged and are
+          left out of the automatic MAD thresholds.
+
+        ``None`` (default) leaves the behaviour of every method unchanged.
 
     Returns
     -------
     np.ndarray
-        Combined boolean mask of outliers (True = outlier).
+        Combined boolean mask of outliers (True = outlier). Never True at
+        masked nodes.
+
+    Raises
+    ------
+    ValueError
+        If a method is unknown, ``peak_mag`` is required but missing, or
+        ``masked`` does not match the shape of ``ux``.
     """
+    if masked is not None:
+        masked = _as_mask(masked, ux.shape)
+        ux = np.where(masked, np.nan, ux)
+        uy = np.where(masked, np.nan, uy)
+
     combined_mask = np.zeros(ux.shape, dtype=bool)
 
     for method_cfg in methods:
@@ -370,8 +464,13 @@ def apply_outlier_detection(
             threshold = method_cfg.get("threshold", 2.0)
             size = method_cfg.get("size", 5)
             mask = median_outlier_detection(
-                ux, uy, epsilon=epsilon, threshold=threshold, size=size,
+                ux,
+                uy,
+                epsilon=epsilon,
+                threshold=threshold,
+                size=size,
                 combine=combine,
+                masked=masked,
             )
             combined_mask |= mask
 
@@ -393,4 +492,6 @@ def apply_outlier_detection(
         else:
             raise ValueError(f"Unknown outlier detection method: {method_type}")
 
+    if masked is not None:
+        combined_mask &= ~masked
     return combined_mask

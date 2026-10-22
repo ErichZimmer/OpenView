@@ -1,4 +1,5 @@
 import logging
+import math
 import os
 import re
 import shutil
@@ -43,6 +44,75 @@ CALIBRATION_ACTIVE_METHODS = (
     "stereo_dotboard",
     "stereo_stepped",
 )
+
+# Fill applied to masked vector windows before they enter the multi-pass predictor
+# (masking.predictor_fill). 'none' leaves the stored zeros (old behaviour). Single source
+# of truth: pivtools_cli/piv/piv_backend/infilling.py imports it.
+PREDICTOR_FILL_METHODS = ("harmonic", "nearest", "none")
+
+_PREDICTOR_BC_KEYS = frozenset({"y_position", "ux", "uy", "edge"})
+_PREDICTOR_BC_EDGES = ("bottom", "top")
+
+
+def _validate_predictor_boundary_conditions(raw, section: str) -> list:
+    """Validate a ``<section>.predictor_boundary_conditions`` list; raise on any bad entry.
+
+    Each entry is a dict with ``y_position`` (non-negative integer pixels from the
+    bottom or top edge of the image), optional ``ux``/``uy`` (pixels/frame,
+    default 0.0) and optional ``edge`` ('bottom' default, or 'top'). Unknown keys
+    are rejected so a typo cannot silently disable a wall condition.
+    """
+    where = f"{section}.predictor_boundary_conditions"
+    if not isinstance(raw, list):
+        raise ValueError(f"{where} must be a list, got {type(raw).__name__}")
+    validated = []
+    for i, bc in enumerate(raw):
+        if not isinstance(bc, dict):
+            raise ValueError(f"{where}[{i}] must be a mapping, got {bc!r}")
+        unknown = set(bc) - _PREDICTOR_BC_KEYS
+        if unknown:
+            raise ValueError(
+                f"{where}[{i}] has unknown key(s) {sorted(unknown)}; "
+                f"allowed: {sorted(_PREDICTOR_BC_KEYS)}"
+            )
+        y_pos = bc.get("y_position")
+        if (
+            isinstance(y_pos, bool)
+            or not isinstance(y_pos, (int, float))
+            or not math.isfinite(y_pos)
+            or float(y_pos) != int(y_pos)
+            or y_pos < 0
+        ):
+            raise ValueError(
+                f"{where}[{i}].y_position must be a non-negative integer, got {y_pos!r}"
+            )
+        comps = {}
+        for key in ("ux", "uy"):
+            val = bc.get(key, 0.0)
+            if (
+                isinstance(val, bool)
+                or not isinstance(val, (int, float))
+                or not math.isfinite(val)
+            ):
+                raise ValueError(
+                    f"{where}[{i}].{key} must be a finite number, got {val!r}"
+                )
+            comps[key] = float(val)
+        edge = bc.get("edge", "bottom")
+        if edge not in _PREDICTOR_BC_EDGES:
+            raise ValueError(
+                f"{where}[{i}].edge must be one of {_PREDICTOR_BC_EDGES}, got {edge!r}"
+            )
+        validated.append(
+            {
+                "y_position": int(y_pos),
+                "ux": comps["ux"],
+                "uy": comps["uy"],
+                "edge": edge,
+            }
+        )
+    return validated
+
 
 # Appended to the unset/blank calibration-source errors so the user knows what the
 # folder is for (and that an image-less scale factor still needs it).
@@ -2373,36 +2443,33 @@ class Config:
           - edge: str, "bottom" (default) or "top"
 
         For all predictor grid points between the image edge and
-        y_position, the predictor interpolation uses (ux, uy)
-        instead of edge-replicated padding.
+        y_position, the predictor uses (ux, uy) instead of measured or
+        edge-replicated values. Positions outside the measured grid add a
+        node in the padding zone; positions inside it override the existing
+        predictor rows beyond y_position.
 
-        Default: [] (no BCs, backward-compatible)
+        Raises ValueError on any malformed entry (no silent skips).
+
+        Default: [] (no BCs)
         """
         raw = self.data.get("ensemble_piv", {}).get("predictor_boundary_conditions", [])
-        if not raw:
-            return []
-        validated = []
-        for i, bc in enumerate(raw):
-            if not isinstance(bc, dict):
-                continue
-            y_pos = bc.get("y_position")
-            if y_pos is None:
-                continue
-            edge = bc.get("edge", "bottom")
-            if edge not in ("bottom", "top"):
-                raise ValueError(
-                    f"predictor_boundary_conditions[{i}].edge must be "
-                    f"'bottom' or 'top', got {edge!r}"
-                )
-            validated.append(
-                {
-                    "y_position": int(y_pos),
-                    "ux": float(bc.get("ux", 0.0)),
-                    "uy": float(bc.get("uy", 0.0)),
-                    "edge": edge,
-                }
-            )
-        return validated
+        return _validate_predictor_boundary_conditions(raw, "ensemble_piv")
+
+    @property
+    def instantaneous_predictor_boundary_conditions(self) -> list:
+        """Predictor boundary conditions for instantaneous PIV.
+
+        Same schema and semantics as
+        :attr:`ensemble_predictor_boundary_conditions`, read from
+        ``instantaneous_piv.predictor_boundary_conditions``. Applied to every
+        pair's predictor after edge padding and before smoothing.
+
+        Default: [] (no BCs)
+        """
+        raw = self.data.get("instantaneous_piv", {}).get(
+            "predictor_boundary_conditions", []
+        )
+        return _validate_predictor_boundary_conditions(raw, "instantaneous_piv")
 
     @property
     def instantaneous_predictor_smoothing(self) -> bool:
@@ -2595,6 +2662,32 @@ class Config:
         """
         default = {"top": 0, "bottom": 0, "left": 0, "right": 0}
         return self.data.get("masking", {}).get("rectangular", default)
+
+    @property
+    def masking_predictor_fill(self) -> str:
+        """Fill applied to masked vector windows before they build the predictor.
+
+        Masked windows are stored as 0. Used directly in the multi-pass
+        predictor, those zeros act as a fake step that padding, smoothing and
+        the bicubic warp spread into the valid windows next to the mask (biasing
+        them and inflating outlier rejection). Options (both pipelines):
+
+        - 'harmonic': harmonic least-squares fill in physical spacing (robust
+          to noise, bounded at open edges). Default.
+        - 'nearest': nearest valid window in physical distance.
+        - 'none': keep the zeros (old behaviour).
+
+        Saved outputs keep masked windows at 0 regardless of this setting.
+
+        Default: 'harmonic'
+        """
+        method = self.data.get("masking", {}).get("predictor_fill", "harmonic")
+        if method not in PREDICTOR_FILL_METHODS:
+            raise ValueError(
+                f"Invalid masking.predictor_fill '{method}'. "
+                f"Must be one of {PREDICTOR_FILL_METHODS}"
+            )
+        return method
 
     @property
     def mask_threshold(self):

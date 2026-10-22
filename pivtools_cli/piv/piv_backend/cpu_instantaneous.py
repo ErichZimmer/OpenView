@@ -14,7 +14,10 @@ import numpy as np
 from scipy.ndimage import gaussian_filter
 
 from pivtools_cli.piv.piv_backend.base import CrossCorrelator
-from pivtools_cli.piv.piv_backend.infilling import apply_infilling
+from pivtools_cli.piv.piv_backend.infilling import (
+    apply_infilling,
+    fill_masked_predictor,
+)
 from pivtools_cli.piv.piv_backend.lib_guard import require_cpu_supported
 from pivtools_cli.piv.piv_backend.nan_reason_codes import (
     NAN_FIT_FAIL,
@@ -327,6 +330,7 @@ class InstantaneousCorrelatorCPU(CrossCorrelator):
         self.ksize_filt = cache["ksize_filt"]
         self.sd = cache["sd"]
         self.G_smooth_predictor = cache["G_smooth_predictor"]
+        self.predictor_bcs = cache["predictor_bcs"]
 
         # Load image dimensions
         self.H = cache["H"]
@@ -355,6 +359,7 @@ class InstantaneousCorrelatorCPU(CrossCorrelator):
             "ksize_filt": self.ksize_filt,
             "sd": self.sd,
             "G_smooth_predictor": self.G_smooth_predictor,
+            "predictor_bcs": self.predictor_bcs,
             "H": self.H,
             "W": self.W,
             "im_mesh": self.im_mesh,
@@ -572,6 +577,7 @@ class InstantaneousCorrelatorCPU(CrossCorrelator):
                         b_mask[None, :, :], (N, n_win_y, n_win_x)
                     )
                     mask_bool_batch = mask_batch.astype(bool)
+                    win_mask = b_mask.astype(bool)  # (ny, nx) masked windows, this pass
                     large_disp_mask = (np.abs(pk_loc_x) > thresh_x) | (
                         np.abs(pk_loc_y) > thresh_y
                     )
@@ -631,6 +637,7 @@ class InstantaneousCorrelatorCPU(CrossCorrelator):
                                     uy_mat[im_idx],
                                     outlier_methods,
                                     peak_mag=pk_height[im_idx, 0],
+                                    masked=win_mask,
                                 )
 
                             results = self._run_parallel(
@@ -678,6 +685,7 @@ class InstantaneousCorrelatorCPU(CrossCorrelator):
                                             uy_mat[im_idx],
                                             outlier_methods,
                                             peak_mag=primary_peak_mag[im_idx],
+                                            masked=win_mask,
                                         )
                                         re_flag = (
                                             active[im_idx]
@@ -748,6 +756,10 @@ class InstantaneousCorrelatorCPU(CrossCorrelator):
                     )
 
                     if infill_enabled:
+                        infill_spacing = (
+                            float(self.win_spacing_y[pass_idx]),
+                            float(self.win_spacing_x[pass_idx]),
+                        )
 
                         def _infill_one(im_idx):
                             if (
@@ -757,13 +769,19 @@ class InstantaneousCorrelatorCPU(CrossCorrelator):
                                 infill_mask = np.isnan(ux_mat[im_idx]) | np.isnan(
                                     uy_mat[im_idx]
                                 )
-                                if infill_mask.sum() == infill_mask.size:
+                                if (infill_mask | win_mask).all():
                                     logging.error(
                                         f"CRITICAL: 100% of vectors invalid for image {im_idx}; "
                                         f"infilling has no donor points and will abort this batch."
                                     )
+                                # Masked windows hold 0 (not data): never donors.
                                 return im_idx, apply_infilling(
-                                    ux_mat[im_idx], uy_mat[im_idx], infill_mask, cfg
+                                    ux_mat[im_idx],
+                                    uy_mat[im_idx],
+                                    infill_mask,
+                                    cfg,
+                                    spacing=infill_spacing,
+                                    exclude=win_mask,
                                 )
                             return im_idx, None
 
@@ -793,13 +811,31 @@ class InstantaneousCorrelatorCPU(CrossCorrelator):
                     pre_y, pre_x = self.n_pre_all[pass_idx]
                     post_y, post_x = self.n_post_all[pass_idx]
 
+                    # Copy: the saved ux_mat/uy_mat keep 0 at masked windows.
                     stacked = np.stack([uy_mat, ux_mat], axis=-1)  # (N, ny, nx, 2)
+                    if not is_final_pass:
+                        # Predictor build order: fill masked windows -> edge-pad ->
+                        # boundary conditions -> (next pass) smooth -> remap/warp.
+                        with self._profile_section(pass_idx, "predictor_fill"):
+                            stacked = fill_masked_predictor(
+                                stacked,
+                                win_mask,
+                                spacing=(
+                                    float(self.win_spacing_y[pass_idx]),
+                                    float(self.win_spacing_x[pass_idx]),
+                                ),
+                                method=config.masking_predictor_fill,
+                            )
 
                     self.delta_ab_old = np.pad(
                         stacked,
                         ((0, 0), (pre_y, post_y), (pre_x, post_x), (0, 0)),
                         mode="edge",
                     )
+                    if not is_final_pass and self.predictor_bcs:
+                        self._apply_predictor_boundary_conditions(
+                            self.delta_ab_old, self.win_ctrs_y_all[pass_idx], pass_idx
+                        )
 
                     self.previous_win_spacing = (
                         self.win_spacing_y[pass_idx],
@@ -1100,110 +1136,6 @@ class InstantaneousCorrelatorCPU(CrossCorrelator):
         for name, arr in args:
             logging.info(f"{name}: {_describe(arr)}")
 
-    def _predictor_corrector(
-        self,
-        pass_idx: int,
-        image_a: np.ndarray,
-        image_b: np.ndarray,
-        interpolator="cubic",
-        win_type="A",
-    ):
-        """Predictor-corrector step to adjust images based on previous displacement estimates."""
-
-        n_win_y = len(self.win_ctrs_y[pass_idx])
-        n_win_x = len(self.win_ctrs_x[pass_idx])
-        self.delta_ab_pred = np.zeros((n_win_y, n_win_x, 2), dtype=np.float32)
-
-        if pass_idx == 0:
-            if self.delta_ab_old is None:
-                self.delta_ab_old = np.zeros_like(self.delta_ab_pred)
-
-            self.prev_win_size = (n_win_y, n_win_x)
-            self.prev_win_spacing = (
-                self.win_spacing_y[pass_idx],
-                self.win_spacing_x[pass_idx],
-            )
-            return image_a.copy(), image_b.copy(), self.delta_ab_pred
-
-        if self.delta_ab_old is None:
-            raise RuntimeError("delta_ab_old is uninitialised before predictor step")
-
-        if self.config.instantaneous_predictor_smoothing:
-            self.delta_ab_old[..., 0] = gaussian_filter(
-                self.delta_ab_old[..., 0],
-                sigma=self.sd[pass_idx],
-                truncate=(self.ksize_filt[pass_idx][0] - 1) / (2 * self.sd[pass_idx]),
-                mode="nearest",
-            )
-            self.delta_ab_old[..., 1] = gaussian_filter(
-                self.delta_ab_old[..., 1],
-                sigma=self.sd[pass_idx],
-                truncate=(self.ksize_filt[pass_idx][0] - 1) / (2 * self.sd[pass_idx]),
-                mode="nearest",
-            )
-
-        # Predictor-to-window remap stays in Python (small grid, needed for output)
-        interp_flag = cv2.INTER_CUBIC
-        map_x, map_y = self.cached_predictor_maps[pass_idx]
-        if map_x is None or map_y is None:
-            raise ValueError(
-                f"Predictor interpolation maps missing for pass {pass_idx}"
-            )
-
-        for d in range(2):
-            self.delta_ab_pred[..., d] = cv2.remap(
-                self.delta_ab_old[..., d].astype(np.float32),
-                map_x,
-                map_y,
-                interp_flag,
-                borderMode=cv2.BORDER_REPLICATE,
-            )
-
-        # Fused warp: predictor upsample + symmetric coordinates + image warp in one C call
-        H, W = self.H, self.W
-        ctrs_y = np.ascontiguousarray(
-            self.win_ctrs_y_all[pass_idx - 1], dtype=np.float32
-        )
-        ctrs_x = np.ascontiguousarray(
-            self.win_ctrs_x_all[pass_idx - 1], dtype=np.float32
-        )
-        interp_mode = (
-            0 if self.config.instantaneous_image_warp_interpolation == "cubic" else 1
-        )
-        nPY, nPX = self.delta_ab_old.shape[0], self.delta_ab_old.shape[1]
-
-        pred_dy = np.ascontiguousarray(self.delta_ab_old[..., 0], dtype=np.float32)
-        pred_dx = np.ascontiguousarray(self.delta_ab_old[..., 1], dtype=np.float32)
-
-        # Use batch function with N=1
-        img_a = np.ascontiguousarray(image_a.astype(np.float32)[np.newaxis])
-        img_b = np.ascontiguousarray(image_b.astype(np.float32)[np.newaxis])
-        out_a = np.zeros((1, H, W), dtype=np.float32)
-        out_b = np.zeros((1, H, W), dtype=np.float32)
-
-        ret = self._fw_lib.fused_symmetric_warp_batch(
-            img_a,
-            img_b,
-            out_a,
-            out_b,
-            pred_dy,
-            pred_dx,
-            1,
-            H,
-            W,
-            nPY,
-            nPX,
-            ctrs_y,
-            ctrs_x,
-            interp_mode,
-            0,  # shared_predictor=0 (single image, per-image predictor)
-            0,  # round_shifts off (ensemble-only option)
-        )
-        if ret != 0:
-            raise RuntimeError(f"fused_symmetric_warp_batch failed (ret={ret})")
-
-        return out_a[0], out_b[0], self.delta_ab_pred
-
     def _set_lib_arguments(
         self,
         config: Config,
@@ -1332,6 +1264,7 @@ class InstantaneousCorrelatorCPU(CrossCorrelator):
             window_type=config.window_type,
             compute_window_fn=self._compute_window_centres,
             first_pass_ksize=(0, 0),  # Instantaneous uses (0, 0) for first pass
+            predictor_boundary_conditions=config.instantaneous_predictor_boundary_conditions,
         )
 
     def _cache_interpolation_grids(self, config: Config) -> None:

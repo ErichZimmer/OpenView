@@ -118,8 +118,8 @@ def _disparate_pair(n=15):
     """
     i, j = np.indices((n, n))
     chk = ((i + j) % 2).astype(np.float32)
-    A = (1.0 + 2.0 * chk).astype(np.float32)      # alternates 1.0 / 3.0
-    B = (0.25 + 0.02 * chk).astype(np.float32)    # alternates 0.25 / 0.27
+    A = (1.0 + 2.0 * chk).astype(np.float32)  # alternates 1.0 / 3.0
+    B = (0.25 + 0.02 * chk).astype(np.float32)  # alternates 0.25 / 0.27
     return A, B
 
 
@@ -144,9 +144,7 @@ def test_norm_hides_a_small_component_failure_and_per_component_catches_it():
     A, B = _disparate_pair()
     B[7, 7] += 0.30  # 30x B's local scatter, 0.3x A's
 
-    norm = median_outlier_detection(
-        A, B, epsilon=0.01, threshold=2.0, combine="norm"
-    )
+    norm = median_outlier_detection(A, B, epsilon=0.01, threshold=2.0, combine="norm")
     per = median_outlier_detection(
         A, B, epsilon=0.01, threshold=2.0, combine="per_component"
     )
@@ -161,12 +159,15 @@ def test_per_component_equals_the_union_of_single_component_runs():
     B[9, 3] += 0.30
     zeros = np.zeros_like(A)
 
-    per = median_outlier_detection(A, B, epsilon=0.01, threshold=2.0,
-                                   combine="per_component")
-    a_only = median_outlier_detection(A, zeros, epsilon=0.01, threshold=2.0,
-                                      combine="per_component")
-    b_only = median_outlier_detection(zeros, B, epsilon=0.01, threshold=2.0,
-                                      combine="per_component")
+    per = median_outlier_detection(
+        A, B, epsilon=0.01, threshold=2.0, combine="per_component"
+    )
+    a_only = median_outlier_detection(
+        A, zeros, epsilon=0.01, threshold=2.0, combine="per_component"
+    )
+    b_only = median_outlier_detection(
+        zeros, B, epsilon=0.01, threshold=2.0, combine="per_component"
+    )
     assert np.array_equal(per, a_only | b_only)
 
 
@@ -183,10 +184,10 @@ def test_per_component_is_not_a_superset_of_norm():
     A = rng.standard_normal((n, n)).astype(np.float32)
     B = rng.standard_normal((n, n)).astype(np.float32)
 
-    norm = median_outlier_detection(A, B, epsilon=1e-6, threshold=2.0,
-                                    combine="norm")
-    per = median_outlier_detection(A, B, epsilon=1e-6, threshold=2.0,
-                                   combine="per_component")
+    norm = median_outlier_detection(A, B, epsilon=1e-6, threshold=2.0, combine="norm")
+    per = median_outlier_detection(
+        A, B, epsilon=1e-6, threshold=2.0, combine="per_component"
+    )
     interior = np.zeros_like(norm)
     interior[3:-3, 3:-3] = True  # keep clear of the border guard
 
@@ -212,8 +213,7 @@ def test_sigma_per_component_catches_a_small_component_failure():
     A, B = _disparate_pair()
     B[7, 7] += 0.30
     norm = sigma_outlier_detection(A, B, sigma_threshold=2.0, combine="norm")
-    per = sigma_outlier_detection(A, B, sigma_threshold=2.0,
-                                  combine="per_component")
+    per = sigma_outlier_detection(A, B, sigma_threshold=2.0, combine="per_component")
     assert per[7, 7]
     assert not norm[7, 7]
 
@@ -227,3 +227,228 @@ def test_apply_outlier_detection_forwards_combine():
     per = apply_outlier_detection(A, B, methods, combine="per_component")
     assert per[7, 7]
     assert not norm[7, 7]
+
+
+# --------------------------------------------------------------------------
+# masked= — masked vector windows are stored as 0 and must be excluded from
+# every test, never counted as a real neighbour, and never flagged.
+# --------------------------------------------------------------------------
+
+UNIFORM_UX = 10.0  # px; uniform streamwise displacement of the test field
+MASKED_STORED_VALUE = 0.0  # what the pipelines write at masked windows
+MEDIAN_METHOD = {"type": "median_2d", "epsilon": 0.1, "threshold": 2.0, "size": 5}
+SIGMA_METHOD = {"type": "sigma", "sigma_threshold": 2.0}
+DIV_VORT_METHOD = {"type": "div_vort"}
+
+
+def _masked_block_field(n=20):
+    """Uniform field (ux=10, uy=0) with a stair-step block of masked windows.
+
+    The mask is a lower-left staircase, giving both straight edges and
+    concave corners. Masked windows hold 0, exactly as the pipelines store
+    them.
+    """
+    ux = np.full((n, n), UNIFORM_UX, dtype=np.float32)
+    uy = np.zeros((n, n), dtype=np.float32)
+    masked = np.zeros((n, n), dtype=bool)
+    for k, row in enumerate(range(8, n)):
+        masked[row, : 6 + 2 * k] = True
+    ux[masked] = MASKED_STORED_VALUE
+    uy[masked] = MASKED_STORED_VALUE
+    return ux, uy, masked
+
+
+def _frame_corner_baseline(shape, methods, combine="norm"):
+    """Flags on the same uniform field with NO mask at all.
+
+    The 3x3 guard always rejects the four frame corners (only 4 of 9 cells
+    exist), so they are the irreducible baseline a masked run is compared to.
+    """
+    ux = np.full(shape, UNIFORM_UX, dtype=np.float32)
+    uy = np.zeros(shape, dtype=np.float32)
+    return apply_outlier_detection(ux, uy, methods, combine=combine)
+
+
+def _mask_neighbours(masked):
+    """Valid nodes with at least one masked node in their 3x3 neighbourhood."""
+    from scipy.ndimage import binary_dilation
+
+    return binary_dilation(masked, structure=np.ones((3, 3), bool)) & ~masked
+
+
+def test_masked_zeros_flag_neighbours_without_masked_argument():
+    """Documents the bug: stored zeros pollute the neighbour median."""
+    ux, uy, masked = _masked_block_field()
+    flags = apply_outlier_detection(ux, uy, [MEDIAN_METHOD])
+    assert (flags & _mask_neighbours(masked)).any()
+
+
+def test_masked_argument_removes_mask_edge_flags():
+    """With masked given, the masked field flags nothing beyond the unmasked
+    uniform-field baseline (the frame corners), outside the mask."""
+    ux, uy, masked = _masked_block_field()
+    flags = apply_outlier_detection(ux, uy, [MEDIAN_METHOD], masked=masked)
+    baseline = _frame_corner_baseline(ux.shape, [MEDIAN_METHOD])
+    assert np.array_equal(flags, baseline & ~masked)
+    assert not (flags & _mask_neighbours(masked)).any()
+
+
+def test_guard_counts_masked_concave_corner_as_present():
+    """A concave mask corner leaves < 6 finite cells in the 3x3; the guard
+    must treat masked cells as present so the corner node survives."""
+    n = 12
+    ux = np.full((n, n), UNIFORM_UX, dtype=np.float32)
+    uy = np.zeros((n, n), dtype=np.float32)
+    masked = np.zeros((n, n), dtype=bool)
+    masked[6:, :] = True
+    masked[:, 6:] = True  # concave corner at (5, 5): 5 of 9 cells masked
+    ux[masked] = MASKED_STORED_VALUE
+    uy[masked] = MASKED_STORED_VALUE
+
+    corner = (5, 5)
+    nan_masked = ux.copy()
+    nan_masked[masked] = np.nan
+    # Without the masked-as-present rule the corner would fail the guard.
+    without_rule = median_outlier_detection(nan_masked, np.where(masked, np.nan, uy))
+    assert without_rule[corner]
+
+    with_mask = median_outlier_detection(ux, uy, masked=masked)
+    assert not with_mask[corner]
+    baseline = _frame_corner_baseline(ux.shape, [MEDIAN_METHOD])
+    assert np.array_equal(with_mask, baseline & ~masked)
+
+
+def test_masked_nodes_are_never_flagged():
+    """A wild stored value inside the mask is ignored and never flagged."""
+    ux, uy, masked = _masked_block_field()
+    ux[masked] = 1.0e6
+    uy[masked] = -1.0e6
+    methods = [MEDIAN_METHOD, SIGMA_METHOD, DIV_VORT_METHOD]
+    for combine in ("norm", "per_component"):
+        flags = apply_outlier_detection(ux, uy, methods, combine=combine, masked=masked)
+        assert not (flags & masked).any()
+    peak = np.zeros_like(ux)  # every node fails the peak-magnitude threshold
+    flags = apply_outlier_detection(
+        ux,
+        uy,
+        [{"type": "peak_mag", "threshold": 0.5}],
+        peak_mag=peak,
+        masked=masked,
+    )
+    assert np.array_equal(flags, ~masked)
+    direct = median_outlier_detection(ux, uy, masked=masked)
+    assert not (direct & masked).any()
+
+
+@pytest.mark.parametrize("combine", ["norm", "per_component"])
+def test_masked_none_is_bit_identical(combine):
+    """masked=None must reproduce the call without the keyword exactly."""
+    rng = np.random.default_rng(42)
+    ux = rng.standard_normal((40, 50)).astype(np.float32)
+    uy = rng.standard_normal((40, 50)).astype(np.float32)
+    holes = rng.random((40, 50)) < 0.05
+    ux[holes] = np.nan
+    uy[rng.random((40, 50)) < 0.05] = np.nan
+    peak = rng.random((40, 50)).astype(np.float32)
+
+    stacks = [
+        [MEDIAN_METHOD],
+        [SIGMA_METHOD],
+        [DIV_VORT_METHOD],
+        [{"type": "peak_mag", "threshold": 0.3}, MEDIAN_METHOD, SIGMA_METHOD],
+    ]
+    for methods in stacks:
+        old = apply_outlier_detection(ux, uy, methods, peak_mag=peak, combine=combine)
+        new = apply_outlier_detection(
+            ux, uy, methods, peak_mag=peak, combine=combine, masked=None
+        )
+        assert np.array_equal(old, new), f"masked=None changed {methods}"
+    assert np.array_equal(
+        median_outlier_detection(ux, uy, combine=combine),
+        median_outlier_detection(ux, uy, combine=combine, masked=None),
+    )
+
+
+def test_per_component_with_masked():
+    """per_component also ignores masked zeros and still catches a spike."""
+    ux, uy, masked = _masked_block_field()
+    without = apply_outlier_detection(ux, uy, [MEDIAN_METHOD], combine="per_component")
+    assert (without & _mask_neighbours(masked)).any()
+
+    clean = apply_outlier_detection(
+        ux, uy, [MEDIAN_METHOD], combine="per_component", masked=masked
+    )
+    baseline = (
+        _frame_corner_baseline(ux.shape, [MEDIAN_METHOD], combine="per_component")
+        & ~masked
+    )
+    assert np.array_equal(clean, baseline)
+
+    spike = (7, 3)  # valid node directly above the mask edge
+    assert _mask_neighbours(masked)[spike]
+    uy[spike] = 5.0
+    flags = apply_outlier_detection(
+        ux, uy, [MEDIAN_METHOD], combine="per_component", masked=masked
+    )
+    expected = baseline.copy()
+    expected[spike] = True
+    assert np.array_equal(flags, expected)
+
+
+def test_masked_shape_mismatch_raises():
+    ux, uy, _ = _masked_block_field()
+    bad = np.zeros((ux.shape[0], ux.shape[1] + 1), dtype=bool)
+    with pytest.raises(ValueError, match="masked"):
+        apply_outlier_detection(ux, uy, [MEDIAN_METHOD], masked=bad)
+    with pytest.raises(ValueError, match="masked"):
+        median_outlier_detection(ux, uy, masked=bad)
+
+
+def test_masked_exclusion_figure(make_figures, output_dir):
+    """Side-by-side flag maps without vs with masked (figure only)."""
+    if not make_figures:
+        pytest.skip("figures only with --make-figures")
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import ListedColormap
+    from matplotlib.patches import Patch
+
+    ux, uy, masked = _masked_block_field()
+    without = apply_outlier_detection(ux, uy, [MEDIAN_METHOD])
+    with_mask = apply_outlier_detection(ux, uy, [MEDIAN_METHOD], masked=masked)
+
+    colours = ["#e8e8e8", "#4d4d4d", "#d62728"]  # valid, masked, flagged
+    cmap = ListedColormap(colours)
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4.8), constrained_layout=True)
+    for ax, flags, label in (
+        (axes[0], without, "masked=None"),
+        (axes[1], with_mask, "masked given"),
+    ):
+        title = f"{label}: {int((flags & ~masked).sum())} valid nodes flagged"
+        state = np.zeros(ux.shape, dtype=int)
+        state[masked] = 1
+        state[flags & ~masked] = 2
+        ax.imshow(
+            state, cmap=cmap, vmin=0, vmax=2, origin="upper", interpolation="nearest"
+        )
+        ax.set_title(title)
+        ax.set_xlabel("window column index j (-)")
+        ax.set_ylabel("window row index i (-)")
+    fig.legend(
+        handles=[
+            Patch(color=c, label=lab)
+            for c, lab in zip(
+                colours, ["valid", "masked (stored 0)", "flagged outlier"]
+            )
+        ],
+        loc="outside lower center",
+        ncol=3,
+    )
+    fig.suptitle(
+        f"median_2d on uniform field (ux={UNIFORM_UX:g} px, uy=0) "
+        "with stair-step mask"
+    )
+    fig.savefig(output_dir / "test_outlier_masked_exclusion.png", dpi=150)
+    plt.close(fig)

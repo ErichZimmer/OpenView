@@ -592,9 +592,14 @@ def clean_disparity_field(
     dx: np.ndarray,
     dy: np.ndarray,
     peak_quality: np.ndarray,
+    spacing: Tuple[float, float],
     quality_threshold: float = 0.3,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Remove outliers and infill the disparity field."""
+    """Remove outliers and infill the disparity field.
+
+    ``spacing`` is the window-grid pitch (pitch_y, pitch_x) in pixels, used for
+    physical-distance nearest-neighbour infilling.
+    """
     # Mask low-quality points
     low_q = peak_quality < quality_threshold
     dx_c = dx.copy()
@@ -617,6 +622,7 @@ def clean_disparity_field(
         dx_c.astype(np.float32),
         dy_c.astype(np.float32),
         combined_mask,
+        spacing=spacing,
     )
     return dx_filled.astype(np.float64), dy_filled.astype(np.float64)
 
@@ -863,6 +869,7 @@ def run_self_calibration(
             dx_raw,
             dy_raw,
             peak_q,
+            (float(wc.win_spacing_y), float(wc.win_spacing_x)),
             quality_threshold,
         )
 

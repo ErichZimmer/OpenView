@@ -855,16 +855,12 @@ class SinglePassAccumulator:
                 # (analytic_floor_single) — P must describe the same chain the
                 # planes went through, so a unit envelope makes that divide a
                 # no-op when the plane divide is off.
-                env_for_floor = (
-                    env_auto if envelope_divide else np.ones_like(env_auto)
-                )
+                env_for_floor = env_auto if envelope_divide else np.ones_like(env_auto)
                 fs_grid, P_grid = build_P_grid(
                     env_for_floor, warp_kernel, hole, weight_B, n_fracs=n_fracs
                 )
                 P_win_flat = (
-                    interp_P(fs_grid, P_grid, fx, fy)
-                    .astype(np.float32)
-                    .reshape(-1)
+                    interp_P(fs_grid, P_grid, fx, fy).astype(np.float32).reshape(-1)
                 )
                 floor_meta = {
                     "f_frac_x": fx.reshape(n_win_y, n_win_x),
@@ -1277,8 +1273,14 @@ class SinglePassAccumulator:
                     if vector_mask is not None:
                         valid_for_detection = valid_for_detection & ~vector_mask
                     if valid_for_detection.any():
+                        # Masked windows hold 0 (not data): excluded from the
+                        # median neighbourhoods and never flagged.
                         detected_outliers = apply_outlier_detection(
-                            ux_mat, uy_mat, outlier_methods, peak_mag=peakheight
+                            ux_mat,
+                            uy_mat,
+                            outlier_methods,
+                            peak_mag=peakheight,
+                            masked=vector_mask,
                         )
                         # Only mark as outliers within valid detection region
                         outlier_mask |= detected_outliers & valid_for_detection
@@ -1309,6 +1311,15 @@ class SinglePassAccumulator:
         with self._profile_section(pass_idx, "infilling"):
             # --- Infilling ---
             infill_mask = outlier_mask.copy()
+            # Physical grid pitch; masked windows hold 0 (not data) and are never
+            # donors (they stay 0 in the output).
+            infill_geo = {
+                "spacing": (
+                    float(grid_result.win_spacing_y),
+                    float(grid_result.win_spacing_x),
+                ),
+                "exclude": vector_mask,
+            }
 
             if is_final_pass:
                 # Final pass: use final_pass config (may be disabled)
@@ -1330,41 +1341,41 @@ class SinglePassAccumulator:
 
                 # Infill displacement fields
                 ux_mat, uy_mat = apply_infilling(
-                    ux_mat, uy_mat, infill_mask, infill_cfg
+                    ux_mat, uy_mat, infill_mask, infill_cfg, **infill_geo
                 )
 
                 # Infill stress fields
                 UU_stress, VV_stress = apply_infilling(
-                    UU_stress, VV_stress, infill_mask, infill_cfg
+                    UU_stress, VV_stress, infill_mask, infill_cfg, **infill_geo
                 )
                 # UV_stress needs special handling (paired with zero array)
                 UV_temp = np.zeros_like(UV_stress)
                 UV_stress, _ = apply_infilling(
-                    UV_stress, UV_temp, infill_mask, infill_cfg
+                    UV_stress, UV_temp, infill_mask, infill_cfg, **infill_geo
                 )
 
                 # Infill sigma fields (A autocorrelation)
                 sig_A_x, sig_A_y = apply_infilling(
-                    sig_A_x, sig_A_y, infill_mask, infill_cfg
+                    sig_A_x, sig_A_y, infill_mask, infill_cfg, **infill_geo
                 )
                 sig_A_xy_temp = np.zeros_like(sig_A_xy)
                 sig_A_xy, _ = apply_infilling(
-                    sig_A_xy, sig_A_xy_temp, infill_mask, infill_cfg
+                    sig_A_xy, sig_A_xy_temp, infill_mask, infill_cfg, **infill_geo
                 )
 
                 # Infill sigma fields (AB cross-correlation)
                 sig_AB_x, sig_AB_y = apply_infilling(
-                    sig_AB_x, sig_AB_y, infill_mask, infill_cfg
+                    sig_AB_x, sig_AB_y, infill_mask, infill_cfg, **infill_geo
                 )
                 sig_AB_xy_temp = np.zeros_like(sig_AB_xy)
                 sig_AB_xy, _ = apply_infilling(
-                    sig_AB_xy, sig_AB_xy_temp, infill_mask, infill_cfg
+                    sig_AB_xy, sig_AB_xy_temp, infill_mask, infill_cfg, **infill_geo
                 )
 
                 # Infill peakheight (paired with zero array)
                 peakheight_temp = np.zeros_like(peakheight)
                 peakheight, _ = apply_infilling(
-                    peakheight, peakheight_temp, infill_mask, infill_cfg
+                    peakheight, peakheight_temp, infill_mask, infill_cfg, **infill_geo
                 )
 
         # =========================================================
@@ -1396,6 +1407,7 @@ class SinglePassAccumulator:
                         VV_stress,
                         stress_methods,
                         combine="per_component",
+                        masked=vector_mask,
                     )
 
                 # Realizability: Cauchy-Schwarz |UV|² ≤ UU·VV
@@ -1429,11 +1441,19 @@ class SinglePassAccumulator:
                     # Infill stress fields only (velocity is already good)
                     if infill_cfg.get("enabled", True):
                         UU_stress, VV_stress = apply_infilling(
-                            UU_stress, VV_stress, stress_outlier_mask, infill_cfg
+                            UU_stress,
+                            VV_stress,
+                            stress_outlier_mask,
+                            infill_cfg,
+                            **infill_geo,
                         )
                         UV_temp = np.zeros_like(UV_stress)
                         UV_stress, _ = apply_infilling(
-                            UV_stress, UV_temp, stress_outlier_mask, infill_cfg
+                            UV_stress,
+                            UV_temp,
+                            stress_outlier_mask,
+                            infill_cfg,
+                            **infill_geo,
                         )
                 else:
                     logging.info(
@@ -1461,9 +1481,12 @@ class SinglePassAccumulator:
                     f"Pass {pass_idx + 1}: Storing actual predictor field used for this pass "
                     f"(shape: {pred_x.shape})"
                 )
-            # Compute padded predictor from THIS pass's velocity field.
-            # This represents what will be fed to the next pass as the predictor
-            # (after edge-padding with n_pre/n_post boundary nodes).
+            # Edge-padded (n_pre/n_post nodes) copy of THIS pass's velocity field,
+            # as stored in the output. It is the UNFILLED predictor: masked windows
+            # are 0 here. Pass k+1 actually receives this field after the
+            # masked-window fill (masking.predictor_fill, done on the client in
+            # ensemble.py), then edge-padding, predictor BC row overrides and
+            # Gaussian smoothing (if enabled), none of which are applied here.
             # Previously this stored self.delta_ab_old from the correlator, which was
             # the padded predictor from the PREVIOUS pass — off by one.
             n_pre = pass_data.get("n_pre")

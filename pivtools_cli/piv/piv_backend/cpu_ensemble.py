@@ -772,7 +772,7 @@ class EnsembleCorrelatorCPU(CrossCorrelator):
         self.win_weights_B = cache.get("win_weights_B", [])
         self.window_sizes_for_corr = cache.get("window_sizes_for_corr", [])
         self.padding_per_pass = cache.get("padding_per_pass", [])
-        self.predictor_bcs = cache.get("predictor_bcs", [])
+        self.predictor_bcs = cache["predictor_bcs"]
 
     def get_cache_data(self) -> dict:
         """Extract cache data for sharing across workers."""
@@ -797,7 +797,7 @@ class EnsembleCorrelatorCPU(CrossCorrelator):
             "win_weights_B": self.win_weights_B,
             "window_sizes_for_corr": self.window_sizes_for_corr,
             "padding_per_pass": self.padding_per_pass,
-            "predictor_bcs": getattr(self, "predictor_bcs", []),
+            "predictor_bcs": self.predictor_bcs,
         }
 
     def correlate_batch(
@@ -960,12 +960,6 @@ class EnsembleCorrelatorCPU(CrossCorrelator):
                     images_b_prime, _ = apply_single_mode_padding(
                         images_b_prime, win_size, sum_window, pad_value=0.0
                     )
-                    H_padded, W_padded = images_a_prime.shape[-2:]
-                    image_size = np.ascontiguousarray(
-                        np.array([H_padded, W_padded], dtype=np.int32)
-                    )
-                else:
-                    image_size = np.ascontiguousarray(np.array([H, W], dtype=np.int32))
 
         except Exception as e:
             logging.error("Error preprocessing image: %s", e)
@@ -1316,12 +1310,6 @@ class EnsembleCorrelatorCPU(CrossCorrelator):
             images_b_centered, _ = apply_single_mode_padding(
                 images_b_centered, win_size, sum_window, pad_value=0.0
             )
-            H_padded, W_padded = images_a_centered.shape[-2:]
-            image_size = np.ascontiguousarray(
-                np.array([H_padded, W_padded], dtype=np.int32)
-            )
-        else:
-            image_size = np.ascontiguousarray(np.array([H, W], dtype=np.int32))
 
         # Correlate mean-subtracted images
         corr_size = self.window_sizes_for_corr[pass_idx]
@@ -1561,30 +1549,9 @@ class EnsembleCorrelatorCPU(CrossCorrelator):
 
             # --- Apply predictor boundary conditions ---
             if self.predictor_bcs:
-                padded_ctrs_y = self.win_ctrs_y_all[prev_pass]
-                for bc in self.predictor_bcs:
-                    bc_y_img = (
-                        float(self.H - 1 - bc["y_position"])
-                        if bc["edge"] == "bottom"
-                        else float(bc["y_position"])
-                    )
-                    bc_uy = bc["uy"]
-                    bc_ux = bc["ux"]
-
-                    if bc["edge"] == "bottom":
-                        mask = padded_ctrs_y >= bc_y_img
-                    else:  # "top"
-                        mask = padded_ctrs_y <= bc_y_img
-
-                    if mask.any():
-                        # predictor_field[..., 0] = uy, [.._, 1] = ux
-                        predictor_field[mask, :, 0] = bc_uy
-                        predictor_field[mask, :, 1] = bc_ux
-                        logging.debug(
-                            f"Pass {pass_idx}: Applied {bc['edge']} BC at "
-                            f"y_img={bc_y_img:.1f}: {mask.sum()} rows set to "
-                            f"ux={bc_ux}, uy={bc_uy}"
-                        )
+                self._apply_predictor_boundary_conditions(
+                    predictor_field, self.win_ctrs_y_all[prev_pass], pass_idx
+                )
 
         self.delta_ab_old = np.zeros_like(predictor_field).astype(np.float32)
         delta_ab_pred = np.zeros((n_win_y, n_win_x, 2), dtype=np.float32)

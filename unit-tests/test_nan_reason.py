@@ -127,7 +127,7 @@ class TestSecondaryPeakRescue:
         calls = {"n": 0}
         real_detect = cpu_instantaneous.apply_outlier_detection
 
-        def fake_detect(ux, uy, methods, peak_mag=None):
+        def fake_detect(ux, uy, methods, peak_mag=None, masked=None):
             calls["n"] += 1
             mask = np.zeros(ux.shape, dtype=bool)
             if calls["n"] == 1:  # primary-peak stage: flag the target only
@@ -155,7 +155,7 @@ class TestSecondaryPeakRescue:
         )
         target = (3, 3)
 
-        def fake_detect(ux, uy, methods, peak_mag=None):
+        def fake_detect(ux, uy, methods, peak_mag=None, masked=None):
             mask = np.zeros(ux.shape, dtype=bool)
             mask[target] = True  # reject on every stage
             return mask

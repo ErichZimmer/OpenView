@@ -699,3 +699,292 @@ class TestDiagnosticFigures:
         fig.savefig(str(out_path), dpi=150)
         plt.close(fig)
         print(f"  Figure saved: {out_path}")
+
+
+# ===================================================================
+# Part C: masked windows in the predictor (masking.predictor_fill)
+# ===================================================================
+# A left strip of the Poiseuille images is masked. Masked windows are stored as
+# 0; with predictor_fill='none' those zeros seed the next pass's predictor and
+# bias the columns beside the mask. Poiseuille ux is uniform along x, so the
+# columns beside the mask must match the interior once the mask is filled.
+
+PREDICTOR_FILLS = ("none", "nearest", "harmonic")
+MASK_LEFT_FRACTION = 0.25  # fraction of image width masked on the left
+N_EDGE_COLS = 3  # unmasked columns next to the mask that are scored
+EDGE_COL_GAP = 5  # columns skipped after the edge band before the interior band
+# A filled predictor must bring the edge band to interior accuracy: allowed
+# ratio to the interior error, plus an absolute floor for sampling noise [px].
+FILLED_EDGE_RATIO, FILLED_EDGE_FLOOR = 1.25, 0.01
+# With zeros the edge band measured 3.3-3.5x the interior error (instantaneous
+# 0.141 vs 0.043 px, 3 pairs; ensemble 0.209 vs 0.060 px, 10 pairs); require at
+# least 2x so the tests document the bias they guard.
+UNFILLED_EDGE_RATIO = 2.0
+
+
+def _masked_config(src, out, n_pairs, fill, *, ensemble):
+    params = _load_params()
+    left = int(params["image_shape"][1] * MASK_LEFT_FRACTION)
+    cfg = {
+        "calibration": {"active": "scale_factor"},
+        "paths": {
+            "source_paths": [str(src)],
+            "base_paths": [str(out)],
+            "camera_count": 1,
+            "camera_numbers": [1],
+        },
+        "images": {
+            "num_images": n_pairs,
+            "image_format": ["B%05d_A.tif", "B%05d_B.tif"],
+            "image_type": "standard",
+            "start_index": 1,
+            "frame_stride": 0,
+            "pair_stride": 1,
+            "pairing_preset": "ab_format",
+            "vector_format": ["B%05d.mat"],
+        },
+        "processing": {
+            "backend": "cpu",
+            "omp_threads": 4,
+            "dask_workers_per_node": 1,
+            "dask_memory_limit": "2GB",
+            "dask_max_in_flight_per_worker": 3,
+        },
+        "batches": {"batch_size": n_pairs},
+        "outlier_detection": {
+            "enabled": True,
+            "methods": [{"type": "median_2d", "threshold": 3.0, "epsilon": 0.1}],
+        },
+        "infilling": {
+            "mid_pass": {"method": "nearest", "parameters": {}},
+            "final_pass": {"method": "biharmonic", "parameters": {}},
+        },
+        "filters": [],
+        "masking": {
+            "enabled": True,
+            "mode": "rectangular",
+            "rectangular": {"top": 0, "bottom": 0, "left": left, "right": 0},
+            "mask_threshold": 0.01,
+            "predictor_fill": fill,
+        },
+    }
+    if ensemble:
+        cfg["ensemble_piv"] = {
+            "window_size": [[32, 32], [16, 16]],
+            "overlap": [50, 50],
+            "type": ["std", "std"],
+            "sum_window": [16, 16],
+            "runs": [1, 2],
+            "predictor_smoothing": False,
+        }
+        cfg["ensemble_outlier_detection"] = cfg["outlier_detection"]
+        cfg["ensemble_infilling"] = cfg["infilling"]
+    else:
+        cfg["instantaneous_piv"] = {
+            "window_size": [[64, 64], [32, 32], [16, 16]],
+            "overlap": [50],
+            "runs": [1, 2, 3],
+            "peak_finder": "gauss6",
+        }
+    return cfg
+
+
+def _edge_and_interior_error(ux, b_mask, image_height, u_max):
+    """Median |ux - Poiseuille| in the edge band beside the mask and in the interior."""
+    ny, nx = ux.shape
+    rows = np.linspace(0, image_height - 1, ny)
+    err = np.abs(ux - _poiseuille_ux_pixels(rows, image_height, u_max)[:, None])
+    mid = _interior_mask(ux.shape)[:, 0]
+    unmasked_cols = np.where(~b_mask.all(axis=0))[0]
+    edge = unmasked_cols[:N_EDGE_COLS]
+    interior = np.arange(edge[-1] + EDGE_COL_GAP, nx - N_EDGE_COLS)
+    return (
+        float(np.median(err[mid][:, edge])),
+        float(np.median(err[mid][:, interior])),
+        err[mid].mean(axis=0),
+    )
+
+
+def _run_masked(fill, *, ensemble, n_pairs):
+    from dask.distributed import Client
+
+    from pivtools_core.ensemble import run_ensemble_piv
+    from pivtools_core.image_handling.load_images import (
+        compute_vector_mask,
+        load_mask_for_camera,
+    )
+
+    params = _load_params()
+    tag = "ens" if ensemble else "inst"
+    ws = ENSEMBLE_DATA_DIR / f"test_workspace_masked_{tag}_{fill}"
+    if ws.exists():
+        _robust_rmtree(ws)
+    src, out = ws / "source", ws / "output"
+    src.mkdir(parents=True)
+    out.mkdir()
+    for idx in range(1, n_pairs + 1):
+        for suffix in ("_A.tif", "_B.tif"):
+            name = f"B{idx:05d}{suffix}"
+            shutil.copy2(ENSEMBLE_DATA_DIR / name, src / name)
+    cfg_path = ws / "config.yaml"
+    with open(cfg_path, "w") as f:
+        yaml.dump(
+            _masked_config(src, out, n_pairs, fill, ensemble=ensemble),
+            f,
+            default_flow_style=False,
+        )
+    reload_config()
+    config = Config(path=str(cfg_path))
+    pixel_mask = load_mask_for_camera(1, config)
+    vector_masks = compute_vector_mask(pixel_mask, config, ensemble=ensemble)
+
+    client = Client(processes=False, n_workers=1, threads_per_worker=1)
+    try:
+        if ensemble:
+            output_path = get_ensemble_output_path(
+                config, camera=1, use_uncalibrated=True
+            )
+            run_ensemble_piv(
+                config=config,
+                client=client,
+                camera_num=1,
+                source_path=src,
+                output_path=output_path,
+                base_path=out,
+                vector_masks=vector_masks,
+                pixel_mask=pixel_mask,
+            )
+        else:
+            output_path = get_output_path(
+                config, camera=1, use_uncalibrated=True, piv_type="instantaneous"
+            )
+            run_instantaneous_piv(
+                config=config,
+                client=client,
+                camera_num=1,
+                source_path=src,
+                output_path=output_path,
+                base_path=out,
+                vector_masks=vector_masks,
+                pixel_mask=pixel_mask,
+            )
+    finally:
+        client.close()
+
+    H, u_max = params["image_shape"][0], params["u_max"]
+    fields = []
+    if ensemble:
+        result, _ = load_ensemble_result(output_path / "ensemble_result.mat")
+        final = result.passes[-1]
+        fields.append((final.ux_mat.astype(float), np.asarray(final.b_mask, bool)))
+    else:
+        for idx in range(1, n_pairs + 1):
+            arr = read_mat_contents(str(output_path / f"B{idx:05d}.mat"), run_index=2)
+            fields.append((arr[0, 0].astype(float), arr[0, 2].astype(bool)))
+    edge, inter, profiles, masked_zero = [], [], [], True
+    for ux, bm in fields:
+        e, i, prof = _edge_and_interior_error(ux, bm, H, u_max)
+        edge.append(e)
+        inter.append(i)
+        profiles.append(prof)
+        masked_zero &= bool(np.all(ux[bm] == 0))
+    _robust_rmtree(ws)  # results are in memory; leave no untracked workspace
+    return {
+        "edge": float(np.mean(edge)),
+        "interior": float(np.mean(inter)),
+        "profile": np.mean(profiles, axis=0),
+        "masked_zero": masked_zero,
+        "n_masked_cols": int(fields[0][1].all(axis=0).sum()),
+    }
+
+
+def _skip_without_data():
+    if not PARAMS_PATH.exists() or not (ENSEMBLE_DATA_DIR / "B00001_A.tif").exists():
+        pytest.skip(
+            f"Synthetic data not found at {ENSEMBLE_DATA_DIR}. "
+            "Run: cd unit-tests && python generate_poiseuille_ensemble.py"
+        )
+
+
+@pytest.fixture(scope="module")
+def masked_instantaneous():
+    _skip_without_data()
+    return {f: _run_masked(f, ensemble=False, n_pairs=3) for f in PREDICTOR_FILLS}
+
+
+@pytest.fixture(scope="module")
+def masked_ensemble():
+    _skip_without_data()
+    return {f: _run_masked(f, ensemble=True, n_pairs=10) for f in PREDICTOR_FILLS}
+
+
+def _check_masked(results, label):
+    for fill, r in results.items():
+        print(
+            f"  [{label}] predictor_fill={fill:8s} edge {r['edge']:.4f} px, "
+            f"interior {r['interior']:.4f} px, masked cols {r['n_masked_cols']}"
+        )
+        assert r["masked_zero"], f"[{label}/{fill}] masked windows must stay 0"
+    for fill in ("nearest", "harmonic"):
+        r = results[fill]
+        assert r["edge"] <= FILLED_EDGE_RATIO * r["interior"] + FILLED_EDGE_FLOOR, (
+            f"[{label}/{fill}] edge band {r['edge']:.4f} px vs interior "
+            f"{r['interior']:.4f} px"
+        )
+
+
+class TestMaskedPredictorFill:
+    """Masked windows must not bias the columns beside the mask."""
+
+    def test_instantaneous(self, masked_instantaneous):
+        _check_masked(masked_instantaneous, "instantaneous")
+        r = masked_instantaneous["none"]
+        assert r["edge"] >= UNFILLED_EDGE_RATIO * r["interior"], (
+            "expected zeros in the predictor to bias the edge band "
+            f"(edge {r['edge']:.4f} px, interior {r['interior']:.4f} px)"
+        )
+
+    def test_ensemble(self, masked_ensemble):
+        _check_masked(masked_ensemble, "ensemble")
+        r = masked_ensemble["none"]
+        assert r["edge"] >= UNFILLED_EDGE_RATIO * r["interior"], (
+            "expected zeros in the predictor to bias the edge band "
+            f"(edge {r['edge']:.4f} px, interior {r['interior']:.4f} px)"
+        )
+
+    def test_figure(
+        self, masked_instantaneous, masked_ensemble, make_figures, output_dir
+    ):
+        if not make_figures:
+            pytest.skip("Pass --make-figures to generate diagnostic plots")
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+        for ax, (label, res) in zip(
+            axes,
+            (
+                ("instantaneous (3 pairs)", masked_instantaneous),
+                ("ensemble (10 pairs)", masked_ensemble),
+            ),
+        ):
+            for fill, r in res.items():
+                prof = r["profile"].copy()
+                prof[: r["n_masked_cols"]] = np.nan
+                ax.semilogy(prof, ".-", label=f"{fill}: edge {r['edge']:.3f} px")
+            ax.axvspan(
+                -0.5,
+                next(iter(res.values()))["n_masked_cols"] - 0.5,
+                color="0.85",
+                label="masked columns",
+            )
+            ax.set_xlabel("window column")
+            ax.set_ylabel("mean |ux - Poiseuille| over interior rows [px]")
+            ax.set_title(f"Masked left strip, final pass, {label}")
+            ax.legend(fontsize=8)
+            ax.grid(alpha=0.3, which="both")
+        fig.tight_layout()
+        fig.savefig(output_dir / "multipass_masked_predictor_fill.png", dpi=110)
+        plt.close(fig)
