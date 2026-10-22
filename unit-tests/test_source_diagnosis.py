@@ -1420,6 +1420,35 @@ def test_validate_files_passes_core_set_message_through(tmp_path, monkeypatch):
     assert not any(k.startswith("suggested_") for k in cam)
 
 
+def test_validate_files_plif_unsplittable_count_is_not_a_read_failure(
+    tmp_path, monkeypatch, clean_set_cache
+):
+    # Story (d): PLIF at count 2 does not split. The resolver's text is the error,
+    # not labelled a read failure, and the count that pairs is offered.
+    s = build_raw16_set(tmp_path, PLIF, name="run")
+    body = piv_route_response(
+        tmp_path,
+        monkeypatch,
+        paths={"source_paths": [str(s)], "camera_count": 2, "camera_numbers": [1, 2]},
+        images={
+            "image_type": "lavision_set",
+            "image_format": ["run.set"],
+            "pairing_preset": "pre_paired",
+            "frame_stride": 0,
+            "num_images": 1,
+        },
+    ).get_json()
+    cam = body["details"]["camera_1"]
+    assert cam["error"].startswith(
+        "run.set holds 5 frame streams, which cannot split into 2 cameras"
+    )
+    assert "Set file found but could not read" not in cam["error"]
+    assert cam["suggestions"][0]["apply"] == {
+        "camera_count": 3,
+        "camera_numbers": [2, 3],
+    }
+
+
 def test_validate_files_plif_pairing_error_is_not_a_read_failure(
     tmp_path, monkeypatch, clean_set_cache
 ):

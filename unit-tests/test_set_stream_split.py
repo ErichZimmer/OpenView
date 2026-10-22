@@ -239,3 +239,17 @@ def test_registry_set_reader_resolves_streams(tmp_path, clean_set_cache):
     s = build_raw16_set(tmp_path, PLIF, fill_with_index=True)
     pair = read_lavision_ims(str(s), camera_no=2, im_no=1, num_cameras=3)
     assert pair[0, 0, 0] == 100 and pair[1, 0, 0] == 200
+
+
+def test_resolver_config_errors_are_set_config_errors(tmp_path, clean_set_cache):
+    s = build_raw16_set(tmp_path, PLIF)
+    with pytest.raises(set_reader.SetConfigError, match=r"cannot split into 2"):
+        set_camera_streams(s, 2)
+    with pytest.raises(set_reader.SetConfigError, match=r"ambiguous"):
+        set_camera_streams(s, 4)
+    with pytest.raises(set_reader.SetConfigError, match=r"outside 1\.\.3"):
+        camera_streams(s, 4, 3, pair=False)
+    with pytest.raises(set_reader.SetPairingError):
+        camera_streams(s, 1, 3, pair=True)
+    assert issubclass(set_reader.SetPairingError, set_reader.SetConfigError)
+    assert issubclass(set_reader.SetConfigError, ValueError)

@@ -1166,12 +1166,16 @@ def valid_stream_splits(
     return extend(0, num_cameras)
 
 
-class SetPairingError(ValueError):
-    """A selected camera resolves to one stream where an A/B pair is needed.
+class SetConfigError(ValueError):
+    """The camera count or selection does not fit the recording's streams.
 
-    A configuration problem (camera count or selection), not a read failure, so
-    callers report its text as it stands.
+    No unique stream split, or a camera outside the count. A configuration
+    problem, not a read failure, so callers report its text as it stands.
     """
+
+
+class SetPairingError(SetConfigError):
+    """A selected camera resolves to one stream where an A/B pair is needed."""
 
 
 def _require_positive_cameras(num_cameras: int, set_path: Union[str, Path]) -> None:
@@ -1213,7 +1217,7 @@ def set_camera_streams(
         One tuple of 0-based stream indices per camera, in camera order.
 
     Raises:
-        ValueError: If no split fits, or more than one does (ambiguous).
+        SetConfigError: If no split fits, or more than one does (ambiguous).
     """
     _require_positive_cameras(num_cameras, set_path)
     info = set_info if set_info is not None else read_set_info(set_path)
@@ -1235,12 +1239,12 @@ def set_camera_streams(
     table = _stream_table(info)
     cameras = f"{num_cameras} camera" if num_cameras == 1 else f"{num_cameras} cameras"
     if not splits:
-        raise ValueError(
+        raise SetConfigError(
             f"{name} holds {len(shapes)} frame streams, which cannot split into "
             f"{cameras} of 1 or 2 consecutive streams (an A/B pair must "
             f"match in shape). Camera counts that fit: {fits}. Streams: {table}"
         )
-    raise ValueError(
+    raise SetConfigError(
         f"{name}: {len(splits)} different splits fit {cameras}, so the "
         f"stream->camera mapping is ambiguous. Camera counts that fit: {fits}. "
         f"Streams: {table}"
@@ -1264,14 +1268,14 @@ def camera_streams(
         set_info: pre-read container metadata.
 
     Raises:
-        ValueError: If ``camera`` is outside 1..num_cameras or the split is not
-            unique.
+        SetConfigError: If ``camera`` is outside 1..num_cameras or the split is
+            not unique.
         SetPairingError: If ``pair`` is set and the camera has a single stream.
     """
     _require_positive_cameras(num_cameras, set_path)
     name = Path(set_path).name
     if not 1 <= camera <= num_cameras:
-        raise ValueError(f"Camera {camera} is outside 1..{num_cameras} for {name}.")
+        raise SetConfigError(f"Camera {camera} is outside 1..{num_cameras} for {name}.")
     info = set_info if set_info is not None else read_set_info(set_path)
     streams = set_camera_streams(set_path, num_cameras, info)[camera - 1]
     if pair and len(streams) == 1:
