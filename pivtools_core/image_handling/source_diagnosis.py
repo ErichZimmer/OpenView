@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import (
     Any,
+    Callable,
     Dict,
     FrozenSet,
     List,
@@ -30,7 +31,11 @@ from typing import (
 )
 
 from .path_utils import normalise_source_path
-from .readers.set_reader import read_set_info, set_camera_streams
+from .readers.set_reader import (
+    read_set_info,
+    set_camera_streams,
+    valid_stream_splits,
+)
 
 # One-level scan caps. A source folder with tens of thousands of frames must not
 # stall the validate request, and a rule only needs a representative sample.
@@ -90,6 +95,15 @@ _SET_SUFFIX = ".set"
 # A stream's data file is ``{prefix}-1.ims`` (see IMSFrameInfo.data_path).
 _STREAM_DATA_SUFFIX = "-1.ims"
 _STREAM_INDEX_SUFFIX = "-0.ims"
+
+# Most ``.set`` suggestions one rule offers (several .set files, or several camera counts).
+SET_SUGGESTIONS_MAX = 5
+# A fix that edits camera selection in calibration also edits the Setup (and PIV) state.
+CROSS_STORE_SUFFIX: Dict[str, str] = {"set_streams": " (also changes Setup and PIV)"}
+DEFAULT_CROSS_STORE_SUFFIX = " (also changes Setup)"
+_CAMERA_APPLY_KEYS = ("camera_count", "camera_numbers")
+# A camera owns one stream (single frame) or two (an A/B pair).
+_PAIR_STREAMS = 2
 
 
 class Suggestion(TypedDict):
@@ -582,3 +596,246 @@ def found_for(
             return f"{head}, image size could not be read."
         return pass_sentence(ctx.camera_count, result["found_count"], unit, size)
     return scan_sentence(scan)
+
+
+@dataclass(frozen=True)
+class RuleInput:
+    """Everything a diagnosis rule may look at."""
+
+    scan: SourceScan
+    ctx: DiagnosisContext
+    camera: int
+    camera_path: Path
+    expected_count: Optional[int]
+
+
+Rule = Callable[[RuleInput], List[Suggestion]]
+
+
+def cross_store_label(
+    ctx: DiagnosisContext, rule_id: str, label: str, apply: Mapping[str, Any]
+) -> str:
+    """Append the cross-store note to ``label`` on calibration, for camera-selection fixes."""
+    if ctx.calibration and any(key in apply for key in _CAMERA_APPLY_KEYS):
+        return label + CROSS_STORE_SUFFIX.get(rule_id, DEFAULT_CROSS_STORE_SUFFIX)
+    return label
+
+
+def _is_set_file(path: Path) -> bool:
+    """True for a path whose name ends in ``.set``."""
+    return path.suffix.lower() == _SET_SUFFIX
+
+
+def rule_set_in_folder(inp: RuleInput) -> List[Suggestion]:
+    """The source is a folder holding ``.set`` files (or a missing ``.set`` beside some)."""
+    scan = inp.scan
+    if inp.ctx.image_type != "lavision_set" or scan.listed is None:
+        return []
+    folder_target = scan.exists and scan.is_dir
+    missing_set = (
+        not scan.exists
+        and _is_set_file(scan.path)
+        and scan.ancestor is not None
+        and scan.ancestor == scan.path.parent
+    )
+    if not (folder_target or missing_set):
+        return []
+    names = [n for n in scan.root_names if _is_set_file(Path(n))]
+    # Recordings with a data folder first; the sort is stable, so natural order holds.
+    names.sort(key=lambda n: not (scan.listed / n).with_suffix("").is_dir())
+    out: List[Suggestion] = []
+    for name in names[:SET_SUGGESTIONS_MAX]:
+        file = scan.listed / name
+        out.append(
+            make_suggestion(
+                "set_in_folder",
+                f"{scan.listed.as_posix()} holds the recording {name}. "
+                "Use the .set file itself as the source.",
+                f'Use "{name}"',
+                {"source_path": str(file)},
+            )
+        )
+    return out
+
+
+def rule_set_companion(inp: RuleInput) -> List[Suggestion]:
+    """The source is a ``.set`` recording's data folder (or a file in it)."""
+    scan = inp.scan
+    set_file = scan.companion_of
+    if set_file is None or not scan.exists or _is_set_file(scan.path):
+        return []
+    apply: Dict[str, Any] = {"source_path": str(set_file)}
+    if inp.ctx.image_type != "lavision_set":
+        apply["image_type"] = "lavision_set"
+    return [
+        make_suggestion(
+            "set_companion",
+            f"{scan.listed.as_posix()} is the data folder of {set_file.name}. "
+            "Use the .set file as the source.",
+            f'Use "{set_file.name}"',
+            apply,
+        )
+    ]
+
+
+def _and_join(items: Sequence[Any]) -> str:
+    """``2`` / ``2 and 3`` / ``1, 2 and 3``."""
+    texts = [str(i) for i in items]
+    return texts[0] if len(texts) == 1 else f"{', '.join(texts[:-1])} and {texts[-1]}"
+
+
+def _runs(numbers: Sequence[int]) -> List[str]:
+    """Collapse consecutive numbers into ``a\u2013b`` runs (``[2, 3, 5]`` -> ``["2\u20133", "5"]``)."""
+    out: List[str] = []
+    start = prev = None
+    for n in numbers:
+        if start is not None and n == prev + 1:
+            prev = n
+            continue
+        if start is not None:
+            out.append(str(start) if start == prev else f"{start}\u2013{prev}")
+        start = prev = n
+    if start is not None:
+        out.append(str(start) if start == prev else f"{start}\u2013{prev}")
+    return out
+
+
+def _cameras(count: int) -> str:
+    """``1 camera`` / ``3 cameras``."""
+    return _plural(count, "camera")
+
+
+def set_streams_message(
+    streams: Sequence[StreamInfo],
+    split: Sequence[Tuple[int, ...]],
+    process: Sequence[int],
+    pair_reader: bool,
+) -> str:
+    """Explain a stream split and what to set, e.g. for a PLIF camera beside A/B pairs.
+
+    ``split`` holds the 0-based stream indices of each camera, ``process`` the 1-based
+    cameras to process. "single frame, likely PLIF" is said only when the pair reader
+    is in use and the split also holds A/B pairs.
+    """
+    by_index = {s["index"]: s for s in streams}
+    has_pair = any(len(g) == _PAIR_STREAMS for g in split)
+    clauses: List[str] = []
+    pair_cams: List[int] = []
+    pair_streams: List[str] = []
+    for cam, group in enumerate(split, start=1):
+        if len(group) == _PAIR_STREAMS:
+            pair_cams.append(cam)
+            pair_streams.append(f"{group[0]}\u2013{group[-1]}")
+            continue
+        info = by_index[group[0]]
+        size = f"{info['width']}\u00d7{info['height']}"
+        note = (
+            f"{size}, single frame, likely PLIF" if pair_reader and has_pair else size
+        )
+        clauses.append(f"Camera {cam} = stream {group[0]} ({note})")
+    if pair_cams:
+        noun = "A/B pair" if len(pair_cams) == 1 else "A/B pairs"
+        clauses.append(
+            f"{'camera' if len(pair_cams) == 1 else 'cameras'} "
+            f"{_and_join(_runs(pair_cams))} = {noun} ({', '.join(pair_streams)})"
+        )
+    body = "; ".join(clauses)
+    body = body[0].upper() + body[1:]
+    k = len(split)
+    if list(process) == list(range(1, k + 1)):
+        tail = f"Set {_cameras(k)}."
+    else:
+        noun = "camera" if len(process) == 1 else "cameras"
+        tail = f"Set {_cameras(k)} and process {noun} {_and_join(process)}."
+    return f"{_plural(len(streams), 'stream')} = {_cameras(k)}. {body}. {tail}"
+
+
+def _stream_candidates(
+    shapes: Sequence[Tuple[int, int]], pair_reader: bool
+) -> List[Tuple[int, Tuple[Tuple[int, ...], ...]]]:
+    """Camera counts with a unique valid split, best first.
+
+    With the pair reader, a split with no A/B camera is dropped (it would select no
+    camera). Ranked by most A/B cameras, then fewest cameras.
+    """
+    found = []
+    for k in range(1, len(shapes) + 1):
+        splits = valid_stream_splits(shapes, k)
+        if len(splits) != 1:
+            continue
+        n_pairs = sum(len(g) == _PAIR_STREAMS for g in splits[0])
+        if pair_reader and n_pairs == 0:
+            continue
+        found.append((n_pairs, k, splits[0]))
+    found.sort(key=lambda item: (-item[0], item[1]))
+    return [(k, split) for _, k, split in found]
+
+
+def rule_set_streams(inp: RuleInput) -> List[Suggestion]:
+    """Offer a camera count (and selection) that fits a ``.set`` recording's streams."""
+    scan, ctx = inp.scan, inp.ctx
+    if not (scan.exists and not scan.is_dir and _is_set_file(scan.path)):
+        return []
+    try:
+        info = read_set_info(scan.path)
+    except Exception:  # any unreadable recording: ``found`` reports why, not this rule
+        return []
+    try:
+        split = set_camera_streams(scan.path, ctx.camera_count, info)
+    except ValueError:
+        return _count_suggestions(inp, info)
+    if not ctx.pair_reader:
+        return []
+    pairs = [
+        c
+        for c in sorted(set(ctx.camera_numbers))
+        if 1 <= c <= len(split) and len(split[c - 1]) == _PAIR_STREAMS
+    ]
+    has_single_selected = any(
+        1 <= c <= len(split) and len(split[c - 1]) != _PAIR_STREAMS
+        for c in ctx.camera_numbers
+    )
+    if not has_single_selected or not pairs:
+        return []
+    return [_streams_suggestion(inp, ctx.camera_count, split, pairs, False)]
+
+
+def _count_suggestions(inp: RuleInput, info: Any) -> List[Suggestion]:
+    """Suggestions for a camera count whose stream split does not resolve."""
+    ctx = inp.ctx
+    shapes = [(f.height, f.width) for f in info.frames]
+    out: List[Suggestion] = []
+    for k, split in _stream_candidates(shapes, ctx.pair_reader)[:SET_SUGGESTIONS_MAX]:
+        if ctx.pair_reader:
+            process = [c for c, g in enumerate(split, 1) if len(g) == _PAIR_STREAMS]
+        else:
+            process = list(range(1, k + 1))
+        out.append(_streams_suggestion(inp, k, split, process, True))
+    return out
+
+
+def _streams_suggestion(
+    inp: RuleInput,
+    camera_count: int,
+    split: Sequence[Tuple[int, ...]],
+    process: List[int],
+    change_count: bool,
+) -> Suggestion:
+    """Build one ``set_streams`` suggestion (label, message and ``apply``)."""
+    ctx = inp.ctx
+    apply: Dict[str, Any] = {"camera_numbers": process}
+    if change_count:
+        apply["camera_count"] = camera_count
+        label = f"Use {_cameras(camera_count)}"
+        if process != list(range(1, camera_count + 1)):
+            label += f", process {_and_join(process)}"
+    else:
+        noun = "camera" if len(process) == 1 else "cameras"
+        label = f"Process {noun} {_and_join(process)}"
+    streams = set_stream_infos(inp.scan.path, camera_count)
+    return make_suggestion(
+        "set_streams",
+        set_streams_message(streams, split, process, ctx.pair_reader),
+        cross_store_label(ctx, "set_streams", label, apply),
+        apply,
+    )

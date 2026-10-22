@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, os.path.dirname(__file__))
-from fixtures.diagnosis import make_ctx, touch, write_config  # noqa: E402
+from fixtures.diagnosis import _inp, make_ctx, touch, write_config  # noqa: E402
 from fixtures.lavision import (  # noqa: E402,F401
     PLIF,
     build_raw16_set,
@@ -29,9 +29,13 @@ from pivtools_core.image_handling.source_diagnosis import (  # noqa: E402
     found_for,
     make_suggestion,
     pass_sentence,
+    rule_set_companion,
+    rule_set_in_folder,
+    rule_set_streams,
     scan_sentence,
     scan_source,
     set_stream_infos,
+    set_streams_message,
     streams_sentence,
 )
 
@@ -436,3 +440,229 @@ def test_found_for_valid_and_invalid_results(tmp_path):
     )
     bad = found_for(scan_source(tmp_path), ctx, {"valid": False}, None, None)
     assert bad == scan_sentence(scan_source(tmp_path))
+
+
+# --- set rules ---
+
+
+def test_set_in_folder_one_set(tmp_path):
+    touch(tmp_path / "run", ["Frame0-0.ims"])
+    (tmp_path / "run.set").write_bytes(b"stub")
+    [s] = rule_set_in_folder(
+        _inp(tmp_path, image_type="lavision_set", image_format=("data.set",))
+    )
+    assert (s["id"], s["apply"], s["label"]) == (
+        "set_in_folder",
+        {"source_path": str(tmp_path / "run.set")},
+        'Use "run.set"',
+    )
+
+
+def test_set_in_folder_several_ranked_by_companion_and_capped(tmp_path):
+    for n in ("a", "b", "c", "d", "e", "f"):
+        (tmp_path / f"{n}.set").write_bytes(b"stub")
+    touch(tmp_path / "e", ["Frame0-0.ims"])
+    out = rule_set_in_folder(_inp(tmp_path, image_type="lavision_set"))
+    assert [s["label"] for s in out] == [
+        'Use "e.set"',
+        'Use "a.set"',
+        'Use "b.set"',
+        'Use "c.set"',
+        'Use "d.set"',
+    ]
+
+
+def test_set_in_folder_missing_set_names_sibling(tmp_path):
+    (tmp_path / "recording.set").write_bytes(b"stub")
+    [s] = rule_set_in_folder(_inp(tmp_path / "missing.set", image_type="lavision_set"))
+    assert s["apply"] == {"source_path": str(tmp_path / "recording.set")}
+
+
+def test_set_in_folder_silent_for_other_types(tmp_path):
+    (tmp_path / "run.set").write_bytes(b"stub")
+    assert rule_set_in_folder(_inp(tmp_path, image_type="standard")) == []
+
+
+def test_set_companion_dir_and_picked_ims(tmp_path):
+    touch(tmp_path / "run", ["Frame0-0.ims", "Frame0-1.ims"])
+    (tmp_path / "run.set").write_bytes(b"stub")
+    [d] = rule_set_companion(_inp(tmp_path / "run", image_type="lavision_set"))
+    assert d["apply"] == {"source_path": str(tmp_path / "run.set")}
+    [f] = rule_set_companion(
+        _inp(tmp_path / "run" / "Frame0-0.ims", image_type="lavision_im7")
+    )
+    assert f["apply"] == {
+        "source_path": str(tmp_path / "run.set"),
+        "image_type": "lavision_set",
+    }
+
+
+def test_set_companion_without_sibling_set_is_silent(tmp_path):
+    touch(tmp_path / "run", ["Frame0-0.ims"])
+    assert rule_set_companion(_inp(tmp_path / "run", image_type="lavision_set")) == []
+
+
+@pytest.mark.parametrize("count", [1, 2])
+def test_set_streams_plif_wrong_count(tmp_path, clean_set_cache, count):
+    s = build_raw16_set(tmp_path, PLIF)
+    out = rule_set_streams(
+        _inp(
+            s,
+            image_type="lavision_set",
+            camera_count=count,
+            camera_numbers=tuple(range(1, count + 1)),
+            pair_reader=True,
+        )
+    )
+    assert [(x["apply"], x["label"]) for x in out] == [
+        (
+            {"camera_count": 3, "camera_numbers": [2, 3]},
+            "Use 3 cameras, process 2 and 3",
+        )
+    ]
+
+
+def test_set_streams_plif_right_count_deselects_plif(tmp_path, clean_set_cache):
+    s = build_raw16_set(tmp_path, PLIF)
+    [x] = rule_set_streams(
+        _inp(
+            s,
+            image_type="lavision_set",
+            camera_count=3,
+            camera_numbers=(1, 2, 3),
+            pair_reader=True,
+        )
+    )
+    assert (x["apply"], x["label"]) == (
+        {"camera_numbers": [2, 3]},
+        "Process cameras 2 and 3",
+    )
+    assert (
+        rule_set_streams(
+            _inp(
+                s,
+                image_type="lavision_set",
+                camera_count=3,
+                camera_numbers=(2, 3),
+                pair_reader=True,
+            )
+        )
+        == []
+    )
+
+
+def test_set_streams_six_equal_count_one(tmp_path, clean_set_cache):
+    s = build_raw16_set(tmp_path, [(4, 6)] * 6)
+    [x] = rule_set_streams(
+        _inp(s, image_type="lavision_set", camera_count=1, pair_reader=True)
+    )
+    assert (x["apply"], x["label"]) == (
+        {"camera_count": 3, "camera_numbers": [1, 2, 3]},
+        "Use 3 cameras",
+    )
+
+
+@pytest.mark.parametrize("count", [1, 2, 3, 4, 5])
+def test_set_streams_five_equal_pair_reader_never_empty_selection(
+    tmp_path, clean_set_cache, count
+):
+    s = build_raw16_set(tmp_path, [(4, 6)] * 5)
+    assert (
+        rule_set_streams(
+            _inp(
+                s,
+                image_type="lavision_set",
+                camera_count=count,
+                camera_numbers=tuple(range(1, count + 1)),
+                pair_reader=True,
+            )
+        )
+        == []
+    )
+
+
+def test_set_streams_equal_resolution_blind_spot_offers_nothing(
+    tmp_path, clean_set_cache
+):
+    # 2 cameras: 1+2 or 2+1, ambiguous; 3 singles excluded
+    s = build_raw16_set(tmp_path, [(4, 6)] * 3)
+    assert (
+        rule_set_streams(
+            _inp(
+                s,
+                image_type="lavision_set",
+                camera_count=2,
+                camera_numbers=(1, 2),
+                pair_reader=True,
+            )
+        )
+        == []
+    )
+
+
+def test_set_streams_time_resolved_ranks_pairs_first(tmp_path, clean_set_cache):
+    s = build_raw16_set(tmp_path, PLIF)
+    out = rule_set_streams(
+        _inp(
+            s,
+            image_type="lavision_set",
+            camera_count=2,
+            camera_numbers=(1, 2),
+            pair_reader=False,
+        )
+    )
+    assert [x["apply"] for x in out] == [
+        {"camera_count": 3, "camera_numbers": [1, 2, 3]},
+        {"camera_count": 5, "camera_numbers": [1, 2, 3, 4, 5]},
+    ]
+
+
+def test_set_streams_calibration_label(tmp_path, clean_set_cache):
+    s = build_raw16_set(tmp_path, PLIF)
+    out = rule_set_streams(
+        _inp(s, image_type="lavision_set", camera_count=1, calibration=True)
+    )
+    assert out[0]["label"] == "Use 3 cameras (also changes Setup and PIV)"
+
+
+def test_set_streams_unreadable_set_is_silent(tmp_path, clean_set_cache):
+    (tmp_path / "bad.set").write_bytes(b"stub")
+    assert (
+        rule_set_streams(
+            _inp(tmp_path / "bad.set", image_type="lavision_set", pair_reader=True)
+        )
+        == []
+    )
+
+
+def test_set_streams_message_plif_verbatim():
+    streams = [
+        StreamInfo(
+            index=0,
+            prefix="Frame0",
+            width=2160,
+            height=2560,
+            decoder="mono-12p",
+            camera=1,
+        )
+    ] + [
+        StreamInfo(
+            index=i,
+            prefix=f"Frame{i}",
+            width=2048,
+            height=2048,
+            decoder="mono-12p",
+            camera=2 + (i - 1) // 2,
+        )
+        for i in range(1, 5)
+    ]
+    assert set_streams_message(streams, [(0,), (1, 2), (3, 4)], [2, 3], True) == (
+        "5 streams = 3 cameras. Camera 1 = stream 0 (2160\u00d72560, single frame, "
+        "likely PLIF); cameras 2\u20133 = A/B pairs (1\u20132, 3\u20134). "
+        "Set 3 cameras and process cameras 2 and 3."
+    )
+    # Time-resolved: no PLIF guess, and nothing to deselect.
+    assert set_streams_message(streams, [(0,), (1, 2), (3, 4)], [1, 2, 3], False) == (
+        "5 streams = 3 cameras. Camera 1 = stream 0 (2160\u00d72560); "
+        "cameras 2\u20133 = A/B pairs (1\u20132, 3\u20134). Set 3 cameras."
+    )

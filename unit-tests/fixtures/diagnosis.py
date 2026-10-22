@@ -6,7 +6,12 @@ from typing import Any, Iterable
 import yaml
 
 from pivtools_core.config import Config
-from pivtools_core.image_handling.source_diagnosis import DiagnosisContext
+from pivtools_core.image_handling.path_utils import camera_subfolder_name
+from pivtools_core.image_handling.source_diagnosis import (
+    DiagnosisContext,
+    RuleInput,
+    scan_source,
+)
 
 
 def make_ctx(source_path: Any, **overrides: Any) -> DiagnosisContext:
@@ -26,6 +31,21 @@ def make_ctx(source_path: Any, **overrides: Any) -> DiagnosisContext:
     )
     fields.update(overrides)
     return DiagnosisContext(**fields)
+
+
+def _inp(
+    source: Any, camera: int = 1, expected_count: int = 1, **ctx_overrides: Any
+) -> RuleInput:
+    """Build a ``RuleInput`` for ``source`` the way the validators do."""
+    ctx = make_ctx(source, **ctx_overrides)
+    camera_path = Path(source) / camera_subfolder_name(
+        ctx.image_type,
+        camera,
+        ctx.camera_count,
+        use_camera_subfolders=ctx.use_camera_subfolders,
+        camera_subfolders=ctx.camera_subfolders,
+    )
+    return RuleInput(scan_source(source), ctx, camera, camera_path, expected_count)
 
 
 def touch(folder: Path, names: Iterable[str]) -> None:
