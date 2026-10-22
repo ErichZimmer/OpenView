@@ -1144,8 +1144,14 @@ def valid_stream_splits(
         return []
 
     def extend(start: int, cameras_left: int) -> List[Tuple[Tuple[int, ...], ...]]:
+        # Prune: the remaining streams must be able to fill the remaining cameras
+        # (1..MAX each). Without this the walk is exponential on long, dead-end
+        # stream lists. It never drops a valid split, so results are unchanged.
+        remaining = n_streams - start
+        if not cameras_left <= remaining <= _MAX_STREAMS_PER_CAMERA * cameras_left:
+            return []
         if cameras_left == 0:
-            return [()] if start == n_streams else []
+            return [()]
         found: List[Tuple[Tuple[int, ...], ...]] = []
         for size in range(1, _MAX_STREAMS_PER_CAMERA + 1):
             end = start + size
@@ -1158,6 +1164,14 @@ def valid_stream_splits(
         return found
 
     return extend(0, num_cameras)
+
+
+def _require_positive_cameras(num_cameras: int, set_path: Union[str, Path]) -> None:
+    """Raise a clear ValueError for a camera count below 1."""
+    if num_cameras < 1:
+        raise ValueError(
+            f"Invalid camera count {num_cameras} for {Path(set_path).name}."
+        )
 
 
 def _stream_table(info: SetInfo) -> str:
@@ -1188,7 +1202,8 @@ def set_camera_streams(
     Raises:
         ValueError: If no split fits, or more than one does (ambiguous).
     """
-    info = set_info or read_set_info(set_path)
+    _require_positive_cameras(num_cameras, set_path)
+    info = set_info if set_info is not None else read_set_info(set_path)
     cached = info.stream_splits.get(num_cameras)
     if cached is not None:
         return list(cached)
@@ -1238,10 +1253,11 @@ def camera_streams(
         ValueError: If ``camera`` is outside 1..num_cameras, the split is not
             unique, or ``pair`` is set and the camera has a single stream.
     """
+    _require_positive_cameras(num_cameras, set_path)
     name = Path(set_path).name
     if not 1 <= camera <= num_cameras:
         raise ValueError(f"Camera {camera} is outside 1..{num_cameras} for {name}.")
-    info = set_info or read_set_info(set_path)
+    info = set_info if set_info is not None else read_set_info(set_path)
     streams = set_camera_streams(set_path, num_cameras, info)[camera - 1]
     if pair and len(streams) == 1:
         frame = info.frames[streams[0]]

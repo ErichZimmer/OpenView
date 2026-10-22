@@ -514,10 +514,12 @@ def _load_one(
     there is no second set of defaults to drift out of sync; every caller spreads
     ``**_loader_kwargs(...)``.
 
-    ``num_cameras`` is what lets a multi-camera container locate THIS camera's slice
-    (``.im7`` buffers, ``.set`` frame streams). It used to be omitted, leaving the stride at
-    1 — harmless for single-camera and per-file formats, wrong camera for a multi-camera
-    buffer, and impossible for ``.set`` (which now refuses rather than guess).
+    ``num_cameras`` is what lets a multi-camera container locate THIS camera's data.
+    For ``.im7`` buffers it sets the frame stride. For ``.set`` it feeds the shape-based
+    stream resolver (``set_reader.camera_streams``), which splits the container's frame
+    streams into cameras and refuses when the split is not unique. It used to be omitted,
+    leaving the stride at 1 — harmless for single-camera and per-file formats, wrong
+    camera for a multi-camera ``.im7`` buffer, and impossible for ``.set``.
     """
     img = read_calibration_frame_at(
         camera_path=cam_dir,
@@ -585,8 +587,8 @@ def _loader_kwargs(cfg: dict, image_format: str, num_cameras: int) -> dict:
     args (no own defaults), so this dict is the one place the values are decided.
 
     ``num_cameras`` is the rig camera count (``Config.camera_count``), not a settings key:
-    it is what locates a camera's slice inside a multi-camera ``.im7`` buffer or ``.set``
-    container, so it is threaded through here rather than defaulted per call site.
+    it locates a camera's slice inside a multi-camera ``.im7`` buffer (frame stride) and
+    feeds the shape-based stream resolver for a ``.set`` container, so it is threaded through here rather than defaulted per call site.
     """
     return {
         "image_type": infer_image_type(image_format),

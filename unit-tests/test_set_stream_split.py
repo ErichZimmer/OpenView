@@ -30,6 +30,7 @@ from pivtools_core.image_handling.readers.lavision_reader import (  # noqa: E402
 from pivtools_core.image_handling.readers.set_reader import (  # noqa: E402
     camera_streams,
     clear_set_info_cache,
+    read_set_pair,
     set_camera_streams,
     valid_stream_splits,
 )
@@ -55,6 +56,15 @@ def test_valid_splits_counts_partitions_when_shapes_equal():
     assert valid_stream_splits([(4, 6)] * 3, 3) == [((0,), (1,), (2,))]
     assert valid_stream_splits([(4, 6)] * 5, 2) == []  # max 4 streams for 2 cameras
     assert valid_stream_splits([(4, 6)] * 2, 0) == []
+
+
+def test_valid_splits_prune_keeps_long_dead_end_lists_fast():
+    # 24 equal-shape streams into 12 cameras has exactly one split (all pairs).
+    # Unpruned, the walk explores every 1/2 composition of the prefix; the prune
+    # cuts branches whose remaining streams cannot fill the remaining cameras.
+    assert valid_stream_splits([(4, 6)] * 24, 12) == [
+        tuple((2 * c, 2 * c + 1) for c in range(12))
+    ]
 
 
 def test_uniform_layouts_match_old_stride():
@@ -163,6 +173,33 @@ def test_plif_time_resolved_camera2_reads_stream_1_across_entries(
     assert (
         pair[0, 0, 0] == 100 and pair[1, 0, 0] == 101
     )  # first stream of camera 2, entries 1 and 2
+
+
+@pytest.mark.parametrize("num_cameras", [0, -1])
+def test_invalid_camera_count_raises_clearly(tmp_path, _clean_set_cache, num_cameras):
+    s = build_raw16_set(tmp_path, PLIF)
+    with pytest.raises(ValueError, match=rf"Invalid camera count {num_cameras} for"):
+        set_camera_streams(s, num_cameras)
+    with pytest.raises(ValueError, match=rf"Invalid camera count {num_cameras} for"):
+        camera_streams(s, 1, num_cameras, pair=False)
+
+
+def test_read_set_pair_rejects_wrong_tuple_length(tmp_path, _clean_set_cache):
+    s = build_raw16_set(tmp_path, PLIF)
+    with pytest.raises(ValueError, match=r"exactly two frame streams"):
+        read_set_pair(s, (1, 2, 3), 1)
+
+
+def test_read_set_pair_rejects_out_of_range_stream(tmp_path, _clean_set_cache):
+    s = build_raw16_set(tmp_path, PLIF)
+    with pytest.raises(ValueError, match=r"Frame stream 5 is outside 0\.\.4"):
+        read_set_pair(s, (1, 5), 1)
+
+
+def test_read_set_pair_rejects_shape_mismatch(tmp_path, _clean_set_cache):
+    s = build_raw16_set(tmp_path, PLIF)
+    with pytest.raises(ValueError, match=r"differ in shape"):
+        read_set_pair(s, (0, 1), 1)
 
 
 def test_prepaired_read_of_single_stream_camera_raises(tmp_path, _clean_set_cache):
