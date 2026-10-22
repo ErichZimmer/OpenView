@@ -675,7 +675,7 @@ def filter_images_endpoint():
                 pairs[pos] = future.result()
 
         arr = np.stack(pairs, axis=0)
-        return da.from_array(arr, chunks=(arr.shape[0], 2, *cfg.image_shape))
+        return da.from_array(arr, chunks=arr.shape)
 
     def process_and_store():
         global processing
