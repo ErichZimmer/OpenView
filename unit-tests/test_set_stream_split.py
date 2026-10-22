@@ -7,7 +7,6 @@ shape) and refuses anything but exactly one valid partition.
 """
 
 import os
-import shutil
 import sys
 from pathlib import Path
 
@@ -114,20 +113,19 @@ def test_split_is_computed_once_per_container(tmp_path, _clean_set_cache, monkey
 
 
 def test_split_cache_follows_set_info_invalidation(tmp_path, _clean_set_cache):
-    s = build_raw16_set(tmp_path, [(4, 6)] * 4, name="grow")
+    s = build_raw16_set(tmp_path, [(4, 6)] * 4, name="shrink")
     assert set_camera_streams(s, 2) == [(0, 1), (2, 3)]
 
-    # Grow the container to 6 streams: add Frame4/5 files and bump the mtimes that
-    # _set_info_cache_key stats (the .set file and its companion folder).
-    (tmp_path / "x").mkdir()
-    donor = build_raw16_set(tmp_path / "x", [(4, 6)] * 6, name="grow")
-    for stream in (4, 5):
-        for src in (donor.parent / "grow").glob(f"Frame{stream}-*"):
-            shutil.move(str(src), str(tmp_path / "grow" / src.name))
-    st = s.stat()
-    os.utime(s, (st.st_atime, st.st_mtime + 10))
-    folder = tmp_path / "grow"
-    fst = folder.stat()
-    os.utime(folder, (fst.st_atime, fst.st_mtime + 10))
+    # Shrink the container to 2 streams and bump the mtimes that
+    # _set_info_cache_key stats (the .set file and its companion folder). The
+    # camera count stays 2, so a stale stream_splits entry would return the old
+    # split instead of [(0,), (1,)].
+    folder = tmp_path / "shrink"
+    for stream in (2, 3):
+        for f in folder.glob(f"Frame{stream}-*"):
+            f.unlink()
+    for path in (s, folder):
+        st = path.stat()
+        os.utime(path, (st.st_atime, st.st_mtime + 10))
 
-    assert set_camera_streams(s, 3) == [(0, 1), (2, 3), (4, 5)]
+    assert set_camera_streams(s, 2) == [(0,), (1,)]
