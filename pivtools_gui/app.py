@@ -10,6 +10,7 @@ import threading
 import time
 import webbrowser
 from pathlib import Path
+from typing import Optional
 
 import dask
 import dask.array as da
@@ -587,6 +588,20 @@ def preload_images():
     )
 
 
+def _source_path_idx_error(idx: object, n_sources: int) -> Optional[str]:
+    """Return an error message when ``idx`` is not a valid index into the sources.
+
+    Strict on purpose. A bool, a string or any non-int is rejected, and so is a
+    negative index (Python would silently read another source).
+    """
+    if isinstance(idx, bool) or not isinstance(idx, int) or not 0 <= idx < n_sources:
+        return (
+            f"source_path_idx {idx} is out of range: "
+            f"{n_sources} source paths configured"
+        )
+    return None
+
+
 @api_bp.route("/filter", methods=["POST"])
 def filter_images_endpoint():
     global processing
@@ -602,7 +617,9 @@ def filter_images_endpoint():
     source_path_idx = data.get("source_path_idx")
     if source_path_idx is None:
         source_path_idx = 0
-    source_path_idx = int(source_path_idx)
+    idx_error = _source_path_idx_error(source_path_idx, len(cfg.source_paths))
+    if idx_error:
+        return jsonify({"error": idx_error}), 400
 
     if filters is not None:
         cfg.data["filters"] = filters
@@ -783,6 +800,9 @@ def filter_single_frame():
     frame_idx = int(data.get("frame_idx", 1))
     filters = data.get("filters", [])
     source_path_idx = data.get("source_path_idx", 0)
+    idx_error = _source_path_idx_error(source_path_idx, len(cfg.source_paths))
+    if idx_error:
+        return jsonify({"error": idx_error}), 400
     # Optional manual display window (processed intensity units); absent = auto
     try:
         display_bounds = parse_display_bounds(data.get("vmin"), data.get("vmax"))
@@ -922,21 +942,9 @@ def validate_files():
     source_path_idx = data.get("source_path_idx", 0)
 
     cfg = get_config()
-    n_sources = len(cfg.source_paths)
-    if (
-        isinstance(source_path_idx, bool)
-        or not isinstance(source_path_idx, int)
-        or not 0 <= source_path_idx < n_sources
-    ):
-        return (
-            jsonify(
-                {
-                    "error": f"source_path_idx {source_path_idx} is out of range: "
-                    f"{n_sources} source paths configured"
-                }
-            ),
-            400,
-        )
+    idx_error = _source_path_idx_error(source_path_idx, len(cfg.source_paths))
+    if idx_error:
+        return jsonify({"error": idx_error}), 400
 
     camera_numbers = cfg.camera_numbers
     results = {}

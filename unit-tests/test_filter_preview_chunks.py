@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from typing import Any, List
 
 import numpy as np
+import pytest
 from flask import Flask
 
 from pivtools_core.config import Config
@@ -64,3 +65,63 @@ def test_filter_preview_chunks_ignore_cfg_image_shape(
     assert response.status_code == 200
     assert seen, "apply_filters_to_batch was never reached"
     assert seen[0][1:] == (2, *FRAME_SHAPE)
+
+
+def _client(tmp_path: Any, monkeypatch: Any) -> Any:
+    from fixtures.diagnosis import write_config
+
+    import pivtools_gui.app as gui_app
+
+    write_config(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    app = Flask(__name__)
+    app.register_blueprint(gui_app.api_bp)
+    return app.test_client()
+
+
+@pytest.mark.parametrize("idx", [3, -1, "0"])
+def test_filter_rejects_out_of_range_source_idx(
+    tmp_path: Any, monkeypatch: Any, idx: Any
+) -> None:
+    """A bad index is a 400 before any worker thread starts (was a silent 200)."""
+    import pivtools_gui.app as gui_app
+
+    class NoThread:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def start(self) -> None:
+            raise AssertionError("thread started")
+
+    monkeypatch.setattr(gui_app, "threading", SimpleNamespace(Thread=NoThread))
+    response = _client(tmp_path, monkeypatch).post(
+        "/backend/filter", json={"camera": 1, "start_idx": 1, "source_path_idx": idx}
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()["error"] == (
+        f"source_path_idx {idx} is out of range: 1 source paths configured"
+    )
+
+
+@pytest.mark.parametrize("idx", [-1, 3])
+def test_filter_single_frame_rejects_out_of_range_source_idx(
+    tmp_path: Any, monkeypatch: Any, idx: int
+) -> None:
+    """Negative (silently another source today) and too-large indices are a 400 before any read."""
+    import pivtools_gui.app as gui_app
+
+    def no_read(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("read attempted")
+
+    monkeypatch.setattr(gui_app, "read_pair", no_read)
+    monkeypatch.setattr(gui_app, "_resolve_loop_read", no_read)
+    response = _client(tmp_path, monkeypatch).post(
+        "/backend/filter_single_frame",
+        json={"camera": 1, "frame_idx": 1, "filters": [], "source_path_idx": idx},
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()["error"] == (
+        f"source_path_idx {idx} is out of range: 1 source paths configured"
+    )
