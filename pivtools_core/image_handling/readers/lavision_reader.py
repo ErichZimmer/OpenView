@@ -5,12 +5,11 @@ No dependency on lvpyio — works on macOS, Linux, and Windows.
 """
 
 import os
-from typing import Optional
 
 import numpy as np
 
 from .im7_reader import read_im7_camera
-from .set_reader import read_set_pair
+from .set_reader import camera_streams, read_set_pair
 
 
 def read_lavision_im7(
@@ -59,13 +58,15 @@ def read_lavision_pair(file_path: str, camera_no: int = 1, **kwargs) -> np.ndarr
 
 def read_lavision_ims(
     file_path: str,
-    camera_no: Optional[int] = None,
-    im_no: Optional[int] = None,
+    camera_no: int,
+    im_no: int,
+    num_cameras: int,
 ) -> np.ndarray:
     """Read a pre-paired frame pair from a .set file.
 
-    Reads frames[2*(camera_no-1)] and frames[2*(camera_no-1)+1] from entry
-    im_no. Time-resolved .set reading is not a pair-reader concern: the
+    Resolves the camera's two frame streams by shape
+    (:func:`set_reader.camera_streams`, ``pair=True``) and reads them from entry
+    ``im_no``. Time-resolved .set reading is not a pair-reader concern: the
     production path assembles it from set_reader.read_set_frame (see
     load_images.read_pair).
 
@@ -73,14 +74,17 @@ def read_lavision_ims(
         file_path: Path to the .set file
         camera_no: Camera number (1-based)
         im_no: Image/entry number (1-based)
+        num_cameras: Number of cameras the recording is split into
 
     Returns:
         np.ndarray: Array of shape (2, H, W) float32
-    """
-    if camera_no is None or im_no is None:
-        raise ValueError("camera_no and im_no must be provided for .set files")
 
-    return read_set_pair(file_path, camera_no=camera_no, im_no=im_no)
+    Raises:
+        ValueError: If the container cannot be split into ``num_cameras``
+            cameras, or the camera does not own an A/B stream pair.
+    """
+    streams = camera_streams(file_path, camera_no, num_cameras, pair=True)
+    return read_set_pair(file_path, streams, im_no)
 
 
 def read_lavision_ims_pair(file_path: str, **kwargs) -> np.ndarray:

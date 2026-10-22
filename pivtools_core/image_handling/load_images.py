@@ -42,6 +42,7 @@ def read_single_frame(
     frame_idx: int,
     image_type: str,
     frames_per_camera: int = 1,
+    num_cameras: Optional[int] = None,
 ) -> np.ndarray:
     """Read a single frame from any supported image format.
 
@@ -71,14 +72,13 @@ def read_single_frame(
         frame_idx: Frame index within the file/container (1-based)
         image_type: One of "lavision_set", "lavision_im7", "cine", "standard"
         frames_per_camera: How many frames each camera occupies in a
-                      multi-camera container, used to locate this camera's
-                      slice as ``(camera-1) * frames_per_camera``. Applies to
-                      .im7 buffers and .set frame streams alike: 2 for
-                      pre-paired A/B, 1 for time-resolved. Default 1; callers
-                      reading multi-camera double-frame data pass the detected
-                      value (``_detect_im7_frames_per_camera`` /
-                      ``_detect_set_frames_per_camera``).
-
+                      multi-camera .im7 buffer, used to locate this camera's
+                      slice as ``(camera-1) * frames_per_camera`` (2 for
+                      pre-paired A/B, 1 for time-resolved). Callers pass the
+                      value from ``_detect_im7_frames_per_camera``. Unused for
+                      .set, which resolves streams by shape.
+        num_cameras: Configured camera count. Required for ``lavision_set``,
+                      where it drives the shape-based stream split.
     Returns:
         np.ndarray: Single frame of shape (H, W)
 
@@ -94,20 +94,21 @@ def read_single_frame(
             raise FileNotFoundError(f"Image file not found: {file_path}")
 
     if image_type == "lavision_set":
-        # .set container: every camera's frame streams live in one container,
-        # so this camera's frame A is stream (camera-1)*frames_per_camera —
-        # the same positional rule a multi-camera .im7 buffer uses. Entries are
-        # the time axis; the stream index is the camera/frame axis.
+        # .set container: every camera's frame streams live in one container.
+        # Which streams a camera owns comes from the shape-based split
+        # (camera_streams), not from a positional stride; a single frame is the
+        # camera's first stream. Entries are the time axis.
         # ``frame_idx`` is the 1-based ENTRY number. Containers have no filenames
-        # to number, so ``zero_based_indexing`` does not apply here — a source
+        # to number, so ``zero_based_indexing`` does not apply here -- a source
         # configured with start_index 0 asks for entry 0 and fails loudly.
-        from .readers.set_reader import read_set_frame
+        from .readers.set_reader import camera_streams, read_set_frame
 
-        return read_set_frame(
-            file_path,
-            entry_no=frame_idx,
-            frame_idx=(camera - 1) * frames_per_camera,
-        )
+        if num_cameras is None:
+            raise ValueError(
+                "read_single_frame needs num_cameras to read a .set container"
+            )
+        stream_idx = camera_streams(file_path, camera, num_cameras, pair=False)[0]
+        return read_set_frame(file_path, entry_no=frame_idx, frame_idx=stream_idx)
 
     elif image_type == "lavision_im7":
         # .im7 file: may contain single frame or A+B pair
@@ -191,56 +192,6 @@ def _detect_im7_frames_per_camera(im7_path: Path, num_cameras: int) -> int:
     raise ValueError(
         f"{im7_path.name} holds {size_f} frames, which is not 1 or 2 frames per "
         f"camera for the configured {num_cameras} cameras. Expected {expected}."
-    )
-
-
-def _detect_set_frames_per_camera(set_path: Path, num_cameras: int) -> int:
-    """Derive how many frame streams each camera occupies in a .set container.
-
-    A .set stores one ``Frame{N}`` stream per camera per frame slot, so a camera's
-    frame A is stream ``(camera-1) * frames_per_camera``. Which stride that is
-    depends on the recording: a pre-paired acquisition gives each camera an A and
-    a B stream (2), a time-resolved one gives each camera a single stream and
-    pairs across entries (1). The container itself cannot distinguish the two —
-    four streams is equally 2 cameras x A/B or 4 cameras x single — so the stride
-    is derived from the configured camera count, exactly as
-    :func:`_detect_im7_frames_per_camera` does for an .im7 buffer. Fails loudly
-    unless the result is exactly 1 or 2: anything else means the configured
-    camera count doesn't match the container, not something to guess past.
-
-    Args:
-        set_path: Path to the .set file (index/XML parse only, no pixel decode).
-        num_cameras: Configured number of physical cameras in the container.
-
-    Returns:
-        int: frame streams per camera (2 for pre-paired A/B, 1 for
-        time-resolved — the only two layouts a .set recording can hold).
-
-    Raises:
-        ValueError: If num_cameras < 1, or if the derived streams-per-camera is
-            not 1 or 2. Divisibility alone is NOT sufficient: 10 streams with
-            camera_count 2 divides to 5, and locating camera slices at stride 5
-            silently returns another camera's pixels. Only the two physically
-            meaningful strides are accepted.
-    """
-    from .readers.set_reader import read_set_info
-
-    if num_cameras < 1:
-        raise ValueError(f"Invalid camera count {num_cameras} for {set_path.name}")
-    n_streams = len(read_set_info(set_path).frames)
-    if n_streams % num_cameras == 0 and n_streams // num_cameras in (1, 2):
-        return n_streams // num_cameras
-    if n_streams % 2 == 0:
-        expected = (
-            f"{n_streams // 2} cameras (pre-paired A/B) or "
-            f"{n_streams} (time-resolved)"
-        )
-    else:
-        expected = f"{n_streams} cameras (time-resolved)"
-    raise ValueError(
-        f"{set_path.name} holds {n_streams} frame streams, which is not 1 or 2 "
-        f"streams per camera for the configured {num_cameras} cameras. "
-        f"Expected {expected}."
     )
 
 
@@ -340,20 +291,17 @@ def read_pair(
         set_file_path = camera_path
 
         if config.time_resolved:
-            # Time-resolved: this camera's single stream, read at two entries.
-            # The stride is derived rather than assumed to be 1, so a container
-            # that turns out to hold A/B streams still lands on frame A.
-            from .readers.set_reader import read_set_frame, read_set_info
+            # Time-resolved: this camera's first stream, read at two entries.
+            from .readers.set_reader import (
+                camera_streams,
+                read_set_frame,
+                read_set_info,
+            )
 
-            fpc = _detect_set_frames_per_camera(set_file_path, config.camera_count)
-            info = read_set_info(set_file_path)  # cached; the line above populated it
-            stream_idx = (camera - 1) * fpc
-            if stream_idx >= len(info.frames):
-                raise ValueError(
-                    f"Camera {camera} at {fpc} stream(s) per camera requires frame "
-                    f"stream {stream_idx}, but {Path(set_file_path).name} holds only "
-                    f"{len(info.frames)}."
-                )
+            info = read_set_info(set_file_path)
+            stream_idx = camera_streams(
+                set_file_path, camera, config.camera_count, pair=False, set_info=info
+            )[0]
 
             # Decode both frames straight into one pair buffer. Routing through
             # read_single_frame would allocate each frame via astype and then copy
@@ -377,11 +325,12 @@ def read_pair(
             return result
         else:
             # Pre-paired: A+B frames in one entry - read directly
-            from .readers.set_reader import read_set_pair
+            from .readers.set_reader import camera_streams, read_set_pair
 
-            return _written(
-                read_set_pair(set_file_path, camera_no=camera, im_no=idx, out=out), out
+            streams = camera_streams(
+                set_file_path, camera, config.camera_count, pair=True
             )
+            return _written(read_set_pair(set_file_path, streams, idx, out=out), out)
 
     elif image_type == "lavision_im7":
         from .readers.im7_reader import read_im7_camera

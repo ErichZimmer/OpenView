@@ -561,22 +561,17 @@ def _read_native_frame(
             img = img[0]  # Extract single frame
         return img
 
-    # Multi-camera containers (.im7 buffers, .set frame streams) interleave every
-    # camera's frames, so this camera's slice is located as
-    # (camera-1) * frames_per_camera. Detect that stride rather than assume it —
-    # the same rule the PIV path uses. ``num_cameras`` is required (not defaulted
-    # to 1) precisely because a stride of 1 on a multi-camera container returns a
-    # DIFFERENT camera's pixels without failing: silently wrong data, not a
-    # visible error.
+    # A multi-camera .im7 buffer interleaves every camera's frames, so this
+    # camera's slice is located as (camera-1) * frames_per_camera. Detect that
+    # stride rather than assume it. ``num_cameras`` is required (not defaulted
+    # to 1) because a wrong layout on a multi-camera container returns a
+    # DIFFERENT camera's pixels without failing. A .set container needs no stride;
+    # read_single_frame resolves its streams by shape from ``num_cameras``.
     fpc = 1
     if image_type == "lavision_im7":
         from .load_images import _detect_im7_frames_per_camera
 
         fpc = _detect_im7_frames_per_camera(Path(file_path), num_cameras)
-    elif image_type == "lavision_set":
-        from .load_images import _detect_set_frames_per_camera
-
-        fpc = _detect_set_frames_per_camera(Path(file_path), num_cameras)
 
     # Unified core reader (locates this camera's slice in multi-camera containers).
     return read_single_frame(
@@ -585,6 +580,7 @@ def _read_native_frame(
         frame_idx=frame_idx,
         image_type=image_type,
         frames_per_camera=fpc,
+        num_cameras=num_cameras,
     )
 
 

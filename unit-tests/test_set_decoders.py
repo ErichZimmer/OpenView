@@ -117,7 +117,7 @@ def test_pre_paired_pair_reads_both_streams(tmp_path):
         height=2,
     )
 
-    pair = read_set_pair(set_file, camera_no=1, im_no=1)
+    pair = read_set_pair(set_file, (0, 1), 1)
 
     assert pair.shape == (2, 2, 4)
     assert pair.dtype == np.float32
@@ -612,7 +612,7 @@ def test_read_set_pair_without_set_info_uses_the_cache(
     calls = _count_parses(monkeypatch)
 
     for im_no in (1, 2, 3):
-        read_set_pair(set_file, camera_no=1, im_no=im_no)
+        read_set_pair(set_file, (0, 1), im_no)
 
     assert len(calls) == 1, f"expected one parse for three pairs, got {len(calls)}"
 
@@ -1054,7 +1054,7 @@ def test_pre_paired_read_refuses_mismatched_stream_shapes(tmp_path, _clean_set_c
     as such rather than surfacing as a numpy broadcast error."""
     set_file, _, _ = _camera_layout(tmp_path)
     with pytest.raises(ValueError, match=r"streams 0 \(3x4\) and 1 \(5x6\)"):
-        read_set_pair(set_file, camera_no=1, im_no=1)
+        read_set_pair(set_file, (0, 1), 1)
 
 
 if __name__ == "__main__":

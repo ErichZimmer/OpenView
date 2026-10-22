@@ -854,20 +854,15 @@ class Config:
                 # count) and could return a wrong stream's shape on a
                 # mixed-resolution rig (alk235's five cameras span 3472-3536
                 # rows, so "any stream's shape" is not this camera's shape).
-                from .image_handling.load_images import (
-                    _detect_set_frames_per_camera,
+                from .image_handling.readers.set_reader import (
+                    camera_streams,
+                    read_set_info,
                 )
-                from .image_handling.readers.set_reader import read_set_info
 
                 info = read_set_info(file_path)
-                fpc = _detect_set_frames_per_camera(file_path, self.camera_count)
-                stream_idx = (camera_num - 1) * fpc
-                if stream_idx >= len(info.frames):
-                    raise ValueError(
-                        f"Camera {camera_num} at {fpc} stream(s) per camera "
-                        f"requires frame stream {stream_idx}, but "
-                        f"{file_path.name} holds only {len(info.frames)}."
-                    )
+                stream_idx = camera_streams(
+                    file_path, camera_num, self.camera_count, pair=False, set_info=info
+                )[0]
                 fi = info.frames[stream_idx]
                 shape = (fi.height, fi.width)
                 logging.debug(f"Detected image shape: {shape}")

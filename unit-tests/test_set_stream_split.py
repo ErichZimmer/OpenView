@@ -14,9 +14,19 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from fixtures.lavision import build_raw16_set  # noqa: E402
+from fixtures.lavision import build_raw16_set, make_set_config  # noqa: E402
 
+from pivtools_core.image_handling.calibration_loader import (  # noqa: E402
+    _read_native_frame,
+)
+from pivtools_core.image_handling.load_images import (  # noqa: E402
+    read_pair,
+    read_single_frame,
+)
 from pivtools_core.image_handling.readers import set_reader  # noqa: E402
+from pivtools_core.image_handling.readers.lavision_reader import (  # noqa: E402
+    read_lavision_ims,
+)
 from pivtools_core.image_handling.readers.set_reader import (  # noqa: E402
     camera_streams,
     clear_set_info_cache,
@@ -129,3 +139,70 @@ def test_split_cache_follows_set_info_invalidation(tmp_path, _clean_set_cache):
         os.utime(path, (st.st_atime, st.st_mtime + 10))
 
     assert set_camera_streams(s, 2) == [(0,), (1,)]
+
+
+def test_plif_camera2_prepaired_reads_streams_1_2(tmp_path, _clean_set_cache):
+    s = build_raw16_set(tmp_path, PLIF, n_entries=2, fill_with_index=True)
+    cfg = make_set_config(
+        tmp_path, s, camera_count=3, camera_numbers=[2, 3], frame_stride=0
+    )
+    pair = read_pair(1, s, 2, cfg)
+    assert pair[0, 0, 0] == 100 and pair[1, 0, 0] == 200  # streams 1, 2 -- not 2, 3
+    pair3 = read_pair(1, s, 3, cfg)
+    assert pair3[0, 0, 0] == 300 and pair3[1, 0, 0] == 400
+
+
+def test_plif_time_resolved_camera2_reads_stream_1_across_entries(
+    tmp_path, _clean_set_cache
+):
+    s = build_raw16_set(tmp_path, PLIF, n_entries=2, fill_with_index=True)
+    cfg = make_set_config(
+        tmp_path, s, camera_count=3, camera_numbers=[2, 3], frame_stride=1
+    )
+    pair = read_pair(1, s, 2, cfg)
+    assert (
+        pair[0, 0, 0] == 100 and pair[1, 0, 0] == 101
+    )  # first stream of camera 2, entries 1 and 2
+
+
+def test_prepaired_read_of_single_stream_camera_raises(tmp_path, _clean_set_cache):
+    s = build_raw16_set(tmp_path, PLIF)
+    cfg = make_set_config(
+        tmp_path, s, camera_count=3, camera_numbers=[1, 2, 3], frame_stride=0
+    )
+    with pytest.raises(ValueError, match=r"Camera 1 has one stream"):
+        read_pair(1, s, 1, cfg)
+
+
+def test_plif_shape_probe_uses_first_selected_camera(tmp_path, _clean_set_cache):
+    s = build_raw16_set(tmp_path, PLIF)
+    dir_a, dir_b = tmp_path / "a", tmp_path / "b"
+    dir_a.mkdir()
+    dir_b.mkdir()
+    assert make_set_config(dir_a, s, 3, [2, 3], frame_stride=0).image_shape == (4, 6)
+    assert make_set_config(dir_b, s, 3, [1, 2, 3], frame_stride=1).image_shape == (6, 8)
+
+
+def test_plif_calibration_camera2_reads_stream_1(tmp_path, _clean_set_cache):
+    s = build_raw16_set(tmp_path, PLIF, n_entries=2, fill_with_index=True)
+    img = _read_native_frame(
+        file_path=s,
+        camera=2,
+        frame_idx=1,
+        image_type="lavision_set",
+        num_cameras=3,
+        use_camera_subfolders=False,
+    )
+    assert img.shape == (4, 6) and img[0, 0] == 100
+
+
+def test_read_single_frame_set_requires_num_cameras(tmp_path, _clean_set_cache):
+    s = build_raw16_set(tmp_path, PLIF)
+    with pytest.raises(ValueError, match=r"num_cameras"):
+        read_single_frame(s, camera=2, frame_idx=1, image_type="lavision_set")
+
+
+def test_registry_set_reader_resolves_streams(tmp_path, _clean_set_cache):
+    s = build_raw16_set(tmp_path, PLIF, fill_with_index=True)
+    pair = read_lavision_ims(str(s), camera_no=2, im_no=1, num_cameras=3)
+    assert pair[0, 0, 0] == 100 and pair[1, 0, 0] == 200

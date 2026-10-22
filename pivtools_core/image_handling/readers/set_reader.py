@@ -27,7 +27,7 @@ happened, and not at parse time, because the other streams of the recording are
 still readable.
 
 Also supports:
-- Pre-paired pairs: entry[im_no].frames[2*(cam-1) + 0/1] via read_set_pair
+- Pre-paired pairs: the camera's two streams (camera_streams) via read_set_pair
 - Single frames: read_set_frame; time-resolved pairing is assembled by callers
   from two single-frame reads at different entries (load_images.read_pair)
 - Per-camera frame extraction with seek-based skipping
@@ -1255,25 +1255,25 @@ def camera_streams(
 
 def read_set_pair(
     set_path: Union[str, Path],
-    camera_no: int,
+    streams: Tuple[int, int],
     im_no: int,
     set_info: Optional[SetInfo] = None,
     out: Optional[np.ndarray] = None,
 ) -> np.ndarray:
-    """Read a pre-paired frame pair from a .set container.
+    """Read a pre-paired A/B frame pair from a .set container.
 
-    Reads frames[2*(camera_no-1)] and frames[2*(camera_no-1)+1] from entry
-    im_no. Time-resolved pairing does NOT live here: it is two single-frame
-    reads at different entries, and the production path builds it from
-    read_set_frame (see load_images.read_pair), which derives the camera
-    stride instead of assuming it.
+    Reads the two given frame streams from entry ``im_no``. Which streams belong
+    to a camera is decided by :func:`camera_streams`, never here. Time-resolved
+    pairing does NOT live here either: it is two single-frame reads at different
+    entries, built from read_set_frame (see load_images.read_pair).
 
     Parameters
     ----------
     set_path : str or Path
         Path to the .set file.
-    camera_no : int
-        Camera number (1-based).
+    streams : tuple of int
+        0-based (A, B) frame-stream indices, as returned by
+        :func:`camera_streams` with ``pair=True``.
     im_no : int
         Image/entry number (1-based).
     set_info : SetInfo, optional
@@ -1290,34 +1290,43 @@ def read_set_pair(
     np.ndarray
         Array of shape (2, H, W), dtype float32, with intensity scale applied.
         ``out`` itself when given.
+
+    Raises
+    ------
+    ValueError
+        If ``streams`` does not hold exactly two indices, an index is outside the
+        container, or the two streams differ in shape.
     """
     # read_set_info, not _parse_set: callers that do not thread set_info through
     # (the pre-paired PIV path and the calibration loader) would otherwise re-parse
     # the whole container on every single frame.
     info = set_info if set_info is not None else read_set_info(set_path)
 
-    frame_idx_a = 2 * (camera_no - 1)
-    frame_idx_b = frame_idx_a + 1
-
-    if frame_idx_b >= len(info.frames):
+    if len(streams) != 2:
         raise ValueError(
-            f"Camera {camera_no} requires frames [{frame_idx_a}, "
-            f"{frame_idx_b}], but only {len(info.frames)} frames exist"
+            f"read_set_pair needs exactly two frame streams, got {tuple(streams)}"
         )
+    frame_idx_a, frame_idx_b = streams
+    n_streams = len(info.frames)
+    for idx in streams:
+        if not 0 <= idx < n_streams:
+            raise ValueError(
+                f"Frame stream {idx} is outside 0..{n_streams - 1} in "
+                f"{Path(set_path).name}"
+            )
 
     fi_a = info.frames[frame_idx_a]
     fi_b = info.frames[frame_idx_b]
     entry_idx = im_no - 1
 
     # Streams legitimately differ in shape across cameras (alk235's five span
-    # 3472-3536 rows), so an A/B pair from mismatched streams is a wrong camera
-    # mapping, not a broadcast error to be read off a numpy traceback.
+    # 3472-3536 rows). The resolver only pairs equal shapes, so this guards a
+    # caller handing in a hand-built tuple rather than a numpy broadcast error.
     if (fi_a.height, fi_a.width) != (fi_b.height, fi_b.width):
         raise ValueError(
-            f"Camera {camera_no} pairs frame streams {frame_idx_a} "
-            f"({fi_a.height}x{fi_a.width}) and {frame_idx_b} "
-            f"({fi_b.height}x{fi_b.width}), which differ in shape. These are not "
-            f"one camera's A/B streams -- check camera_count against the recording."
+            f"Frame streams {frame_idx_a} ({fi_a.height}x{fi_a.width}) and "
+            f"{frame_idx_b} ({fi_b.height}x{fi_b.width}) differ in shape, so they "
+            f"are not one camera's A/B pair."
         )
 
     if out is None:
@@ -1326,7 +1335,7 @@ def read_set_pair(
         result = check_out(
             out,
             (2, fi_a.height, fi_a.width),
-            f"read_set_pair camera {camera_no} of {Path(set_path).name}",
+            f"read_set_pair streams {frame_idx_a}+{frame_idx_b} of {Path(set_path).name}",
         )
 
     img_a = _read_single_image(fi_a, entry_idx)
