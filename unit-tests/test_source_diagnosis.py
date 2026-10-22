@@ -960,3 +960,32 @@ def test_cine_pattern_requires_every_selected_camera_file(tmp_path):
     touch(tmp_path, ["Camera1.cine", "Camera2.cine"])
     names = ["Camera1.cine", "Camera2.cine"]
     assert cine_pattern(names, tmp_path, 3, [1, 2, 3]) is None
+
+
+@pytest.mark.parametrize(
+    "folders",
+    [
+        ["camera1", "camera3"],
+        ["camera2", "camera3"],
+        ["camera1", "cam_1"],
+        ["camera2"],
+    ],
+)
+def test_folder_rules_silent_unless_camera_numbers_are_exactly_1_to_k(
+    tmp_path, folders
+):
+    for name in folders:
+        touch(tmp_path / name, ["B00001.tif"])
+    for count, numbers in ((1, (1,)), (2, (1, 2))):
+        inp = _inp(tmp_path, camera_count=count, camera_numbers=numbers)
+        assert rule_camera_folders(inp) == []
+    touch(tmp_path / "x", ["B00001.im7"])
+    for name in folders:
+        touch(tmp_path / "w" / name, ["B00001.im7"])
+    assert rule_wrong_type(_inp(tmp_path / "w")) == []
+    assert (
+        rule_inside_camera_folder(
+            _inp(tmp_path / folders[0], camera_count=2, camera_numbers=(1, 2))
+        )
+        == []
+    )

@@ -983,9 +983,15 @@ def _folder_variants(
     one folder the source moves into it (a count-1 setup ignores subfolders, so
     ``camera_subfolders`` would be pruned). With several, a configured count of 1 also
     gets a ``Use {first}/ only`` alternative.
+
+    ``camera_subfolders`` is indexed by camera number, so the folders' camera numbers
+    must be exactly ``1..k`` with no duplicates. Otherwise no mapping is invented and
+    the list is empty.
     """
     names = [d.name for d in folders]
     k = len(names)
+    if [d.camera_number for d in folders] != list(range(1, k + 1)):
+        return []
     if k == 1:
         apply: Dict[str, Any] = {"source_path": str(scan.path / names[0])}
         if ctx.camera_count > 1:
@@ -1230,10 +1236,10 @@ def rule_inside_camera_folder(inp: RuleInput) -> List[Suggestion]:
     folders = _qualifying_folders(parent_scan, family)
     if len(folders) < 2 or scan.path.name not in {d.name for d in folders}:
         return []
-    apply: Dict[str, Any] = {
-        "source_path": str(parent),
-        **_folder_variants(parent_scan, ctx, ctx.image_type, folders)[0][0],
-    }
+    variants = _folder_variants(parent_scan, ctx, ctx.image_type, folders)
+    if not variants:
+        return []
+    apply: Dict[str, Any] = {"source_path": str(parent), **variants[0][0]}
     parent_name = parent.name or parent.as_posix()
     return [
         make_suggestion(
