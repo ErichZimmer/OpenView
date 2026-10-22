@@ -122,6 +122,23 @@ def test_scan_unlistable_dir_records_error(tmp_path):  # Review Focus 3
         locked.chmod(0o755)
 
 
+@pytest.mark.skipif(
+    os.name == "nt" or os.geteuid() == 0, reason="needs POSIX permissions as non-root"
+)
+def test_scan_path_beneath_unsearchable_dir_records_error(tmp_path):
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    locked.chmod(0)
+    try:
+        scan = scan_source(locked / "sub" / "x")
+        assert not scan.exists and scan.ancestor == locked
+        assert any(
+            e.startswith("could not stat ") and "locked" in e for e in scan.errors
+        )
+    finally:
+        locked.chmod(0o755)
+
+
 def test_ims_infers_lavision_set(tmp_path):
     assert infer_image_type("frame.ims") == "lavision_set"
     # Config._detect_image_type: config.yaml with images.image_format ["run.ims"] and no image_type

@@ -13,6 +13,7 @@ Import direction is one-way at module level: this module imports ``path_utils``;
 import json
 import os
 import re
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import (
@@ -273,6 +274,21 @@ def _list_dir(directory: Path) -> _Listing:
     )
 
 
+def _probe(path: Path, errors: List[str]) -> Optional[os.stat_result]:
+    """``os.stat`` that never raises. None when the path is absent or unreadable.
+
+    A missing path (ENOENT, ENOTDIR) is an ordinary answer. Any other failure, such
+    as a parent directory without search permission, is appended to ``errors``.
+    """
+    try:
+        return os.stat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except OSError as exc:
+        errors.append(f"could not stat {path.as_posix()}: {exc.strerror}")
+        return None
+
+
 def scan_source(path: Union[str, Path]) -> SourceScan:
     """Scan a configured source path once, for every diagnosis rule to share.
 
@@ -284,27 +300,30 @@ def scan_source(path: Union[str, Path]) -> SourceScan:
     """
     raw = str(path)
     norm = Path(normalise_source_path(raw))
-    exists = norm.exists()
-    is_dir = exists and norm.is_dir()
+    errors: List[str] = []
+    norm_stat = _probe(norm, errors)
+    exists = norm_stat is not None
+    is_dir = exists and stat.S_ISDIR(norm_stat.st_mode)
 
     ancestor: Optional[Path] = None
     tail: List[str] = []
     if not exists:
         ancestor = norm
-        while not ancestor.exists() and ancestor.parent != ancestor:
+        ancestor_stat = None
+        while ancestor_stat is None and ancestor.parent != ancestor:
             tail.append(ancestor.name)
             ancestor = ancestor.parent
+            ancestor_stat = _probe(ancestor, errors)
         tail.reverse()
-        if not ancestor.exists():
+        if ancestor_stat is None:
             ancestor = None
     if exists:
         listed: Optional[Path] = norm if is_dir else norm.parent
     elif ancestor is not None:
-        listed = ancestor if ancestor.is_dir() else ancestor.parent
+        listed = ancestor if stat.S_ISDIR(ancestor_stat.st_mode) else ancestor.parent
     else:
         listed = None
 
-    errors: List[str] = []
     truncated = False
     root = _Listing((), {}, (), False, False, None)
     subdirs: List[SubdirInfo] = []
@@ -330,7 +349,8 @@ def scan_source(path: Union[str, Path]) -> SourceScan:
             )
         if listed.name:
             candidate = listed.with_name(listed.name + ".set")
-            if candidate.is_file():
+            candidate_stat = _probe(candidate, errors)
+            if candidate_stat is not None and stat.S_ISREG(candidate_stat.st_mode):
                 companion_of = candidate
 
     return SourceScan(
