@@ -11,8 +11,8 @@ validation had no index check, and ``validate_single_pattern`` dropped a suggest
 equal to the current pattern, so "files 0..9, start index 1" read as a bare
 "Pattern incomplete" / "Last frame not found". ``detect_start_index`` now reads the
 minimum frame index from the FULL matching listing, parsed with the pattern itself,
-and both validators report "Files start at X but the start index is Y" with
-``suggested_zero_based``.
+and both validators report "Files start at X but the start index is Y" with a
+``start_index`` suggestion.
 
 Usage:
     pytest unit-tests/test_start_index_hint.py -v
@@ -24,14 +24,12 @@ from pathlib import Path
 import cv2
 import numpy as np
 import pytest
-import yaml
-from flask import Flask
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import pivtools_gui.app as gui_app  # noqa: E402
+from fixtures.diagnosis import calibration_client, piv_route_response  # noqa: E402
+
 from pivtools_core.calibration_settings import save_settings  # noqa: E402
-from pivtools_core.config import Config  # noqa: E402
 from pivtools_core.image_handling.calibration_loader import (  # noqa: E402
     validate_calibration_images,
 )
@@ -41,6 +39,11 @@ from pivtools_core.image_handling.path_utils import (  # noqa: E402
 )
 
 N_FILES = 10
+
+
+def _start_index_applies(result):
+    """The ``apply`` of every ``start_index`` suggestion in a validation result."""
+    return [s["apply"] for s in result["suggestions"] if s["id"] == "start_index"]
 
 
 def _write_frames(folder: Path, fmt: str, first: int, n: int = N_FILES) -> None:
@@ -83,6 +86,7 @@ class _FakeConfig:
     def __init__(self, source: Path):
         self._source = source
         self.camera_count = 1
+        self.camera_numbers = [1]
 
     def get_calibration_source(self, idx: int) -> Path:
         return self._source
@@ -107,7 +111,7 @@ def _cal_validate(tmp_path, first_file, zero_based, n_views=N_FILES):
 def test_calibration_files_from_zero_start_one(tmp_path):
     result = _cal_validate(tmp_path, first_file=0, zero_based=False)
     assert result["valid"] is False
-    assert result["suggested_zero_based"] is True
+    assert _start_index_applies(result) == [{"start_index": 0}]
     assert result["error"] == (
         "Files start at 0 but the start index is 1 — switch to 0-based indexing"
     )
@@ -116,7 +120,7 @@ def test_calibration_files_from_zero_start_one(tmp_path):
 def test_calibration_files_from_one_start_zero(tmp_path):
     result = _cal_validate(tmp_path, first_file=1, zero_based=True)
     assert result["valid"] is False
-    assert result["suggested_zero_based"] is False
+    assert _start_index_applies(result) == [{"start_index": 1}]
     assert "switch to 1-based indexing" in result["error"]
 
 
@@ -125,7 +129,7 @@ def test_calibration_blank_n_views_checks_the_auto_count(tmp_path):
     validation must check that range too, not just the first file."""
     result = _cal_validate(tmp_path, first_file=0, zero_based=False, n_views=None)
     assert result["valid"] is False
-    assert result["suggested_zero_based"] is True
+    assert _start_index_applies(result) == [{"start_index": 0}]
     assert result["expected_count"] == N_FILES
 
 
@@ -138,14 +142,14 @@ def test_calibration_blank_n_views_correct_index_valid(tmp_path):
 def test_calibration_correct_index_no_hint(tmp_path):
     result = _cal_validate(tmp_path, first_file=1, zero_based=False)
     assert result["valid"] is True, result["error"]
-    assert result["suggested_zero_based"] is None
+    assert _start_index_applies(result) == []
     assert result["detected_start_index"] == 1
 
 
 def test_calibration_zero_based_files_from_zero_valid(tmp_path):
     result = _cal_validate(tmp_path, first_file=0, zero_based=True)
     assert result["valid"] is True, result["error"]
-    assert result["suggested_zero_based"] is None
+    assert _start_index_applies(result) == []
 
 
 # ---------------------------------------------------------------------------
@@ -159,8 +163,6 @@ def _frame_value(index: int) -> int:
 
 
 def _cal_client(tmp_path, monkeypatch):
-    import pivtools_gui.calibration.app.views as V
-
     folder = tmp_path / "cal_src"
     folder.mkdir()
     for i in range(0, N_FILES):
@@ -176,13 +178,7 @@ def _cal_client(tmp_path, monkeypatch):
             }
         },
     )
-    config = _FakeConfig(folder)
-    # The blueprint's helpers also read the calibration pointer block.
-    config.calibration = {"active": "dotboard"}
-    monkeypatch.setattr(V, "get_config", lambda: config)
-    app = Flask(__name__)
-    app.register_blueprint(V.calibration_bp)
-    return app.test_client()
+    return calibration_client(folder, monkeypatch)
 
 
 def test_calibration_routes_follow_saved_zero_based(tmp_path, monkeypatch):
@@ -193,7 +189,7 @@ def test_calibration_routes_follow_saved_zero_based(tmp_path, monkeypatch):
 
     before = client.post("/calibration/validate", json=body).get_json()
     assert before["valid"] is False
-    assert before["suggested_zero_based"] is True
+    assert _start_index_applies(before) == [{"start_index": 0}]
 
     saved = client.post(
         "/calibration/settings",
@@ -206,7 +202,7 @@ def test_calibration_routes_follow_saved_zero_based(tmp_path, monkeypatch):
 
     after = client.post("/calibration/validate", json=body).get_json()
     assert after["valid"] is True, after["error"]
-    assert after["suggested_zero_based"] is None
+    assert _start_index_applies(after) == []
 
     # Frame numbers stay 1-based in the GUI; 0-based files shift by one. The JSON
     # frame route reports raw stats (no display stretch), so the mean names the file.
@@ -235,9 +231,11 @@ def test_single_pattern_reports_start_index(tmp_path, first_file, zero_based):
         expected_count=N_FILES,
         zero_based_indexing=zero_based,
         role="A",
+        patterns=["B%05d_A.tif"],
+        index=0,
     )
     assert result["valid"] is False
-    assert result["suggested_zero_based"] is (first_file == 0)
+    assert _start_index_applies(result) == [{"start_index": first_file}]
     assert result["error"].startswith(f"Files start at {first_file}")
 
 
@@ -250,9 +248,11 @@ def test_single_pattern_correct_no_hint(tmp_path):
         expected_count=N_FILES,
         zero_based_indexing=False,
         role="A",
+        patterns=["B%05d_A.tif"],
+        index=0,
     )
     assert result["valid"] is True
-    assert result["suggested_zero_based"] is None
+    assert _start_index_applies(result) == []
 
 
 # ---------------------------------------------------------------------------
@@ -264,15 +264,17 @@ def _piv_client(tmp_path, monkeypatch, first_file, start_index):
     src = tmp_path / "src"
     _write_frames(src, "B%05d_A.tif", first_file)
     _write_frames(src, "B%05d_B.tif", first_file)
-    cfg = {
-        "paths": {
+    response = piv_route_response(
+        tmp_path,
+        monkeypatch,
+        paths={
             "base_paths": [str(tmp_path / "out")],
             "source_paths": [str(src)],
             "camera_count": 1,
             "camera_numbers": [1],
             "camera_subfolders": [],
         },
-        "images": {
+        images={
             "image_type": "standard",
             "image_format": ["B%05d_A.tif", "B%05d_B.tif"],
             "num_images": N_FILES,
@@ -283,14 +285,7 @@ def _piv_client(tmp_path, monkeypatch, first_file, start_index):
             "num_loops": 1,
             "use_camera_subfolders": False,
         },
-    }
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(yaml.dump(cfg, default_flow_style=False))
-    config = Config(path=str(config_path))
-    monkeypatch.setattr(gui_app, "get_config", lambda: config)
-    app = Flask(__name__)
-    app.register_blueprint(gui_app.api_bp)
-    response = app.test_client().post("/backend/validate_files", json={})
+    )
     assert response.status_code == 200
     return response.get_json()["details"]["camera_1"]
 
@@ -303,7 +298,7 @@ def test_piv_route_hint_on_failure(
 ):
     result = _piv_client(tmp_path, monkeypatch, first_file, start_index)
     assert result["status"] == "error"
-    assert result["suggested_zero_based"] is zero_based
+    assert _start_index_applies(result) == [{"start_index": first_file}]
     assert result["indexing_warning"] == (
         f"Files start at {first_file} but the start index is {start_index} — "
         f"switch to {first_file}-based indexing"
@@ -316,7 +311,7 @@ def test_piv_route_correct_index_no_hint(tmp_path, monkeypatch):
     result = _piv_client(tmp_path, monkeypatch, 1, 1)
     assert result["status"] == "ok", result["error"]
     assert result["indexing_warning"] is None
-    assert result["suggested_zero_based"] is None
+    assert _start_index_applies(result) == []
 
 
 def test_piv_route_reports_why_no_pattern_was_suggested(tmp_path, monkeypatch):
@@ -327,15 +322,17 @@ def test_piv_route_reports_why_no_pattern_was_suggested(tmp_path, monkeypatch):
     for i in range(1, N_FILES + 1):
         # Both numbers increase, so neither can be singled out as the frame index.
         assert cv2.imwrite(str(src / f"run{i}_img{i:04d}.tif"), img)
-    cfg = {
-        "paths": {
+    result = piv_route_response(
+        tmp_path,
+        monkeypatch,
+        paths={
             "base_paths": [str(tmp_path / "out")],
             "source_paths": [str(src)],
             "camera_count": 1,
             "camera_numbers": [1],
             "camera_subfolders": [],
         },
-        "images": {
+        images={
             "image_type": "standard",
             "image_format": ["frame%05d.tif"],
             "num_images": N_FILES,
@@ -346,18 +343,7 @@ def test_piv_route_reports_why_no_pattern_was_suggested(tmp_path, monkeypatch):
             "num_loops": 1,
             "use_camera_subfolders": False,
         },
-    }
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(yaml.dump(cfg, default_flow_style=False))
-    config = Config(path=str(config_path))
-    monkeypatch.setattr(gui_app, "get_config", lambda: config)
-    app = Flask(__name__)
-    app.register_blueprint(gui_app.api_bp)
-    result = (
-        app.test_client()
-        .post("/backend/validate_files", json={})
-        .get_json()["details"]["camera_1"]
-    )
+    ).get_json()["details"]["camera_1"]
     assert result["status"] == "error"
     assert "could not tell which number is the frame index" in result["error"]
 

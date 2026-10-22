@@ -1,7 +1,7 @@
 """Two Setup/calibration validation regressions found in the 2026-10-19 real-data pass.
 
 1. A calibration source whose camera directory does not exist (wrong subfolder) must
-   report "Camera path does not exist" with the subfolder suggestion, not the internal
+   report "Camera path does not exist" with a folder suggestion, not the internal
    "expected_count is required for ... images".
 2. ``read_pair`` returns a ``(2, H, W)`` stack, so a colour test on ``shape[-1] > 1``
    fired on every grayscale dataset ("Color images will be converted to grayscale").
@@ -18,6 +18,7 @@ class _FakeConfig:
     def __init__(self, source, camera_count=2):
         self._source = source
         self.camera_count = camera_count
+        self.camera_numbers = list(range(1, camera_count + 1))
 
     def get_calibration_source(self, idx):
         return self._source
@@ -26,6 +27,7 @@ class _FakeConfig:
 def test_missing_camera_dir_names_the_path_not_expected_count(tmp_path):
     # Two cameras, standard format: the loader looks in <source>/Cam1, which is absent.
     (tmp_path / "camera1").mkdir()
+    (tmp_path / "camera1" / "B00001.tif").touch()
     save_settings(
         tmp_path, {"image": {"image_format": "B%05d.tif", "image_type": "standard"}}
     )
@@ -33,7 +35,11 @@ def test_missing_camera_dir_names_the_path_not_expected_count(tmp_path):
     assert result["valid"] is False
     assert "expected_count" not in (result["error"] or "")
     assert "Camera path does not exist" in result["error"]
-    assert result["suggested_subfolder"] == "camera1"
+    assert result["suggestions"][0]["apply"] == {
+        "source_path": str(tmp_path / "camera1"),
+        "camera_count": 1,
+        "camera_numbers": [1],
+    }
 
 
 def test_grayscale_pair_is_not_colour():

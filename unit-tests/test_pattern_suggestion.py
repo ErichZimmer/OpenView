@@ -23,7 +23,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from fixtures.diagnosis import _inp, frame_names, touch  # noqa: E402
+from fixtures.diagnosis import _inp, frame_names, make_ctx, touch  # noqa: E402
 
 from pivtools_core.image_handling.path_utils import (  # noqa: E402
     _detect_ab_pair_pattern,
@@ -105,8 +105,8 @@ def _fake_frame(_idx):
     return np.zeros((8, 8), dtype=np.uint8)
 
 
-def test_set_suggestion_is_a_filename(tmp_path):
-    """A missing .set suggests the sibling's filename, not its full path."""
+def test_set_suggestion_is_the_sibling_set_file(tmp_path):
+    """A missing .set suggests the sibling recording as the source path."""
     (tmp_path / "recording.set").write_bytes(b"stub")
     result = validate_images_generic(
         camera_path=tmp_path / "missing.set",
@@ -116,8 +116,11 @@ def test_set_suggestion_is_a_filename(tmp_path):
         expected_count=1,
         zero_based_indexing=False,
         read_frame_fn=_fake_frame,
+        diagnosis=make_ctx(tmp_path / "missing.set", image_type="lavision_set"),
     )
-    assert result["suggested_pattern"] == "recording.set"
+    first = result["suggestions"][0]
+    assert first["apply"] == {"source_path": str(tmp_path / "recording.set")}
+    assert first["label"] == 'Use "recording.set"'
 
 
 def test_ambiguous_message_reaches_validation_error(tmp_path):
@@ -130,12 +133,11 @@ def test_ambiguous_message_reaches_validation_error(tmp_path):
         expected_count=1,
         zero_based_indexing=False,
         read_frame_fn=_fake_frame,
+        diagnosis=make_ctx(tmp_path, image_format=("wrong%05d.tif",)),
     )
-    assert generic["suggested_pattern"] is None
-    assert generic["suggestion_error"] == (
-        "could not tell which number is the frame index in 'Cam1_00001.tif'"
-    )
-    assert generic["suggestion_error"] in generic["error"]
+    reason = "could not tell which number is the frame index in 'Cam1_00001.tif'"
+    assert not any(s["id"] == "pattern" for s in generic["suggestions"])
+    assert reason in generic["error"]
 
     single = validate_single_pattern(
         camera_path=tmp_path,
@@ -143,9 +145,11 @@ def test_ambiguous_message_reaches_validation_error(tmp_path):
         image_type="standard",
         expected_count=1,
         zero_based_indexing=False,
+        patterns=["wrong%05d.tif"],
+        index=0,
     )
-    assert single["suggested_pattern"] is None
-    assert generic["suggestion_error"] in single["error"]
+    assert not any(s["id"] == "pattern" for s in single["suggestions"])
+    assert reason in single["error"]
 
 
 def test_validation_suggests_from_folder(tmp_path):
@@ -159,8 +163,10 @@ def test_validation_suggests_from_folder(tmp_path):
         expected_count=10,
         zero_based_indexing=False,
         read_frame_fn=_fake_frame,
+        diagnosis=make_ctx(tmp_path, image_format=("nope%05d.tif",)),
     )
-    assert result["suggested_pattern"] == "Cam1_%05d.tif"
+    [pattern] = [s for s in result["suggestions"] if s["id"] == "pattern"]
+    assert pattern["apply"] == {"image_format": ["Cam1_%05d.tif"]}
 
 
 def test_pattern_rule_single(tmp_path):

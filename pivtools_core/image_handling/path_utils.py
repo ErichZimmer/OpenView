@@ -8,6 +8,7 @@ PIV image loading (load_images.py) and calibration image loading
 import base64
 import io
 import logging
+import os
 import re
 from pathlib import Path
 from typing import (
@@ -24,8 +25,11 @@ from typing import (
 
 import numpy as np
 
+from ..calibration_settings import CALIBRATION_DIRNAME, SETTINGS_FILENAME
+
 if TYPE_CHECKING:
     from ..config import Config
+    from .source_diagnosis import DiagnosisContext
 
 
 def format_to_glob(fmt: str) -> str:
@@ -581,12 +585,15 @@ def _validate_file_listing(
     matching_files: List[Path],
     start_idx: int,
     expected_count: int,
-) -> None:
+) -> Optional[int]:
     """Set ``valid``/``error`` for a non-empty listing of per-frame files.
 
     Records ``detected_start_index`` over the full listing. A wrong 0/1 start
     index that leaves the first or last expected file missing fails with the
-    start-index hint and ``suggested_zero_based``; otherwise the count decides.
+    start-index hint; otherwise the count decides.
+
+    Returns the files' first index when the start index explains the failure,
+    else None.
     """
     names = [f.name for f in matching_files]
     result["detected_start_index"] = detect_start_index(names, image_format)
@@ -595,7 +602,6 @@ def _validate_file_listing(
     )
     if found is not None:
         result["valid"] = False
-        result["suggested_zero_based"] = found == 0
         result["error"] = start_index_hint_message(found, start_idx)
     elif len(matching_files) < expected_count:
         result["valid"] = False
@@ -604,39 +610,27 @@ def _validate_file_listing(
         )
     else:
         result["valid"] = True
+    return found
 
 
-def _apply_folder_suggestion(
-    result: Dict[str, Any], image_names: List[str], forced_ext: Optional[str] = None
+def _append_error(result: Dict[str, Any], text: str) -> None:
+    """Append ``text`` to the result's ``error`` with ``"; "``, or set it."""
+    result["error"] = f"{result['error']}; {text}" if result["error"] else text
+
+
+def _fold_pattern_reason(
+    result: Dict[str, Any], names: List[str], image_type: str, calibration: bool
 ) -> None:
-    """Fill a validation result's pattern suggestion from the folder's filenames.
+    """Append why no filename pattern can be made from ``names`` to ``error``.
 
-    A/B pairs set both patterns and ``suggested_mode``. Otherwise a single pattern
-    is suggested; when none can be (ambiguous frame index), the reason goes into
-    ``suggestion_error`` and is appended to ``error`` so it is never dropped.
+    The ``pattern`` diagnosis rule offers the pattern when one exists; when none
+    can be made (e.g. an ambiguous frame index) the reason must still reach the user.
     """
-    ab_result = _detect_ab_pair_pattern(image_names, forced_ext)
-    if ab_result:
-        result["suggested_pattern"] = ab_result["pattern_a"]
-        result["suggested_pattern_b"] = ab_result["pattern_b"]
-        result["suggested_mode"] = ab_result["mode"]
-        return
-    _apply_single_suggestion(result, _suggest_pattern(image_names, forced_ext))
+    from .source_diagnosis import pattern_reason
 
-
-def _apply_single_suggestion(
-    result: Dict[str, Any], suggestion: PatternSuggestion
-) -> None:
-    """Record a single-pattern suggestion, or append its reason to the error."""
-    if suggestion.pattern is not None:
-        result["suggested_pattern"] = suggestion.pattern
-        return
-    result["suggestion_error"] = suggestion.reason
-    result["error"] = (
-        f"{result['error']}; {suggestion.reason}"
-        if result["error"]
-        else suggestion.reason
-    )
+    reason = pattern_reason(names, image_type, calibration)
+    if reason is not None:
+        _append_error(result, reason)
 
 
 def cine_extension_mismatch(cine_file: Path) -> Optional[str]:
@@ -694,6 +688,8 @@ def validate_images_generic(
     expected_count: Optional[int],
     zero_based_indexing: bool,
     read_frame_fn: Callable[[int], np.ndarray],
+    *,
+    diagnosis: "DiagnosisContext",
 ) -> Dict[str, Any]:
     """Generic image validation for both PIV and calibration images.
 
@@ -720,6 +716,9 @@ def validate_images_generic(
     read_frame_fn : Callable[[int], np.ndarray]
         Function to read a single frame by index, for preview generation.
         Should accept frame index (1-based) and return image array.
+    diagnosis : DiagnosisContext
+        The configured source and page facts; its ``image_type`` must equal
+        ``image_type``. Drives ``found`` / ``suggestions`` / ``streams``.
 
     Returns
     -------
@@ -744,15 +743,59 @@ def validate_images_generic(
           (`pivtools_gui/calibration/app/views.py`), and an Exception in it
           raises TypeError there — turning the very failure this field exists to
           report into an HTTP 500 with no message.
-        - suggested_pattern: str or None - Suggested pattern if files don't match
-        - suggestion_error: str or None - Why no pattern could be suggested
-          (e.g. the frame index is ambiguous); also appended to ``error``
         - detected_start_index: int or None - First frame index among the files
           matching the pattern (full listing, standard/im7 only)
-        - suggested_zero_based: bool or None - Set when the files start at the
-          other of 0/1 and that leaves an expected file missing
+        - found: str - What is on disk (or what loaded), one plain sentence
+        - suggestions: list - Ranked one-click fixes (``Suggestion`` dicts)
+        - streams: list or None - Per-stream table of a ``.set`` recording
+
+        When no pattern can be derived from the folder's files, the reason is
+        appended to ``error``.
+
+    Raises
+    ------
+    ValueError
+        When ``diagnosis.image_type`` differs from ``image_type``.
     """
-    result = {
+    from .source_diagnosis import apply_diagnosis
+
+    if diagnosis.image_type != image_type:
+        raise ValueError(
+            f"diagnosis image_type {diagnosis.image_type!r} does not match "
+            f"image_type {image_type!r}"
+        )
+    result = _validate_core(
+        camera_path,
+        camera,
+        image_format,
+        image_type,
+        expected_count,
+        zero_based_indexing,
+        read_frame_fn,
+        calibration=diagnosis.calibration,
+    )
+    apply_diagnosis(result, diagnosis, camera, camera_path, expected_count)
+    return result
+
+
+def _validate_core(
+    camera_path: Path,
+    camera: int,
+    image_format: str,
+    image_type: str,
+    expected_count: Optional[int],
+    zero_based_indexing: bool,
+    read_frame_fn: Callable[[int], np.ndarray],
+    *,
+    calibration: bool,
+) -> Dict[str, Any]:
+    """The validation body of :func:`validate_images_generic`, before diagnosis.
+
+    ``calibration`` selects how a missing-pattern reason is derived (calibration
+    never pairs A/B patterns). Returns the result dict without ``found`` /
+    ``suggestions`` / ``streams``.
+    """
+    result: Dict[str, Any] = {
         "valid": False,
         "found_count": 0,
         "expected_count": expected_count,
@@ -763,13 +806,7 @@ def validate_images_generic(
         "sample_files": [],
         "format_detected": None,
         "error": None,
-        "suggested_pattern": None,
-        "suggested_pattern_b": None,  # For A/B pair detection
-        "suggested_mode": None,  # "ab_format" or None
-        "suggested_subfolder": None,
-        "suggestion_error": None,  # why no pattern could be suggested
         "detected_start_index": None,  # first frame index among matching files
-        "suggested_zero_based": None,  # set when a wrong 0/1 start index is the cause
     }
 
     if expected_count is None and image_type not in ("lavision_set", "cine"):
@@ -794,7 +831,7 @@ def validate_images_generic(
             if all_images:
                 all_image_names = [f.name for f in sorted(all_images)]
                 result["sample_files"] = all_image_names[:5]
-                _apply_folder_suggestion(result, all_image_names)
+                _fold_pattern_reason(result, all_image_names, image_type, calibration)
         return result
 
     # Handle container formats
@@ -803,12 +840,11 @@ def validate_images_generic(
         set_file = camera_path
         if not set_file.exists():
             result["error"] = f"Set file not found: {set_file}"
-            # Try to find .set files in parent directory and suggest
+            # List sibling .set files (the set_in_folder rule suggests them).
             parent_dir = set_file.parent
             if parent_dir.exists():
                 set_files = _glob_images(parent_dir, "*.set")
                 if set_files:
-                    result["suggested_pattern"] = sorted(set_files)[0].name
                     result["sample_files"] = [f.name for f in set_files[:5]]
             return result
 
@@ -857,10 +893,6 @@ def validate_images_generic(
     # For non-.set types, camera_path must be a directory
     if not camera_path.exists():
         result["error"] = f"Camera path does not exist: {camera_path}"
-        suggestion = _suggest_camera_subfolder(camera_path, camera)
-        if suggestion:
-            result["suggested_subfolder"] = suggestion
-            result["error"] += f'. Did you mean "{suggestion}"?'
         return result
 
     if image_type == "cine":
@@ -872,10 +904,9 @@ def validate_images_generic(
 
         if not cine_file.exists():
             result["error"] = f"CINE file not found: {cine_file}"
-            # Try to find .cine files and suggest
+            # List the .cine files present (the pattern rule suggests a pattern).
             cine_files = _glob_images(camera_path, "*.cine")
             if cine_files:
-                result["suggested_pattern"] = cine_files[0].name
                 result["sample_files"] = [f.name for f in cine_files[:5]]
             return result
 
@@ -932,11 +963,11 @@ def validate_images_generic(
             error_msg = _append_folder_contents(error_msg, camera_path)
             result["error"] = error_msg
 
-            # Try to find .im7 files and suggest
+            # List the .im7 files present (the pattern rule suggests a pattern).
             im7_files = sorted(_glob_images(camera_path, "*.im7"))
             if im7_files:
                 im7_names = [f.name for f in im7_files]
-                _apply_single_suggestion(result, _suggest_pattern(im7_names, "im7"))
+                _fold_pattern_reason(result, im7_names, image_type, calibration)
                 result["sample_files"] = im7_names[:5]
             return result
 
@@ -944,8 +975,16 @@ def validate_images_generic(
         result["sample_files"] = [f.name for f in matching_files[:5]]
         result["format_detected"] = "im7"
 
-        _validate_file_listing(
-            result, camera_path, image_format, matching_files, start_idx, expected_count
+        start_hint = (
+            _validate_file_listing(
+                result,
+                camera_path,
+                image_format,
+                matching_files,
+                start_idx,
+                expected_count,
+            )
+            is not None
         )
 
         # Read the first frame. A failure here is a genuine read error (e.g. a
@@ -957,7 +996,7 @@ def validate_images_generic(
             result["valid"] = False
             # The reason already names the file (e.g. the frame-count mismatch).
             # A start-index hint already explains a missing first file; keep it.
-            if result["suggested_zero_based"] is None:
+            if not start_hint:
                 result["error"] = str(e)
             return result
         try:
@@ -991,7 +1030,7 @@ def validate_images_generic(
             if all_images:
                 all_image_names = [f.name for f in sorted(all_images)]
                 result["sample_files"] = all_image_names[:5]
-                _apply_folder_suggestion(result, all_image_names)
+                _fold_pattern_reason(result, all_image_names, image_type, calibration)
             return result
 
         result["found_count"] = len(matching_files)
@@ -1017,15 +1056,29 @@ def validate_images_generic(
 _FOLDER_NAMES_SHOWN = 10
 
 
+def is_calibration_output_dir(path: Path) -> bool:
+    """True for PIVTOOLs' own calibration-output folder inside a directory source.
+
+    ``calibration_settings.root_for_source`` puts ``calibration/settings.yaml``
+    inside every directory source, so it is never image data. A ``calibration``
+    folder without that sidecar is the user's own and is not matched.
+    """
+    return path.name == CALIBRATION_DIRNAME and os.path.isfile(path / SETTINGS_FILENAME)
+
+
 def _append_folder_contents(error_msg: str, folder_path: Path) -> str:
     """Append what a folder holds to an error message, ignoring dot-names.
 
     Files are listed when there are any. A folder with only subfolders says so
     rather than claiming to be empty, and ``Folder is empty`` is kept for a truly
-    empty directory.
+    empty directory. PIVTOOLs' own calibration-output folder is not listed.
     """
     if folder_path.exists() and folder_path.is_dir():
-        entries = [e for e in folder_path.iterdir() if not e.name.startswith(".")]
+        entries = [
+            e
+            for e in folder_path.iterdir()
+            if not e.name.startswith(".") and not is_calibration_output_dir(e)
+        ]
         all_files = sorted(e.name for e in entries if e.is_file())[:10]
         folders = sorted(e.name for e in entries if e.is_dir())
         if all_files:
@@ -1117,106 +1170,23 @@ def _suggest_pattern_for_role(
     return _suggest_pattern(candidates, forced_ext)
 
 
-def _suggest_camera_subfolder(camera_path: Path, camera_num: int) -> Optional[str]:
-    """Suggest a camera subfolder name when the expected one doesn't exist.
+def _single_pattern_reason_or_suggestion(
+    result: Dict[str, Any],
+    names: List[str],
+    role: Optional[str],
+    patterns: Sequence[str],
+    index: int,
+) -> None:
+    """Offer the role-aware pattern for ``patterns[index]``, or fold why there is none."""
+    from .source_diagnosis import role_pattern_suggestion
 
-    Scores candidate subdirectories in the parent folder by similarity to the
-    expected camera folder name, returning the best match or None.
-    """
-    parent = camera_path.parent
-    expected_name = camera_path.name
-
-    if not parent.exists() or not parent.is_dir():
-        return None
-
-    # List subdirectories (cap at 100 to avoid huge dirs)
-    subdirs = []
-    for entry in parent.iterdir():
-        if entry.is_dir():
-            subdirs.append(entry.name)
-            if len(subdirs) >= 100:
-                break
-
-    if not subdirs:
-        return None
-
-    best_score = 0
-    best_name = None
-
-    for candidate in subdirs:
-        score = 0
-
-        # Exact case-insensitive match (e.g. Cam1 vs cam1)
-        if expected_name.lower() == candidate.lower():
-            score = 100
-        else:
-            # Extract numbers from both names
-            expected_nums = re.findall(r"\d+", expected_name)
-            candidate_nums = re.findall(r"\d+", candidate)
-
-            if expected_nums and candidate_nums:
-                # Check if the camera number matches
-                expected_cam_num = str(camera_num)
-                has_matching_num = expected_cam_num in candidate_nums
-
-                if has_matching_num:
-                    # Camera-number match with camera-related prefix
-                    camera_prefixes = re.compile(
-                        r"(?:cam|camera|view|c)\s*[_\-]?\s*\d",
-                        re.IGNORECASE,
-                    )
-                    if camera_prefixes.search(candidate):
-                        score = 80
-                    else:
-                        # Number-only match (any directory name)
-                        score = 40
-            else:
-                # Fuzzy match: check if candidate contains the camera number
-                # and has a similar prefix (handles typos like "Camrr" → "Cam1")
-                expected_cam_num = str(camera_num)
-                if expected_cam_num in re.findall(r"\d+", candidate):
-                    # Candidate has the right camera number
-                    # Check prefix similarity (strip trailing digits/typos)
-                    exp_prefix = re.sub(r"[\d]+.*$", "", expected_name).lower()
-                    cand_prefix = re.sub(r"[\d]+.*$", "", candidate).lower()
-                    if (
-                        exp_prefix
-                        and cand_prefix
-                        and (
-                            exp_prefix.startswith(cand_prefix)
-                            or cand_prefix.startswith(exp_prefix)
-                            or exp_prefix[:2] == cand_prefix[:2]
-                        )
-                    ):
-                        score = 60
-
-        if score > best_score:
-            best_score = score
-            best_name = candidate
-
-    return best_name
-
-
-def detect_flat_source_files(source_path: Path, patterns: List[str]) -> List[str]:
-    """Detect image files matching the configured patterns directly in the source folder.
-
-    Used to spot a stale multi-camera config: when camera subfolder paths (e.g.
-    ``source/Cam1``) don't exist but files matching the pattern sit directly in
-    ``source_path``, the dataset is a single-camera layout and the caller can
-    suggest switching camera_count to 1.
-
-    Returns up to 5 matching filenames, or an empty list if none / not a directory.
-    """
-    if not source_path.exists() or not source_path.is_dir():
-        return []
-
-    matches: List[Path] = []
-    for pattern in patterns:
-        if not pattern or not pattern.strip():
-            continue
-        matches.extend(_glob_images(source_path, format_to_glob(pattern)))
-
-    return [f.name for f in sorted(set(matches))[:5]]
+    reason = _suggest_pattern_for_role(names, role).reason
+    if reason is not None:
+        _append_error(result, reason)
+        return
+    suggestion = role_pattern_suggestion(names, role, patterns, index)
+    if suggestion is not None:
+        result["suggestions"].append(suggestion)
 
 
 def validate_single_pattern(
@@ -1226,7 +1196,9 @@ def validate_single_pattern(
     expected_count: int,
     zero_based_indexing: bool,
     role: Optional[str] = None,
-    camera_num: Optional[int] = None,
+    *,
+    patterns: Sequence[str],
+    index: int,
 ) -> Dict[str, Any]:
     """Validate a single image pattern.
 
@@ -1247,6 +1219,10 @@ def validate_single_pattern(
         Whether file indices are 0-based
     role : str, optional
         "A", "B", or None. Used to filter suggestions to matching role.
+    patterns : Sequence[str]
+        Every configured pattern; a ``pattern`` suggestion replaces entry ``index``.
+    index : int
+        Position of ``pattern`` in ``patterns``.
 
     Returns
     -------
@@ -1254,21 +1230,20 @@ def validate_single_pattern(
         Validation result with keys:
         - valid: bool - Whether pattern validation passed
         - found_count: int - Number of files matching pattern
-        - error: str or None - Error message if validation failed
-        - suggested_pattern: str or None - Role-aware suggestion if pattern doesn't match
-        - suggestion_error: str or None - Why no pattern could be suggested
-        - suggested_zero_based: bool or None - Set when the files start at the
-          other of 0/1 and that leaves an expected file missing
+        - error: str or None - Error message if validation failed; when no
+          pattern can be derived from the folder, the reason is appended
+        - suggestions: list - ``pattern`` (role-aware) and ``start_index``
+          suggestions. A missing camera folder carries none here: the
+          camera-level diagnosis owns it.
         - sample_files: List[str] - Sample of matching filenames
     """
-    result = {
+    from .source_diagnosis import start_index_suggestion
+
+    result: Dict[str, Any] = {
         "valid": False,
         "found_count": 0,
         "error": None,
-        "suggested_pattern": None,
-        "suggested_subfolder": None,
-        "suggestion_error": None,  # why no pattern could be suggested
-        "suggested_zero_based": None,  # set when a wrong 0/1 start index is the cause
+        "suggestions": [],
         "sample_files": [],
     }
 
@@ -1286,8 +1261,8 @@ def validate_single_pattern(
             if all_images:
                 all_image_names = [f.name for f in sorted(all_images)]
                 result["sample_files"] = all_image_names[:5]
-                _apply_single_suggestion(
-                    result, _suggest_pattern_for_role(all_image_names, role)
+                _single_pattern_reason_or_suggestion(
+                    result, all_image_names, role, patterns, index
                 )
         return result
 
@@ -1299,13 +1274,6 @@ def validate_single_pattern(
 
     if not camera_path.exists():
         result["error"] = f"Camera path does not exist: {camera_path}"
-        cam = camera_num
-        if cam is None:
-            m = re.search(r"(\d+)", camera_path.name)
-            cam = int(m.group(1)) if m else 1
-        suggestion = _suggest_camera_subfolder(camera_path, cam)
-        if suggestion:
-            result["suggested_subfolder"] = suggestion
         return result
 
     if not camera_path.is_dir():
@@ -1340,8 +1308,8 @@ def validate_single_pattern(
         result["error"] = f"No files matching pattern '{pattern}'"
         if all_image_names:
             result["sample_files"] = all_image_names[:5]
-            _apply_single_suggestion(
-                result, _suggest_pattern_for_role(all_image_names, role)
+            _single_pattern_reason_or_suggestion(
+                result, all_image_names, role, patterns, index
             )
         return result
 
@@ -1356,7 +1324,7 @@ def validate_single_pattern(
     if found_start is not None:
         result["found_count"] = len(matching_files)
         result["sample_files"] = matching_names[:5]
-        result["suggested_zero_based"] = found_start == 0
+        result["suggestions"].append(start_index_suggestion(found_start, start_idx))
         result["error"] = start_index_hint_message(found_start, start_idx)
         return result
 
@@ -1370,9 +1338,9 @@ def validate_single_pattern(
         )
         # Suggest a corrected pattern based on role (an identical one says nothing)
         if all_image_names:
-            suggestion = _suggest_pattern_for_role(all_image_names, role)
-            if suggestion.pattern != pattern:
-                _apply_single_suggestion(result, suggestion)
+            _single_pattern_reason_or_suggestion(
+                result, all_image_names, role, patterns, index
+            )
         return result
 
     result["found_count"] = len(matching_files)

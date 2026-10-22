@@ -936,41 +936,59 @@ def validate_files():
     """
     Smart validation: Check first frame, last frame, and count files.
 
-    Uses the generic validate_images_generic() for core file detection,
-    with PIV-specific additions for pair validation, color detection,
-    indexing warnings, and background preloading.
+    Uses the generic validate_images_generic() for core file detection and the
+    source diagnosis, with PIV-specific additions for pair validation, color
+    detection, indexing warnings, and background preloading.
+
+    The core validator's ``error`` is passed through unchanged; Setup-only
+    findings (pair reads, per-pattern failures, loops, the A/B count warning) are
+    appended as further ``"; "``-joined sentences.
 
     Returns per-camera validation with:
     - first_frame: "exists" or "missing"
     - last_frame: "exists" or "missing"
     - expected_count: number of expected files
     - actual_count: number of matching files found
-    - status: "ok", "warning", or "error"
+    - status: "ok" or "error"
     - color_detected: True if images are color (will be converted)
+    - found / suggestions / streams: the source diagnosis
     """
     data = request.get_json() or {}
     source_path_idx = data.get("source_path_idx", 0)
 
     cfg = get_config()
+    n_sources = len(cfg.source_paths)
+    if (
+        isinstance(source_path_idx, bool)
+        or not isinstance(source_path_idx, int)
+        or not 0 <= source_path_idx < n_sources
+    ):
+        return (
+            jsonify(
+                {
+                    "error": f"source_path_idx {source_path_idx} is out of range: "
+                    f"{n_sources} source paths configured"
+                }
+            ),
+            400,
+        )
+
     camera_numbers = cfg.camera_numbers
     results = {}
     overall_valid = True
-    # Stale multi-camera detection: True only if every camera folder is absent
-    all_camera_paths_missing = True
 
-    # Import per-pattern validator
     from pivtools_core.image_handling.path_utils import (
-        detect_flat_source_files,
         start_index_hint_message,
         validate_single_pattern,
     )
+    from pivtools_core.image_handling.source_diagnosis import piv_diagnosis_context
+
+    diagnosis = piv_diagnosis_context(cfg, source_path_idx)
 
     for camera_num in camera_numbers:
         try:
             # Build camera path using shared utility
             camera_path = build_piv_camera_path(cfg, source_path_idx, camera_num)
-            if camera_path.exists():
-                all_camera_paths_missing = False
             image_type = cfg.image_type
             num_images = cfg.num_images
             num_pairs = cfg.num_frame_pairs
@@ -1003,7 +1021,8 @@ def validate_files():
                     expected_count=num_images,
                     zero_based_indexing=(cfg.start_index == 0),
                     role=role,
-                    camera_num=camera_num,
+                    patterns=patterns,
+                    index=idx,
                 )
                 pattern_result["index"] = idx
                 pattern_result["label"] = label
@@ -1025,7 +1044,8 @@ def validate_files():
                     if diff_ratio > 0.1:
                         ab_count_warning = f"A/B count mismatch: {count_a} A files vs {count_b} B files"
 
-            # Use generic validator for core file detection (preview, image size, etc.)
+            # Generic validator: core file detection (preview, image size, ...) and
+            # the source diagnosis (found / suggestions / streams).
             validation = validate_images_generic(
                 camera_path=camera_path,
                 camera=camera_num,
@@ -1034,21 +1054,15 @@ def validate_files():
                 expected_count=num_images,
                 zero_based_indexing=(cfg.start_index == 0),
                 read_frame_fn=read_frame,
+                diagnosis=diagnosis,
             )
 
             # PIV-specific: Test first and last pairs
             first_frame_status = "missing"
             last_frame_status = "missing"
-            first_frame_error = (
-                None  # actual read exception, if the file exists but won't decode
-            )
-            # Container equivalent, as a message string: validate_images_generic
-            # keeps it JSON-safe because the calibration route jsonifies its dict.
-            container_read_error = None
-            # Set below once the failure class is known; also gates the folder
-            # listing in the response, which must not claim "files found" for a
-            # file that was found and simply would not decode.
-            file_found_but_unreadable = False
+            # The actual read exceptions, kept for the Setup-only findings below.
+            first_frame_error = None
+            last_frame_error = None
             color_detected = False
 
             if cfg.is_container_format:
@@ -1062,28 +1076,18 @@ def validate_files():
                 # rendered inside a try/except that only warns (path_utils
                 # `_image_to_base64`), so a container that reads perfectly but whose
                 # PNG render fails leaves the preview None while read_error stays
-                # None too. Keying on the preview then reports "First frame not
-                # found" for a file that is present and decodes -- precisely the
-                # misreport this branch exists to remove. image_size is computed
-                # straight from the decoded frame's shape, so it means "frame 1 read".
+                # None too. image_size is computed straight from the decoded frame's
+                # shape, so it means "frame 1 read".
                 if validation.get("image_size") is not None:
                     first_frame_status = "exists"
                     try:
                         read_pair(num_pairs, camera_path, camera_num, cfg)
                         last_frame_status = "exists"
                     except Exception as e:
+                        last_frame_error = e
                         logger.debug(
                             f"Last container entry check failed for camera {camera_num}: {e}"
                         )
-                        # leaves last_frame_status = "missing" -> error branch below
-                else:
-                    # The container exists but frame 1 would not decode (unsupported
-                    # pixel encoding, truncated stream, wrong DaVis node). Carry the
-                    # reader's own reason forward so the message below reports it
-                    # instead of the "First frame not found" text synthesised from
-                    # image_type — the file IS there, and claiming otherwise sends
-                    # the user looking for a missing file.
-                    container_read_error = validation.get("read_error")
             else:
                 # Standard/im7: individual files can be missing, test both ends
                 try:
@@ -1101,6 +1105,7 @@ def validate_files():
                     read_pair(num_pairs, camera_path, camera_num, cfg)
                     last_frame_status = "exists"
                 except Exception as e:
+                    last_frame_error = e
                     logger.debug(
                         f"Last frame check failed for camera {camera_num}: {e}"
                     )
@@ -1127,7 +1132,6 @@ def validate_files():
                             f"Loop {loop_idx} source not found: {loop_path.name}"
                         )
 
-            # Determine status based on both generic validation and pair checks.
             # `found_count` is the real int count for standard/im7/.set/.cine; a
             # container whose count cannot be read fails validation with the
             # reader's reason (read_error) instead of reporting an unknown count.
@@ -1135,139 +1139,55 @@ def validate_files():
             # as the detected count makes every entry "match" (false green tick)
             # and hides an over-count.
             actual_count = validation["found_count"]
+            core_valid = bool(validation["valid"])
 
-            error_msg = validation.get("error")
-            status = "ok" if validation["valid"] else "error"
-
-            # Override with PIV-specific pair validation
-            if first_frame_status == "missing":
-                status = "error"
-                start_idx = cfg.start_index
-                # If the file was found but couldn't be decoded (e.g. a multi-camera
-                # .im7 frame-count mismatch), surface the real reason rather than the
-                # misleading "first frame not found" — the file IS there.
-                #
-                # FileNotFoundError is excluded for standard formats, where a missing
-                # numbered file is exactly what "not found" should report. It is NOT
-                # excluded for containers: validate_images_generic already proved the
-                # container exists, so a FileNotFoundError from inside it describes a
-                # missing companion folder or stream — and the reader's message names
-                # which, where the generic text would send the user hunting for the
-                # container file they are already pointing at.
-                file_found_but_unreadable = container_read_error is not None or (
-                    first_frame_error is not None
-                    and not isinstance(first_frame_error, FileNotFoundError)
+            # Setup-only findings, appended after the core text (never replacing
+            # it). Pair reads and per-pattern failures only add information when
+            # the core passed; a core failure already names the cause.
+            findings = []
+            if core_valid:
+                if first_frame_error is not None:
+                    findings.append(
+                        f"First pair could not be read: {first_frame_error}"
+                    )
+                if last_frame_error is not None:
+                    findings.append(
+                        f"Last pair ({num_pairs}) could not be read: {last_frame_error}"
+                    )
+                findings.extend(
+                    f"Pattern {pv['label']}: {pv['error']}"
+                    for pv in pattern_validations
+                    if not pv.get("valid", True)
                 )
-                # Handle empty pattern case
-                if not format_str or not format_str.strip():
-                    error_msg = "Pattern is empty"
-                elif file_found_but_unreadable:
-                    # The reason already names the file (e.g. the .im7 frame-count
-                    # mismatch), so surface it directly without a verbose prefix.
-                    #
-                    # `is not None`, matching the guard above rather than truthiness:
-                    # an exception whose str() is empty -- a bare MemoryError while
-                    # allocating a 5312x3528 frame buffer is the realistic case --
-                    # satisfies the guard, then falls through `or` to str(None) and
-                    # shows the user the literal word "None" with the folder listing
-                    # suppressed, so they get nothing at all.
-                    reason = (
-                        container_read_error
-                        if container_read_error is not None
-                        else str(first_frame_error)
-                    )
-                    error_msg = reason.strip() or (
-                        "The file was found but could not be read, and the reader "
-                        "gave no reason."
-                    )
-                elif image_type == "lavision_set":
-                    error_msg = f"First frame not found. Container file: {format_str}"
-                elif image_type == "cine":
-                    error_msg = (
-                        f"First frame not found. CINE file: {format_str % camera_num}"
-                    )
-                else:
-                    error_msg = (
-                        f"First frame not found. Looking for: {format_str % start_idx}"
-                    )
-                    if indexing_warning:
-                        error_msg += f". {indexing_warning}"
-                # Append folder contents hint from generic validator (only when the
-                # file is genuinely missing — for a decode failure the reason already
-                # names the file, and "Found files" would just repeat the contradiction)
-                if not file_found_but_unreadable:
-                    if validation.get("sample_files"):
-                        error_msg += f". Found files: {', '.join(validation['sample_files'][:5])}"
-                    if validation.get("suggested_pattern"):
-                        error_msg += (
-                            f". Did you mean: {validation['suggested_pattern']}"
-                        )
-                    elif validation.get("suggestion_error"):
-                        # No suggestion, so say why (e.g. the frame number is ambiguous).
-                        error_msg += f". {validation['suggestion_error']}"
+            findings.extend(loop_errors)
+            status = "ok" if core_valid and not findings else "error"
+            if ab_count_warning and status == "error":
+                findings.append(ab_count_warning)
 
-            elif last_frame_status == "missing":
-                status = "error"
-                end_idx = cfg.start_index + num_images - 1
-                if isinstance(actual_count, int) and actual_count < num_images:
-                    # We know the real container count and it's short — say so
-                    # explicitly rather than the generic "last frame not found".
-                    error_msg = (
-                        f"Requested {num_images} frames but only {actual_count} "
-                        f"available in the container"
-                    )
-                elif image_type == "lavision_set":
-                    error_msg = f"Last frame not found. Container file: {format_str}"
-                elif image_type == "cine":
-                    error_msg = (
-                        f"Last frame not found. CINE file: {format_str % camera_num}"
-                    )
-                else:
-                    error_msg = (
-                        f"Last frame not found. Expected: {format_str % end_idx}"
-                    )
-                    if indexing_warning:
-                        error_msg += f". {indexing_warning}"
-
-            elif isinstance(actual_count, int) and actual_count > num_images:
+            error_msg = (
+                "; ".join(part for part in [validation["error"], *findings] if part)
+                or None
+            )
+            if (
+                status == "ok"
+                and isinstance(actual_count, int)
+                and actual_count > num_images
+            ):
                 # More files than expected - user processing subset (this is fine!)
-                status = "ok"
                 error_msg = (
                     f"Processing subset: {num_images} of {actual_count} files available"
                 )
 
-            elif isinstance(actual_count, int) and actual_count < num_images:
-                # Fewer files/entries than requested - the user asked to process more
-                # frames than exist. Mirrors the shortfall failures the standard/im7
-                # branches already raise in validate_images_generic.
-                status = "error"
-                error_msg = (
-                    f"Requested {num_images} frames but only {actual_count} "
-                    f"available"
-                )
-
-            # Check if any per-pattern validation failed
-            any_pattern_invalid = any(
-                not pv.get("valid", True) for pv in pattern_validations
+            # A file that was found but would not decode: withhold the folder
+            # listing, which the frontend renders under "Files found in folder"
+            # independently of the message (for a container that list is the
+            # container itself, which read as "not found … Found files: <the
+            # file>"). FileNotFoundError is excluded for standard formats, where a
+            # missing numbered file is genuinely what happened.
+            file_found_but_unreadable = validation.get("read_error") is not None or (
+                first_frame_error is not None
+                and not isinstance(first_frame_error, FileNotFoundError)
             )
-            if any_pattern_invalid:
-                status = "error"
-                # Build per-pattern error summary
-                pattern_errors = [
-                    f"Pattern {pv['label']}: {pv.get('error', 'invalid')}"
-                    for pv in pattern_validations
-                    if not pv.get("valid", True)
-                ]
-                if pattern_errors and not error_msg:
-                    error_msg = "; ".join(pattern_errors)
-
-            # Multi-loop file errors
-            if loop_errors:
-                status = "error"
-                loop_error_msg = "; ".join(loop_errors)
-                error_msg = (
-                    f"{error_msg}; {loop_error_msg}" if error_msg else loop_error_msg
-                )
 
             if status == "error":
                 overall_valid = False
@@ -1286,36 +1206,30 @@ def validate_files():
                 "camera_path": str(camera_path),
                 "color_detected": color_detected,
                 "indexing_warning": indexing_warning,
-                # True/False when a wrong 0/1 start index left the first or last
-                # expected file missing (switch to 0-/1-based); None otherwise.
-                "suggested_zero_based": validation.get("suggested_zero_based"),
                 "error": error_msg,
                 "first_image_preview": validation.get("first_image_preview"),
                 "image_size": validation.get("image_size"),
-                # Legacy fields for backward compatibility
-                "suggested_pattern": validation.get("suggested_pattern"),
-                "suggested_pattern_b": validation.get("suggested_pattern_b"),
-                "suggested_mode": validation.get("suggested_mode"),
-                # Subfolder suggestion (when camera folder doesn't exist)
-                "suggested_subfolder": validation.get("suggested_subfolder"),
-                # Files found in folder (for error context). Withheld for a decode
-                # failure: the frontend renders this list under "Files found in
-                # folder" independently of the message, and for a container that
-                # list is the container itself — which read as "not found … Found
-                # files: <the file>" in the same panel.
+                "found": validation["found"],
+                "suggestions": validation["suggestions"],
+                "streams": validation["streams"],
                 "sample_files": (
                     []
                     if file_found_but_unreadable
                     else validation.get("sample_files", [])
                 ),
-                # New per-pattern validation fields
                 "pattern_validations": pattern_validations,
                 "ab_count_warning": ab_count_warning,
             }
 
         except Exception as e:
             logger.error(f"Validation error for camera {camera_num}: {e}")
-            results[f"camera_{camera_num}"] = {"status": "error", "error": str(e)}
+            results[f"camera_{camera_num}"] = {
+                "status": "error",
+                "error": str(e),
+                "found": None,
+                "suggestions": [],
+                "streams": None,
+            }
             overall_valid = False
 
     # If validation passed, preload first 10 frames for each camera in background
@@ -1351,42 +1265,10 @@ def validate_files():
             cfg.data.setdefault("images", {})["image_shape"] = [h, w]
             break
 
-    # Stale multi-camera config detection: every camera folder (e.g. source/Cam1)
-    # is missing, but files matching the pattern sit directly in the source folder
-    # → this is a single-camera layout left over from a previous multi-camera run.
-    # Suggestion only — the user applies it with an explicit click in the GUI.
-    # Standard image type only: .set/.cine never use camera subfolders, and
-    # im7-with-subfolders would need use_camera_subfolders toggled instead.
-    # Guard on camera_count (not len(camera_numbers)): camera_count > 1 is exactly
-    # what makes get_camera_folder() synthesize the phantom CamN subfolders, and the
-    # stale state can have camera_count=2 with camera_numbers=[1] (only camera 1
-    # validated) — len([1]) == 1 would miss it.
-    suggested_camera_count = None
-    suggested_camera_count_files = []
-    if (
-        not overall_valid
-        and cfg.camera_count > 1
-        and cfg.image_type == "standard"
-        and all_camera_paths_missing
-    ):
-        patterns = (
-            cfg.image_format
-            if isinstance(cfg.image_format, (list, tuple))
-            else [cfg.image_format]
-        )
-        flat_files = detect_flat_source_files(
-            cfg.source_paths[source_path_idx], patterns
-        )
-        if flat_files:
-            suggested_camera_count = 1
-            suggested_camera_count_files = flat_files
-
     return jsonify(
         {
             "valid": overall_valid,
             "detected_count": top_detected_count,
-            "suggested_camera_count": suggested_camera_count,
-            "suggested_camera_count_files": suggested_camera_count_files,
             "details": results,
         }
     )

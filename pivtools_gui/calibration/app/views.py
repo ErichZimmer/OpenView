@@ -36,7 +36,7 @@ import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -909,6 +909,17 @@ def _meta_int(meta: dict, key: str) -> Optional[int]:
 # ---------------------------------------------------------------------------
 
 
+def _no_diagnosis(error: str) -> Dict[str, Any]:
+    """A failed validate response for a source no diagnosis could run on."""
+    return {
+        "valid": False,
+        "error": error,
+        "found": None,
+        "suggestions": [],
+        "streams": None,
+    }
+
+
 @calibration_bp.route("/calibration/validate", methods=["POST"])
 def validate():
     """Validate the calibration image source (all formats): found-count, preview, suggestion."""
@@ -931,10 +942,10 @@ def validate():
         # is the expected first-visit state of every pre-sidecar source, not a
         # fault — the message is already actionable, so no traceback.
         logger.warning("calibration validate: %s", exc)
-        return jsonify({"valid": False, "error": str(exc)}), 200
+        return jsonify(_no_diagnosis(str(exc))), 200
     except Exception as exc:
         logger.exception("calibration validate failed")
-        return jsonify({"valid": False, "error": str(exc)}), 200
+        return jsonify(_no_diagnosis(str(exc))), 200
     return jsonify(result)
 
 

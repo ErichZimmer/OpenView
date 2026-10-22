@@ -35,6 +35,8 @@ from flask import Flask
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from fixtures.diagnosis import make_ctx  # noqa: E402
+
 import pivtools_gui.app as gui_app  # noqa: E402
 from pivtools_core.config import Config  # noqa: E402
 
@@ -233,6 +235,9 @@ def test_validation_dict_is_json_serializable(tmp_path):
         expected_count=2,
         zero_based_indexing=False,
         read_frame_fn=_read,
+        diagnosis=make_ctx(
+            set_file, image_type="lavision_set", image_format=(set_file.name,)
+        ),
     )
 
     assert result["valid"] is False

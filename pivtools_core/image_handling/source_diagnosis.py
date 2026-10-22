@@ -18,6 +18,7 @@ import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import (
+    TYPE_CHECKING,
     Any,
     Callable,
     Dict,
@@ -37,6 +38,7 @@ from .path_utils import (
     _suggest_pattern,
     _suggest_pattern_for_role,
     format_to_glob,
+    is_calibration_output_dir,
     normalise_source_path,
     start_index_hint_message,
 )
@@ -45,6 +47,9 @@ from .readers.set_reader import (
     set_camera_streams,
     valid_stream_splits,
 )
+
+if TYPE_CHECKING:
+    from ..config import Config
 
 # One-level scan caps. A source folder with tens of thousands of frames must not
 # stall the validate request, and a rule only needs a representative sample.
@@ -268,6 +273,8 @@ def _list_dir(directory: Path) -> _Listing:
                 if lower == _STREAMSET_XML or _DAVIS_FIRST_FRAME_RE.fullmatch(lower):
                     companion = True
                 if entry.is_dir():
+                    if is_calibration_output_dir(Path(entry.path)):
+                        continue
                     if len(dirs) < SCAN_MAX_SUBDIRS:
                         dirs.append(entry.name)
                     else:
@@ -597,7 +604,8 @@ def found_for(
         if streams_error is not None:
             return f"{scan.path.name}: streams could not be read ({streams_error})."
     fmt = result.get("format_detected")
-    if result.get("valid") and fmt:
+    # A result without ``found_count`` cannot say how much loaded; describe the disk.
+    if result.get("valid") and fmt and "found_count" in result:
         unit = {"set": "entries", "cine": "frames"}.get(fmt, f".{fmt}")
         head = _pass_head(ctx.camera_count, result["found_count"], unit)
         size = result.get("image_size")
@@ -1453,3 +1461,59 @@ def diagnose(
             seen.append(suggestion["apply"])
             out.append(suggestion)
     return out
+
+
+def apply_diagnosis(
+    result: Dict[str, Any],
+    ctx: DiagnosisContext,
+    camera: int,
+    camera_path: Path,
+    expected_count: Optional[int],
+) -> None:
+    """Add ``found``, ``suggestions`` and ``streams`` to a validation result in place.
+
+    The core ``error`` is never touched. A ``.set`` whose stream table cannot be
+    read keeps ``streams = None`` and ``found`` says why. A filesystem failure
+    inside the rules leaves ``suggestions`` empty and is reported in ``found``.
+    """
+    scan = scan_source(ctx.source_path)
+    streams: Optional[List[StreamInfo]] = None
+    streams_error: Optional[str] = None
+    if (
+        ctx.image_type == "lavision_set"
+        and scan.exists
+        and not scan.is_dir
+        and _is_set_file(scan.path)
+    ):
+        try:
+            streams = set_stream_infos(scan.path, ctx.camera_count)
+        except (OSError, ValueError) as exc:
+            streams_error = str(exc)
+    found = found_for(scan, ctx, result, streams, streams_error)
+    try:
+        suggestions = diagnose(
+            scan, ctx, camera, camera_path, expected_count, bool(result["valid"])
+        )
+    except OSError as exc:
+        suggestions = []
+        found += f" Could not finish the diagnosis: {exc.strerror or exc}."
+    result["found"] = found
+    result["suggestions"] = suggestions
+    result["streams"] = streams
+
+
+def piv_diagnosis_context(cfg: "Config", source_path_idx: int) -> DiagnosisContext:
+    """The Setup-page diagnosis context for one configured PIV source path."""
+    return DiagnosisContext(
+        source_path=cfg.source_paths[source_path_idx],
+        image_type=cfg.image_type,
+        image_format=tuple(cfg.image_format),
+        camera_count=cfg.camera_count,
+        camera_numbers=tuple(cfg.camera_numbers),
+        use_camera_subfolders=cfg.images_use_camera_subfolders,
+        camera_subfolders=tuple(cfg.camera_subfolders or ()),
+        pairing_preset=cfg.pairing_preset,
+        pair_reader=not cfg.time_resolved,
+        start_index=cfg.start_index,
+        calibration=False,
+    )

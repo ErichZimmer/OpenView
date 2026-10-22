@@ -21,6 +21,7 @@ from pivtools_core.image_handling.path_utils import (
     format_to_glob,
     validate_images_generic,
 )
+from pivtools_core.image_handling.source_diagnosis import piv_diagnosis_context
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +83,7 @@ def validate_config(config: Config) -> Tuple[bool, str, List[str]]:
     camera_numbers = config.camera_numbers
     source_path = config.source_paths[0]
     image_type = config.image_type  # Already case-normalized via _detect_image_type()
+    diagnosis = piv_diagnosis_context(config, 0)
 
     for camera_num in camera_numbers:
         # Determine camera path
@@ -103,6 +105,7 @@ def validate_config(config: Config) -> Tuple[bool, str, List[str]]:
             config.num_images,
             config.start_index == 0,
             read_frame_fn=read_frame,
+            diagnosis=diagnosis,
         )
 
         if result["error"]:
@@ -399,7 +402,11 @@ def validate_ensemble_config(config: Config) -> Tuple[bool, List[str], List[str]
     # 7b. Validate kspace_shape (quartic kurtosis terms are LM-fitter-only)
     try:
         kspace_shape = config.ensemble_kspace_shape
-        if kspace_shape != "gaussian" and fit_method is not None and fit_method != "kspace":
+        if (
+            kspace_shape != "gaussian"
+            and fit_method is not None
+            and fit_method != "kspace"
+        ):
             errors.append(
                 f"ensemble_piv.kspace_shape '{kspace_shape}' requires "
                 f"fit_method 'kspace' (the '{fit_method}' fitter has no quartic "

@@ -31,6 +31,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from fixtures.diagnosis import make_ctx  # noqa: E402
+
 from pivtools_core.image_handling.path_utils import validate_images_generic
 from pivtools_core.image_handling.readers import set_reader
 
@@ -65,6 +67,9 @@ def test_set_validation_surfaces_real_count(tmp_path, monkeypatch):
         expected_count=2100,  # the original over-count
         zero_based_indexing=False,
         read_frame_fn=_fake_frame,
+        diagnosis=make_ctx(
+            set_file, image_type="lavision_set", image_format=("data.set",)
+        ),
     )
 
     # The real, honest count — never the sentinel, never the user's 2100. Holding
@@ -96,6 +101,9 @@ def test_set_count_read_failure_is_a_visible_error(tmp_path, monkeypatch):
         expected_count=100,
         zero_based_indexing=False,
         read_frame_fn=_fake_frame,
+        diagnosis=make_ctx(
+            set_file, image_type="lavision_set", image_format=("data.set",)
+        ),
     )
 
     assert result["valid"] is False
@@ -126,6 +134,7 @@ def test_cine_count_read_failure_is_a_visible_error(tmp_path, monkeypatch):
         expected_count=10,
         zero_based_indexing=False,
         read_frame_fn=_fake_frame,
+        diagnosis=make_ctx(tmp_path, image_type="cine", image_format=("cam%d.cine",)),
     )
 
     assert result["valid"] is False
@@ -152,6 +161,9 @@ def test_cine_type_on_non_cine_file_names_the_mismatch(tmp_path):
         expected_count=10,
         zero_based_indexing=False,
         read_frame_fn=_fake_frame,
+        diagnosis=make_ctx(
+            tmp_path, image_type="cine", image_format=("calib00001.png",)
+        ),
     )
 
     assert result["valid"] is False

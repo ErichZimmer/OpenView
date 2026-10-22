@@ -12,8 +12,10 @@ import pytest
 sys.path.insert(0, os.path.dirname(__file__))
 from fixtures.diagnosis import (  # noqa: E402
     _inp,
+    calibration_client,
     frame_names,
     make_ctx,
+    piv_route_response,
     touch,
     write_config,
 )
@@ -24,16 +26,20 @@ from fixtures.lavision import (  # noqa: E402,F401
 )
 
 import pivtools_core.image_handling.source_diagnosis as SD  # noqa: E402
+from pivtools_core.calibration_settings import save_settings  # noqa: E402
 from pivtools_core.image_handling.path_utils import (  # noqa: E402
     _append_folder_contents,
     infer_image_type,
     normalise_source_path,
+    validate_images_generic,
+    validate_single_pattern,
 )
 from pivtools_core.image_handling.source_diagnosis import (  # noqa: E402
     APPLY_FIELDS,
     RULES,
     StreamInfo,
     SubdirInfo,
+    apply_diagnosis,
     camera_number_of,
     camera_numbers_for,
     cine_pattern,
@@ -1189,3 +1195,329 @@ def test_fixture_trees_cover_every_rule(tmp_path):
             )
         }
     assert emitted == {rule_id for rule_id, _ in RULES}
+
+
+# --- validators ---
+
+
+def _fake_frame(_idx):
+    import numpy as np
+
+    return np.zeros((8, 8), dtype=np.uint8)
+
+
+def test_found_for_without_found_count_describes_the_disk(tmp_path):
+    touch(tmp_path, ["B00001.tif"])
+    scan = scan_source(tmp_path)
+    result = {"valid": True, "format_detected": "tif"}
+    assert found_for(scan, make_ctx(tmp_path), result, None, None) == scan_sentence(
+        scan
+    )
+
+
+def test_validate_images_generic_rejects_mismatched_diagnosis(tmp_path):
+    with pytest.raises(ValueError, match="does not match"):
+        validate_images_generic(
+            tmp_path,
+            1,
+            "B%05d.im7",
+            "lavision_im7",
+            1,
+            False,
+            _fake_frame,
+            diagnosis=make_ctx(tmp_path),
+        )
+
+
+def test_validate_images_generic_adds_diagnosis_on_every_branch(tmp_path):
+    touch(tmp_path, ["Cam1_00001.tif"])
+    for fmt in ("", "nope%05d.tif"):
+        result = validate_images_generic(
+            tmp_path,
+            1,
+            fmt,
+            "standard",
+            1,
+            False,
+            _fake_frame,
+            diagnosis=make_ctx(tmp_path, image_format=(fmt,)),
+        )
+        assert {"found", "suggestions", "streams"} <= set(result)
+        assert not any(k.startswith("suggest") and k != "suggestions" for k in result)
+
+
+def test_apply_diagnosis_reports_an_unfinished_diagnosis(tmp_path, monkeypatch):
+    touch(tmp_path, ["Cam1_00001.tif"])
+
+    def boom(*_args, **_kwargs):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(SD, "diagnose", boom)
+    result = {"valid": False, "error": "core text", "found_count": 0}
+    apply_diagnosis(result, make_ctx(tmp_path), 1, tmp_path, 1)
+    assert result["error"] == "core text"
+    assert result["suggestions"] == []
+    assert result["found"].endswith(
+        "Could not finish the diagnosis: Permission denied."
+    )
+
+
+def test_single_pattern_role_suggestion_replaces_only_its_index(tmp_path):
+    touch(tmp_path, frame_names("B%05d_A.tif", 1, 3) + frame_names("B%05d_B.tif", 1, 3))
+    result = validate_single_pattern(
+        tmp_path,
+        "wrong%05d_B.tif",
+        "standard",
+        3,
+        False,
+        role="B",
+        patterns=["B%05d_A.tif", "wrong%05d_B.tif"],
+        index=1,
+    )
+    assert set(result) == {
+        "valid",
+        "found_count",
+        "error",
+        "suggestions",
+        "sample_files",
+    }
+    assert [s["apply"] for s in result["suggestions"]] == [
+        {"image_format": ["B%05d_A.tif", "B%05d_B.tif"]}
+    ]
+
+
+def test_single_pattern_missing_camera_path_has_no_suggestions(tmp_path):
+    result = validate_single_pattern(
+        tmp_path / "Cam1",
+        "B%05d.tif",
+        "standard",
+        1,
+        False,
+        patterns=["B%05d.tif"],
+        index=0,
+    )
+    assert result["error"] == f"Camera path does not exist: {tmp_path / 'Cam1'}"
+    assert result["suggestions"] == []
+
+
+# --- routes ---
+
+
+def test_validate_files_passes_core_set_message_through(tmp_path, monkeypatch):
+    folder = tmp_path / "data"
+    touch(folder / "run", ["Frame0-0.ims"])
+    (folder / "run.set").write_bytes(b"stub")
+    body = piv_route_response(
+        tmp_path,
+        monkeypatch,
+        paths={"source_paths": [str(folder)]},
+        images={
+            "image_type": "lavision_set",
+            "image_format": ["data.set"],
+            "pairing_preset": "pre_paired",
+            "frame_stride": 0,
+        },
+    ).get_json()
+    cam = body["details"]["camera_1"]
+    assert cam["error"] == f"Expected .set file but got: {folder}"
+    assert "data.set" not in cam["error"]
+    assert (cam["suggestions"][0]["apply"], cam["suggestions"][0]["label"]) == (
+        {"source_path": str(folder / "run.set")},
+        'Use "run.set"',
+    )
+    assert cam["found"] == (
+        f"In {folder.as_posix()}: 1 .set file; 1 folder (run) with 1 .ims file."
+    )
+    assert cam["streams"] is None
+    assert not any(k.startswith("suggested_") for k in body)
+    assert not any(k.startswith("suggested_") for k in cam)
+
+
+def test_validate_files_flat_files_suggest_one_camera(tmp_path, monkeypatch):
+    src = tmp_path / "src"
+    touch(src, ["B00001.tif", "B00002.tif", "B00003.tif"])
+    body = piv_route_response(
+        tmp_path,
+        monkeypatch,
+        paths={"source_paths": [str(src)], "camera_count": 2, "camera_numbers": [1, 2]},
+        images={"image_format": ["B%05d.tif"], "num_images": 3},
+    ).get_json()
+    applies = [s["apply"] for s in body["details"]["camera_1"]["suggestions"]]
+    assert {"camera_count": 1, "camera_numbers": [1]} in applies
+
+
+@pytest.mark.parametrize("idx", [3, -1, "0"])
+def test_validate_files_rejects_out_of_range_source_idx(tmp_path, monkeypatch, idx):
+    r = piv_route_response(tmp_path, monkeypatch, json={"source_path_idx": idx})
+    assert r.status_code == 400
+    assert r.get_json()["error"] == (
+        f"source_path_idx {idx} is out of range: 1 source paths configured"
+    )
+
+
+def test_calibration_route_set_in_folder(tmp_path, monkeypatch):
+    folder = tmp_path / "cal"
+    touch(folder / "run", ["Frame0-0.ims"])
+    (folder / "run.set").write_bytes(b"stub")
+    save_settings(
+        folder, {"image": {"image_type": "lavision_set", "image_format": "data.set"}}
+    )
+    out = (
+        calibration_client(folder, monkeypatch)
+        .post("/calibration/validate", json={"camera": 1, "source_path_idx": 0})
+        .get_json()
+    )
+    assert out["suggestions"][0]["apply"]["source_path"] == str(folder / "run.set")
+
+
+def test_calibration_im7_camera_folders_at_count_one(tmp_path, monkeypatch):
+    src = tmp_path / "calib"
+    for i in (1, 2, 3):
+        touch(src / f"camera{i}", ["B00001.im7", "B00002.im7"])
+    save_settings(
+        src,
+        {
+            "image": {
+                "image_type": "lavision_im7",
+                "image_format": "calib%05d.tif",
+                "n_views": 2,
+            }
+        },
+    )
+    out = (
+        calibration_client(src, monkeypatch)
+        .post("/calibration/validate", json={"camera": 1, "source_path_idx": 0})
+        .get_json()
+    )
+    assert out["error"] == (
+        "First frame not found. Looking for: calib00001.tif. "
+        "No files here, only folders: camera1, camera2, camera3"
+    )
+    assert out["found"] == (
+        f"In {src.as_posix()}: no images here; 3 folders (camera1, camera2, camera3), "
+        "each with 2 .im7 files."
+    )
+    assert [s["label"] for s in out["suggestions"][:2]] == [
+        "Set camera count to 3 (also changes Setup)",
+        "Use camera1/ only",
+    ]
+
+
+def test_calibration_route_missing_sidecar_carries_empty_diagnosis(
+    tmp_path, monkeypatch
+):
+    out = (
+        calibration_client(tmp_path, monkeypatch)
+        .post("/calibration/validate", json={"camera": 1, "source_path_idx": 0})
+        .get_json()
+    )
+    assert out["valid"] is False
+    assert (out["found"], out["suggestions"], out["streams"]) == (None, [], None)
+
+
+@pytest.mark.skipif(
+    os.name == "nt" or os.geteuid() == 0, reason="needs POSIX permissions as non-root"
+)
+def test_validate_files_survives_unlistable_subfolder(tmp_path, monkeypatch):
+    src = tmp_path / "src"
+    touch(src, ["Cam1_00001.tif"])
+    locked = src / "locked"
+    locked.mkdir()
+    locked.chmod(0)
+    try:
+        r = piv_route_response(
+            tmp_path,
+            monkeypatch,
+            paths={"source_paths": [str(src)]},
+            images={"image_format": ["nope%05d.tif"], "num_images": 1},
+        )
+        assert r.status_code == 200
+        cam = r.get_json()["details"]["camera_1"]
+        assert cam["error"].startswith(
+            "First frame not found. Looking for: nope00001.tif"
+        )
+        assert cam["found"].endswith(
+            f"Could not list {locked.as_posix()}: Permission denied."
+        )
+    finally:
+        locked.chmod(0o755)
+
+
+def test_validate_files_unreadable_set_index_reports_reason(
+    tmp_path, monkeypatch, clean_set_cache
+):
+    folder = tmp_path / "data"
+    touch(folder / "run", [])
+    (folder / "run" / "Frame0-0.ims").write_bytes(b"xx")  # index too small
+    (folder / "run" / "Frame0-1.ims").write_bytes(b"yy")
+    set_file = folder / "run.set"
+    set_file.write_bytes(b"stub")
+    cam = piv_route_response(
+        tmp_path,
+        monkeypatch,
+        paths={"source_paths": [str(set_file)]},
+        images={
+            "image_type": "lavision_set",
+            "image_format": ["run.set"],
+            "pairing_preset": "pre_paired",
+            "frame_stride": 0,
+        },
+    ).get_json()["details"]["camera_1"]
+    reason = f"Index file too small: {folder / 'run' / 'Frame0-0.ims'}"
+    assert cam["status"] == "error"
+    assert cam["error"] == f"Could not read the image count of {set_file}: {reason}"
+    assert cam["found"] == f"run.set: streams could not be read ({reason})."
+    assert cam["suggestions"] == []
+    assert cam["streams"] is None
+
+
+def test_validate_files_multi_camera_cine_never_suggests_a_literal(
+    tmp_path, monkeypatch
+):
+    src = tmp_path / "src"
+    touch(src, ["rec_1.cine", "rec_2.cine"])
+    body = piv_route_response(
+        tmp_path,
+        monkeypatch,
+        paths={"source_paths": [str(src)], "camera_count": 2, "camera_numbers": [1, 2]},
+        images={"image_type": "cine", "image_format": ["run.cine"], "num_images": 1},
+    ).get_json()
+    for key in ("camera_1", "camera_2"):
+        formats = [
+            s["apply"]["image_format"]
+            for s in body["details"][key]["suggestions"]
+            if "image_format" in s["apply"]
+        ]
+        assert formats == [["rec_%d.cine"]]
+
+
+def test_validate_files_single_cine_at_two_cameras_suggests_nothing(
+    tmp_path, monkeypatch
+):
+    src = tmp_path / "src"
+    touch(src, ["rec_1.cine"])
+    body = piv_route_response(
+        tmp_path,
+        monkeypatch,
+        paths={"source_paths": [str(src)], "camera_count": 2, "camera_numbers": [1, 2]},
+        images={"image_type": "cine", "image_format": ["run.cine"], "num_images": 1},
+    ).get_json()
+    for key in ("camera_1", "camera_2"):
+        assert not any(
+            "image_format" in s["apply"] for s in body["details"][key]["suggestions"]
+        )
+
+
+def test_calibration_output_folder_hidden_only_with_its_sidecar(tmp_path):
+    touch(tmp_path / "camera1", ["B00001.im7"])
+    touch(tmp_path / "calibration", ["B00001.tif"])  # the user's own folder
+    assert "calibration" in [d.name for d in scan_source(tmp_path).subdirs]
+    assert "calibration" in _append_folder_contents("x", tmp_path)
+    save_settings(
+        tmp_path,
+        {"image": {"image_type": "lavision_im7", "image_format": "B%05d.im7"}},
+    )
+    assert [d.name for d in scan_source(tmp_path).subdirs] == ["camera1"]
+    assert _append_folder_contents("x", tmp_path) == (
+        "x. No files here, only folders: camera1"
+    )

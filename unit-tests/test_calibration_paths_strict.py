@@ -31,6 +31,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import yaml
+from fixtures.diagnosis import make_ctx
 from flask import Flask
 
 from pivtools_core.calibration_settings import save_settings
@@ -162,6 +163,7 @@ class _FakeConfig:
     def __init__(self, source: Path, camera_count: int = 1):
         self._source = source
         self.camera_count = camera_count
+        self.camera_numbers = list(range(1, camera_count + 1))
 
     def get_calibration_source(self, idx: int) -> Path:
         return self._source
@@ -230,6 +232,9 @@ def test_set_shortfall_is_invalid(tmp_path, monkeypatch):
         expected_count=10,
         zero_based_indexing=False,
         read_frame_fn=_frame,
+        diagnosis=make_ctx(
+            set_file, image_type="lavision_set", image_format=("data.set",)
+        ),
     )
     assert result["valid"] is False
     assert result["found_count"] == 5
@@ -248,6 +253,7 @@ def test_cine_shortfall_is_invalid(tmp_path, monkeypatch):
         expected_count=7,
         zero_based_indexing=False,
         read_frame_fn=_frame,
+        diagnosis=make_ctx(tmp_path, image_type="cine", image_format=("cam%d.cine",)),
     )
     assert result["valid"] is False
     assert "found 3 entries, expected 7" in result["error"]
@@ -267,6 +273,9 @@ def test_container_without_expected_count_is_not_checked(tmp_path, monkeypatch):
         expected_count=None,
         zero_based_indexing=False,
         read_frame_fn=_frame,
+        diagnosis=make_ctx(
+            set_file, image_type="lavision_set", image_format=("data.set",)
+        ),
     )
     assert result["valid"] is True, result["error"]
     assert result["found_count"] == 5
@@ -322,6 +331,7 @@ def test_cine_mismatch_sets_read_error(tmp_path):
         expected_count=4,
         zero_based_indexing=False,
         read_frame_fn=_frame,
+        diagnosis=make_ctx(tmp_path, image_type="cine", image_format=("cam%d.png",)),
     )
     assert result["valid"] is False
     assert "Image type is CINE" in result["read_error"]

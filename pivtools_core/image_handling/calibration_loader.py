@@ -42,6 +42,7 @@ from .readers.cine_reader import get_cine_frame_count
 # Import from the concrete submodule: get_set_entry_count is NOT re-exported from
 # the .readers package (see path_utils' .set validation branch).
 from .readers.set_reader import get_set_entry_count
+from .source_diagnosis import DiagnosisContext
 
 # ---------------------------------------------------------------------------
 # Decoded-frame cache
@@ -625,7 +626,9 @@ def validate_calibration_images(
         - sample_files: list - Sample of matching filenames
         - format_detected: str - Detected file format
         - error: str or None - Error message if validation failed
-        - suggested_pattern: str or None - Suggested pattern if files don't match
+        - found: str - What is on disk (or what loaded), one plain sentence
+        - suggestions: list - Ranked one-click fixes for the calibration stores
+        - streams: list or None - Per-stream table of a ``.set`` recording
     """
     # Image sourcing comes from the source's settings sidecar (explicit args
     # override); config supplies only the source pointer + rig camera count.
@@ -644,9 +647,9 @@ def validate_calibration_images(
         # (get_calibration_frame_count), so validate that same range. Checking only
         # the first file would pass files numbered from 0 with a 1-based start.
         # A missing camera directory globs to nothing and gets expected 1; the
-        # generic validator then reports "Camera path does not exist" with the
-        # subfolder suggestion, which is the message the user needs (not an
-        # "expected_count is required" internal).
+        # generic validator then reports "Camera path does not exist" and the
+        # diagnosis suggests the real folders, which is what the user needs (not
+        # an "expected_count is required" internal).
         expected_count = max(len(_glob_images(camera_path, format_to_glob(fmt))), 1)
     else:
         # Containers with blank n_views: the generic validator reads the real entry
@@ -664,6 +667,21 @@ def validate_calibration_images(
             image_type=cal_image_type,
         )
 
+    zero_based = bool(image.get("zero_based_indexing", False))
+    diagnosis = DiagnosisContext(
+        source_path=Path(source),
+        image_type=cal_image_type,
+        image_format=(fmt,),
+        camera_count=config.camera_count,
+        camera_numbers=tuple(config.camera_numbers),
+        use_camera_subfolders=bool(image.get("use_camera_subfolders", False)),
+        camera_subfolders=tuple(image.get("camera_subfolders") or ()),
+        pairing_preset=None,
+        pair_reader=False,
+        start_index=0 if zero_based else 1,
+        calibration=True,
+    )
+
     # Use the generic validator
     return validate_images_generic(
         camera_path=camera_path,
@@ -671,8 +689,9 @@ def validate_calibration_images(
         image_format=fmt,
         image_type=cal_image_type,
         expected_count=expected_count,
-        zero_based_indexing=bool(image.get("zero_based_indexing", False)),
+        zero_based_indexing=zero_based,
         read_frame_fn=read_frame,
+        diagnosis=diagnosis,
     )
 
 

@@ -1,9 +1,11 @@
 """Shared helpers for the source-diagnosis tests (contexts, file trees, configs)."""
 
 from pathlib import Path
-from typing import Any, Iterable, List
+from typing import Any, Dict, Iterable, List, Optional
 
 import yaml
+from flask import Flask
+from flask.testing import FlaskClient
 
 from pivtools_core.config import Config
 from pivtools_core.image_handling.path_utils import camera_subfolder_name
@@ -80,3 +82,57 @@ def write_config(tmp_path: Path, **blocks: dict) -> Config:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(yaml.dump(cfg, default_flow_style=False))
     return Config(path=str(config_path))
+
+
+def piv_route_response(
+    tmp_path: Path,
+    monkeypatch: Any,
+    paths: Optional[Dict[str, Any]] = None,
+    images: Optional[Dict[str, Any]] = None,
+    json: Optional[Dict[str, Any]] = None,
+) -> Any:
+    """``POST /backend/validate_files`` against a config built by ``write_config``.
+
+    ``get_config`` is bound to that config for the request; the Flask response is
+    returned unparsed so status codes can be asserted.
+    """
+    import pivtools_gui.app as gui_app
+
+    blocks: Dict[str, Dict[str, Any]] = {}
+    if paths is not None:
+        blocks["paths"] = paths
+    if images is not None:
+        blocks["images"] = images
+    config = write_config(tmp_path, **blocks)
+    monkeypatch.setattr(gui_app, "get_config", lambda: config)
+    app = Flask(__name__)
+    app.register_blueprint(gui_app.api_bp)
+    return app.test_client().post("/backend/validate_files", json=json or {})
+
+
+class FakeCalibrationConfig:
+    """The ``Config`` members the calibration loader and blueprint read."""
+
+    def __init__(self, source: Path, camera_count: int = 1):
+        self._source = source
+        self.camera_count = camera_count
+        self.camera_numbers = list(range(1, camera_count + 1))
+        # The blueprint's helpers also read the calibration pointer block.
+        self.calibration = {"active": "dotboard"}
+
+    def get_calibration_source(self, idx: int) -> Path:
+        """The one configured calibration source, for any index."""
+        return self._source
+
+
+def calibration_client(
+    source: Path, monkeypatch: Any, camera_count: int = 1
+) -> FlaskClient:
+    """A test client for the calibration blueprint with ``source`` as its source."""
+    import pivtools_gui.calibration.app.views as views
+
+    config = FakeCalibrationConfig(source, camera_count)
+    monkeypatch.setattr(views, "get_config", lambda: config)
+    app = Flask(__name__)
+    app.register_blueprint(views.calibration_bp)
+    return app.test_client()
