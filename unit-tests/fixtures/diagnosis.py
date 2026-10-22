@@ -1,7 +1,7 @@
 """Shared helpers for the source-diagnosis tests (contexts, file trees, configs)."""
 
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, List
 
 import yaml
 
@@ -46,6 +46,11 @@ def _inp(
         camera_subfolders=ctx.camera_subfolders,
     )
     return RuleInput(scan_source(source), ctx, camera, camera_path, expected_count)
+
+
+def frame_names(fmt: str, start: int, stop: int) -> List[str]:
+    """File names ``fmt % i`` for ``i`` in ``start..stop`` inclusive."""
+    return [fmt % i for i in range(start, stop + 1)]
 
 
 def touch(folder: Path, names: Iterable[str]) -> None:

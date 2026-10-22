@@ -33,9 +33,12 @@ from typing import (
 
 from .path_utils import (
     _detect_ab_pair_pattern,
+    _start_index_mismatch,
     _suggest_pattern,
+    _suggest_pattern_for_role,
     format_to_glob,
     normalise_source_path,
+    start_index_hint_message,
 )
 from .readers.set_reader import (
     read_set_info,
@@ -1287,3 +1290,166 @@ def rule_flat_with_subfolders(inp: RuleInput) -> List[Suggestion]:
             apply,
         )
     ]
+
+
+def _family_names(inp: RuleInput) -> Optional[List[str]]:
+    """Files of the configured image family in ``camera_path``, or None if it is not a folder."""
+    if not inp.camera_path.is_dir():
+        return None
+    if inp.camera_path == inp.scan.path:
+        names: Sequence[str] = inp.scan.root_names
+    else:
+        names = _list_dir(inp.camera_path).image_names
+    family = TYPE_FAMILY[inp.ctx.image_type]
+    return [n for n in names if family_of(n) == family]
+
+
+def pattern_reason(
+    names: Sequence[str], image_type: str, calibration: bool
+) -> Optional[str]:
+    """Why no filename pattern can be made from ``names``, or None when one can.
+
+    Mirrors ``format_apply``: standard on Setup tries an A/B pair first, so a pair
+    means a pattern exists. Container types never take a derived pattern.
+    """
+    if not names or image_type not in ("standard", "lavision_im7"):
+        return None
+    if image_type == "standard":
+        if not calibration and _detect_ab_pair_pattern(list(names)) is not None:
+            return None
+        return _suggest_pattern(list(names)).reason
+    return _suggest_pattern(list(names), "im7").reason
+
+
+def _pattern_label(fragment: Mapping[str, Any]) -> str:
+    """``Use "{p}"`` or ``Use "{a}" / "{b}"`` for an ``image_format`` fragment."""
+    return "Use " + " / ".join(f'"{p}"' for p in fragment["image_format"])
+
+
+def rule_pattern(inp: RuleInput) -> List[Suggestion]:
+    """No file in the camera folder matches the first configured pattern.
+
+    Fires when the folder holds files of the configured family and none matches
+    ``format_to_glob(primary)``, or the primary pattern is empty. The suggestion is
+    the pattern (or A/B pair, or CINE ``%d`` pattern) derived from the real names.
+    """
+    ctx = inp.ctx
+    if ctx.image_type == "lavision_set":
+        return []
+    names = _family_names(inp)
+    if not names:
+        return []
+    configured = _configured_patterns(ctx)
+    primary = ctx.image_format[0] if ctx.image_format else ""
+    if primary and primary.strip():
+        glob = format_to_glob(primary)
+        if any(fnmatch.fnmatchcase(n, glob) for n in names):
+            return []
+    fragment = format_apply(names, ctx.image_type, inp.camera_path, ctx)
+    if fragment is None or fragment["image_format"] == configured:
+        return []
+    shown = ", ".join(names[:FOUND_MAX_NAMES])
+    wanted = f'"{primary}"' if primary.strip() else "an empty pattern"
+    return [
+        make_suggestion(
+            "pattern",
+            f"No file in {inp.camera_path.as_posix()} matches {wanted}. "
+            f"The files look like {shown}.",
+            _pattern_label(fragment),
+            fragment,
+        )
+    ]
+
+
+def role_pattern_suggestion(
+    names: Sequence[str],
+    role: Optional[str],
+    patterns: Sequence[str],
+    index: int,
+) -> Optional[Suggestion]:
+    """A ``pattern`` suggestion replacing ``patterns[index]`` for A/B ``role``.
+
+    None when no pattern can be made, or when it equals the configured one.
+    """
+    pattern = _suggest_pattern_for_role(list(names), role).pattern
+    if pattern is None or pattern == patterns[index]:
+        return None
+    image_format = list(patterns)
+    image_format[index] = pattern
+    return make_suggestion(
+        "pattern",
+        f'The files look like "{pattern}".',
+        f'Use "{pattern}"',
+        {"image_format": image_format},
+    )
+
+
+def start_index_suggestion(found: int, start: int) -> Suggestion:
+    """Switch the start index to the files' first index ``found``."""
+    return make_suggestion(
+        "start_index",
+        start_index_hint_message(found, start),
+        f"Switch to {found}-based",
+        {"start_index": found},
+    )
+
+
+def rule_start_index(inp: RuleInput) -> List[Suggestion]:
+    """Files start at 0 or 1 but the start index is the other, leaving a file missing."""
+    ctx = inp.ctx
+    primary = ctx.image_format[0] if ctx.image_format else ""
+    if inp.expected_count is None or not primary.strip():
+        return []
+    names = _family_names(inp)
+    if not names:
+        return []
+    glob = format_to_glob(primary)
+    matching = [n for n in names if fnmatch.fnmatchcase(n, glob)]
+    found = _start_index_mismatch(
+        inp.camera_path, primary, matching, ctx.start_index, inp.expected_count
+    )
+    return [] if found is None else [start_index_suggestion(found, ctx.start_index)]
+
+
+# Spec rank order (section 4.4). Earlier rules explain the failure more directly.
+RULES: Tuple[Tuple[str, Rule], ...] = (
+    ("path_case", rule_path_case),
+    ("picked_file", rule_picked_file),
+    ("set_in_folder", rule_set_in_folder),
+    ("set_companion", rule_set_companion),
+    ("wrong_type", rule_wrong_type),
+    ("camera_folders", rule_camera_folders),
+    ("inside_camera_folder", rule_inside_camera_folder),
+    ("flat_with_subfolders", rule_flat_with_subfolders),
+    ("set_streams", rule_set_streams),
+    ("pattern", rule_pattern),
+    ("start_index", rule_start_index),
+)
+
+
+def diagnose(
+    scan: SourceScan,
+    ctx: DiagnosisContext,
+    camera: int,
+    camera_path: Path,
+    expected_count: Optional[int],
+    valid: bool,
+) -> List[Suggestion]:
+    """Ranked, de-duplicated suggestions for one camera's source.
+
+    A passing validation runs only ``set_streams`` (it also annotates passes). A failing
+    one runs every rule in ``RULES`` order and drops later suggestions whose ``apply``
+    equals an earlier one. Merging across cameras is the caller's job.
+    """
+    inp = RuleInput(scan, ctx, camera, camera_path, expected_count)
+    out: List[Suggestion] = []
+    seen: List[Dict[str, Any]] = []
+    for rule_id, rule in RULES:
+        if valid and rule_id != "set_streams":
+            continue
+        for suggestion in rule(inp):
+            if suggestion["apply"] in seen:
+                continue
+            seen.append(suggestion["apply"])
+            out.append(suggestion)
+    return out

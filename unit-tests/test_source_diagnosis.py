@@ -2,6 +2,7 @@
 
 # ruff: noqa: F811  (the imported clean_set_cache fixture is re-bound as a test argument)
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -9,7 +10,13 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, os.path.dirname(__file__))
-from fixtures.diagnosis import _inp, make_ctx, touch, write_config  # noqa: E402
+from fixtures.diagnosis import (  # noqa: E402
+    _inp,
+    frame_names,
+    make_ctx,
+    touch,
+    write_config,
+)
 from fixtures.lavision import (  # noqa: E402,F401
     PLIF,
     build_raw16_set,
@@ -23,11 +30,14 @@ from pivtools_core.image_handling.path_utils import (  # noqa: E402
     normalise_source_path,
 )
 from pivtools_core.image_handling.source_diagnosis import (  # noqa: E402
+    APPLY_FIELDS,
+    RULES,
     StreamInfo,
     SubdirInfo,
     camera_number_of,
     camera_numbers_for,
     cine_pattern,
+    diagnose,
     found_for,
     make_suggestion,
     pass_sentence,
@@ -38,6 +48,7 @@ from pivtools_core.image_handling.source_diagnosis import (  # noqa: E402
     rule_set_companion,
     rule_set_in_folder,
     rule_set_streams,
+    rule_start_index,
     rule_wrong_type,
     scan_sentence,
     scan_source,
@@ -989,3 +1000,192 @@ def test_folder_rules_silent_unless_camera_numbers_are_exactly_1_to_k(
         )
         == []
     )
+
+
+# --- diagnose ---
+
+
+def test_start_index_rule(tmp_path):
+    touch(tmp_path, [f"B{i:05d}.tif" for i in range(0, 10)])
+    [s] = rule_start_index(_inp(tmp_path, start_index=1, expected_count=10))
+    assert s == {
+        "id": "start_index",
+        "apply": {"start_index": 0},
+        "label": "Switch to 0-based",
+        "message": "Files start at 0 but the start index is 1 \u2014 switch to 0-based indexing",
+    }
+
+
+def test_start_index_rule_silent_when_files_present(tmp_path):
+    touch(tmp_path, frame_names("B%05d.tif", 1, 10))
+    assert rule_start_index(_inp(tmp_path, start_index=1, expected_count=10)) == []
+
+
+def test_diagnose_ranks_by_rule(tmp_path):
+    for i in (1, 2, 3):
+        touch(tmp_path / f"camera{i}", ["B00001.im7"])
+    touch(tmp_path, ["stray00001.im7"])
+    ctx = make_ctx(tmp_path, image_type="lavision_im7", image_format=("B%05d.im7",))
+    ids = [
+        s["id"]
+        for s in diagnose(scan_source(tmp_path), ctx, 1, tmp_path, 1, valid=False)
+    ]
+    assert ids == ["camera_folders", "camera_folders", "pattern"]
+
+
+def test_diagnose_dedupes_identical_apply(tmp_path, monkeypatch):
+    def same(rule_id):
+        return lambda inp: [make_suggestion(rule_id, "m", "l", {"start_index": 0})]
+
+    monkeypatch.setattr(
+        SD,
+        "RULES",
+        (("pattern", same("pattern")), ("start_index", same("start_index"))),
+    )
+    out = diagnose(scan_source(tmp_path), make_ctx(tmp_path), 1, tmp_path, 1, False)
+    assert [s["id"] for s in out] == ["pattern"]
+
+
+def test_diagnose_on_pass_runs_only_set_streams(tmp_path):
+    touch(tmp_path, frame_names("Cam1_%05d.tif", 1, 3))
+    ctx = make_ctx(tmp_path, image_format=("nope%05d.tif",))
+    assert diagnose(scan_source(tmp_path), ctx, 1, tmp_path, 3, True) == []
+
+
+def test_diagnose_set_target_with_wrong_type_puts_type_fix_first(
+    tmp_path, clean_set_cache
+):
+    s = build_raw16_set(tmp_path, PLIF)
+    ctx = make_ctx(s, image_type="standard", camera_count=1, camera_numbers=(1,))
+    out = diagnose(scan_source(s), ctx, 1, s, 1, valid=False)
+    assert out[0]["id"] == "picked_file"
+    assert out[0]["apply"] == {"image_type": "lavision_set"}
+    ids = [x["id"] for x in out]
+    assert ids.index("picked_file") < ids.index("set_streams")
+
+
+def test_rule_pattern_cine_uses_percent_d_when_every_camera_file_exists(tmp_path):
+    touch(tmp_path, ["rec_1.cine", "rec_2.cine"])
+    [s] = SD.rule_pattern(
+        _inp(
+            tmp_path,
+            image_type="cine",
+            image_format=("x.cine",),
+            camera_count=2,
+            camera_numbers=(1, 2),
+        )
+    )
+    assert s["apply"] == {"image_format": ["rec_%d.cine"]}
+
+
+def tree_path_case(root):
+    touch(root / "Run 1", ["B00001.tif"])
+    return root / "run1", make_ctx(root / "run1"), root / "run1", 1
+
+
+def tree_picked_file(root):
+    touch(root, ["B00001.tif", "B00002.tif"])
+    return root / "B00001.tif", make_ctx(root / "B00001.tif"), root / "B00001.tif", 1
+
+
+def tree_set_in_folder(root):
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "run.set").write_bytes(b"stub")
+    ctx = make_ctx(root, image_type="lavision_set", image_format=("data.set",))
+    return root, ctx, root, 1
+
+
+def tree_set_companion(root):
+    touch(root / "run", ["Frame0-0.ims"])
+    (root / "run.set").write_bytes(b"stub")
+    ctx = make_ctx(root / "run", image_type="lavision_set")
+    return root / "run", ctx, root / "run", 1
+
+
+def tree_wrong_type(root):
+    touch(root, ["B00001.tif", "B00002.tif", "B00003.tif"])
+    ctx = make_ctx(root, image_type="lavision_im7", image_format=("B%05d.im7",))
+    return root, ctx, root, 1
+
+
+def tree_camera_folders(root):
+    for i in (1, 2, 3):
+        touch(root / f"camera{i}", ["B00001.im7"])
+    ctx = make_ctx(root, image_type="lavision_im7", image_format=("B%05d.im7",))
+    return root, ctx, root, 1
+
+
+def tree_inside_camera_folder(root):
+    for i in (1, 2, 3):
+        touch(root / f"camera{i}", ["B00001.tif"])
+    ctx = make_ctx(root / "camera1", camera_count=3, camera_numbers=(1, 2, 3))
+    return root / "camera1", ctx, root / "camera1", 1
+
+
+def tree_flat_with_subfolders(root):
+    touch(root, ["B00001.tif"])
+    ctx = make_ctx(root, camera_count=2, camera_numbers=(1, 2))
+    return root, ctx, root / "Cam1", 1
+
+
+def tree_set_streams(root):
+    root.mkdir(parents=True, exist_ok=True)
+    s = build_raw16_set(root, PLIF)
+    ctx = make_ctx(
+        s,
+        image_type="lavision_set",
+        camera_count=1,
+        camera_numbers=(1,),
+        pair_reader=True,
+    )
+    return s, ctx, s, 1
+
+
+def tree_pattern(root):
+    touch(root, frame_names("Cam1_%05d.tif", 1, 10))
+    return root, make_ctx(root, image_format=("nope%05d.tif",)), root, 10
+
+
+def tree_start_index(root):
+    touch(root, [f"B{i:05d}.tif" for i in range(0, 10)])
+    return root, make_ctx(root, start_index=1), root, 10
+
+
+ALL_FIXTURE_TREES = [
+    tree_path_case,
+    tree_picked_file,
+    tree_set_in_folder,
+    tree_set_companion,
+    tree_wrong_type,
+    tree_camera_folders,
+    tree_inside_camera_folder,
+    tree_flat_with_subfolders,
+    tree_set_streams,
+    tree_pattern,
+    tree_start_index,
+]
+
+
+@pytest.mark.usefixtures("clean_set_cache")
+@pytest.mark.parametrize("build", ALL_FIXTURE_TREES)  # Review Focus 5
+def test_every_rule_output_is_json_safe(tmp_path, build):
+    source, ctx, camera_path, expected_count = build(tmp_path)
+    out = diagnose(scan_source(source), ctx, 1, camera_path, expected_count, False)
+    assert out, build.__name__  # every tree must fire its rule
+    for s in out:
+        json.loads(json.dumps(s))
+        assert set(s["apply"]) <= APPLY_FIELDS
+
+
+@pytest.mark.usefixtures("clean_set_cache")
+def test_fixture_trees_cover_every_rule(tmp_path):
+    emitted = set()
+    for i, build in enumerate(ALL_FIXTURE_TREES):
+        source, ctx, camera_path, expected_count = build(tmp_path / str(i))
+        emitted |= {
+            s["id"]
+            for s in diagnose(
+                scan_source(source), ctx, 1, camera_path, expected_count, False
+            )
+        }
+    assert emitted == {rule_id for rule_id, _ in RULES}
