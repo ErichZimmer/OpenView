@@ -10,6 +10,7 @@ Import direction is one-way at module level: this module imports ``path_utils``;
 ``path_utils`` imports this module only lazily.
 """
 
+import fnmatch
 import json
 import os
 import re
@@ -30,7 +31,12 @@ from typing import (
     Union,
 )
 
-from .path_utils import normalise_source_path
+from .path_utils import (
+    _detect_ab_pair_pattern,
+    _suggest_pattern,
+    format_to_glob,
+    normalise_source_path,
+)
 from .readers.set_reader import (
     read_set_info,
     set_camera_streams,
@@ -626,6 +632,14 @@ def _is_set_file(path: Path) -> bool:
     return path.suffix.lower() == _SET_SUFFIX
 
 
+def _ordered_set_names(scan: SourceScan) -> List[str]:
+    """``.set`` names at the listed folder, recordings with a data folder first."""
+    names = [n for n in scan.root_names if _is_set_file(Path(n))]
+    # The sort is stable, so natural order holds within each group.
+    names.sort(key=lambda n: not (scan.listed / n).with_suffix("").is_dir())
+    return names
+
+
 def rule_set_in_folder(inp: RuleInput) -> List[Suggestion]:
     """The source is a folder holding ``.set`` files (or a missing ``.set`` beside some)."""
     scan = inp.scan
@@ -640,11 +654,8 @@ def rule_set_in_folder(inp: RuleInput) -> List[Suggestion]:
     )
     if not (folder_target or missing_set):
         return []
-    names = [n for n in scan.root_names if _is_set_file(Path(n))]
-    # Recordings with a data folder first; the sort is stable, so natural order holds.
-    names.sort(key=lambda n: not (scan.listed / n).with_suffix("").is_dir())
     out: List[Suggestion] = []
-    for name in names[:SET_SUGGESTIONS_MAX]:
+    for name in _ordered_set_names(scan)[:SET_SUGGESTIONS_MAX]:
         file = scan.listed / name
         out.append(
             make_suggestion(
@@ -839,3 +850,434 @@ def _streams_suggestion(
         cross_store_label(ctx, "set_streams", label, apply),
         apply,
     )
+
+
+# Image family -> image type it selects (inverse of TYPE_FAMILY).
+_FAMILY_TYPE: Dict[str, str] = {family: t for t, family in TYPE_FAMILY.items()}
+# Families a camera subfolder can hold. Container formats (.set, .cine) never use one.
+_FOLDER_FAMILIES = ("raster", "im7")
+# Entries read from the nearest existing ancestor when looking for a path_case match.
+_CASE_SCAN_MAX = SCAN_MAX_ENTRIES * SCAN_HARD_STOP_FACTOR
+
+
+def cine_pattern(
+    names: Sequence[str],
+    folder: Path,
+    camera_count: int,
+    camera_numbers: Sequence[int],
+) -> Optional[str]:
+    """Filename pattern for ``.cine`` files, or None when none is safe to suggest.
+
+    ``resolve_file_path`` formats a ``%`` pattern with the camera number and reads a
+    pattern without ``%`` as one literal file for every camera. So several names that
+    differ by a digit run give a ``%d`` pattern, accepted only when the file it names
+    exists for every selected camera. One ``.cine`` is suggested only for a single
+    camera. Anything else gives None (never a literal for ``camera_count > 1``).
+    """
+    cines = sorted(n for n in names if n.lower().endswith(".cine"))
+    if len(cines) == 1 and camera_count == 1:
+        return cines[0]
+    if len(cines) < 2:
+        return None
+    pattern = _suggest_pattern(cines).pattern
+    if pattern is None:
+        return None
+    try:
+        files = [folder / (pattern % camera) for camera in camera_numbers]
+    except (TypeError, ValueError):  # a literal ``%`` in the file name
+        return None
+    return pattern if all(file.exists() for file in files) else None
+
+
+def format_apply(
+    names: Sequence[str], image_type: str, folder: Path, ctx: DiagnosisContext
+) -> Optional[Dict[str, Any]]:
+    """The ``image_format`` (and A/B ``pairing_preset``) fragment for real file names.
+
+    Standard on Setup tries an A/B pair first. Standard on calibration, IM7 and CINE
+    use a single pattern. None when no pattern can be derived from ``names``.
+    """
+    if not names:
+        return None
+    if image_type == "standard":
+        if not ctx.calibration:
+            pair = _detect_ab_pair_pattern(list(names))
+            if pair is not None:
+                fragment: Dict[str, Any] = {
+                    "image_format": [pair["pattern_a"], pair["pattern_b"]]
+                }
+                if ctx.pairing_preset != pair["mode"]:
+                    fragment["pairing_preset"] = pair["mode"]
+                return fragment
+        pattern = _suggest_pattern(list(names)).pattern
+    elif image_type == "lavision_im7":
+        pattern = _suggest_pattern(list(names), "im7").pattern
+    elif image_type == "cine":
+        pattern = cine_pattern(names, folder, ctx.camera_count, ctx.camera_numbers)
+    else:
+        return None
+    return None if pattern is None else {"image_format": [pattern]}
+
+
+def camera_numbers_for(ctx: DiagnosisContext, k: int) -> List[int]:
+    """Camera selection for a new count ``k``.
+
+    A full selection (``1..camera_count``) grows or shrinks to ``1..k``. A partial
+    selection (e.g. PLIF excluded as ``[2, 3]``) is clipped to ``1..k``, and falls back
+    to ``1..k`` when nothing survives the clip.
+    """
+    selected = sorted(set(ctx.camera_numbers))
+    clipped = [c for c in selected if 1 <= c <= k]
+    if selected == list(range(1, ctx.camera_count + 1)) or not clipped:
+        return list(range(1, k + 1))
+    return clipped
+
+
+def _family_count(counts: Mapping[str, int], family: str) -> int:
+    """Files of ``family`` in an extension-count mapping."""
+    return sum(counts.get(ext, 0) for ext in FAMILY_EXTS[family])
+
+
+def _qualifying_folders(scan: SourceScan, family: str) -> List[SubdirInfo]:
+    """Subfolders with a camera number that hold ``family``, ordered by camera number."""
+    found = [
+        d
+        for d in scan.subdirs
+        if d.camera_number is not None and _family_count(d.ext_counts, family) > 0
+    ]
+    return sorted(found, key=lambda d: (d.camera_number, natural_key(d.name)))
+
+
+def _configured_patterns(ctx: DiagnosisContext) -> List[str]:
+    """The non-blank configured filename patterns."""
+    return [p for p in ctx.image_format if p and p.strip()]
+
+
+def _root_matches(scan: SourceScan, ctx: DiagnosisContext) -> List[str]:
+    """Names at the listed folder that match a configured pattern (a sample if truncated)."""
+    globs = [format_to_glob(p) for p in _configured_patterns(ctx)]
+    return [n for n in scan.root_names if any(fnmatch.fnmatchcase(n, g) for g in globs)]
+
+
+def _effective_subfolders(ctx: DiagnosisContext, k: int) -> List[str]:
+    """Folder names cameras ``1..k`` resolve to: an explicit entry, else ``Cam{N}``."""
+    return [
+        (
+            ctx.camera_subfolders[i]
+            if i < len(ctx.camera_subfolders) and ctx.camera_subfolders[i]
+            else f"Cam{i + 1}"
+        )
+        for i in range(k)
+    ]
+
+
+def _folder_variants(
+    scan: SourceScan,
+    ctx: DiagnosisContext,
+    image_type: str,
+    folders: Sequence[SubdirInfo],
+) -> List[Tuple[Dict[str, Any], str]]:
+    """The ``(apply, label)`` ways to use camera folders, main option first.
+
+    The main ``apply`` holds only fields that differ from ``ctx`` and may be empty. With
+    one folder the source moves into it (a count-1 setup ignores subfolders, so
+    ``camera_subfolders`` would be pruned). With several, a configured count of 1 also
+    gets a ``Use {first}/ only`` alternative.
+    """
+    names = [d.name for d in folders]
+    k = len(names)
+    if k == 1:
+        apply: Dict[str, Any] = {"source_path": str(scan.path / names[0])}
+        if ctx.camera_count > 1:
+            apply.update(camera_count=1, camera_numbers=[1])
+        return [(apply, f"Use {names[0]}/ as the source")]
+    main: Dict[str, Any] = {}
+    if image_type == "lavision_im7" and not ctx.use_camera_subfolders:
+        main["use_camera_subfolders"] = True
+    if names != _effective_subfolders(ctx, k):
+        main["camera_subfolders"] = names
+    if k != ctx.camera_count:
+        main["camera_count"] = k
+        main["camera_numbers"] = camera_numbers_for(ctx, k)
+        label = f"Set camera count to {k}"
+    else:
+        label = f"Use folders {', '.join(names)}"
+    variants = [(main, label)]
+    if ctx.camera_count == 1:
+        variants.append(
+            ({"source_path": str(scan.path / names[0])}, f"Use {names[0]}/ only")
+        )
+    return variants
+
+
+def _squash(name: str) -> str:
+    """Name with all whitespace removed and case folded, for path_case matching."""
+    return re.sub(r"\s+", "", name).casefold()
+
+
+def rule_path_case(inp: RuleInput) -> List[Suggestion]:
+    """A missing path whose first missing component differs from a real one only in case or spacing."""
+    scan = inp.scan
+    if scan.exists or scan.ancestor is None or not scan.missing_tail:
+        return []
+    wanted = _squash(scan.missing_tail[0])
+    try:
+        with os.scandir(scan.ancestor) as it:
+            children = [
+                e.name
+                for _, e in zip(range(_CASE_SCAN_MAX), it)
+                if not e.name.startswith(".")
+            ]
+    except OSError:  # unreadable ancestor: ``found`` already reports it
+        return []
+    matches = sorted(
+        (c for c in children if c != scan.missing_tail[0] and _squash(c) == wanted),
+        key=natural_key,
+    )
+    return [
+        make_suggestion(
+            "path_case",
+            f"{scan.path.as_posix()} does not exist, but "
+            f"{(scan.ancestor / child).as_posix()} does and differs only in "
+            "letter case or spacing.",
+            f'Use "{child}"',
+            {"source_path": str(scan.ancestor.joinpath(child, *scan.missing_tail[1:]))},
+        )
+        for child in matches[:SET_SUGGESTIONS_MAX]
+    ]
+
+
+def rule_picked_file(inp: RuleInput) -> List[Suggestion]:
+    """The source is an image file. Offer its folder with a pattern from its sibling files."""
+    scan, ctx = inp.scan, inp.ctx
+    if not (scan.exists and not scan.is_dir):
+        return []
+    family = family_of(scan.path.name)
+    if family == "set":
+        if ctx.image_type == "lavision_set":
+            return []
+        return [
+            make_suggestion(
+                "picked_file",
+                f"{scan.path.name} is a LaVision recording. Switch the image type "
+                "to match.",
+                f"Switch to {IMAGE_TYPE_LABELS['lavision_set']}",
+                {"image_type": "lavision_set"},
+            )
+        ]
+    if family not in _FOLDER_FAMILIES and family != "cine":
+        return []  # ``.ims`` belongs to set_companion; anything else is not an image
+    folder = scan.path.parent
+    image_type = _FAMILY_TYPE[family]
+    names = [n for n in scan.root_names if family_of(n) == family]
+    fragment = format_apply(names, image_type, folder, ctx)
+    if fragment is None:
+        return []
+    apply: Dict[str, Any] = {"source_path": str(folder)}
+    if image_type != ctx.image_type:
+        apply["image_type"] = image_type
+    apply.update(fragment)
+    folder_name = folder.name or folder.as_posix()
+    return [
+        make_suggestion(
+            "picked_file",
+            f"{scan.path.name} is a single file. The source is the folder "
+            f"{folder.as_posix()} with a filename pattern.",
+            f'Use folder "{folder_name}"',
+            apply,
+        )
+    ]
+
+
+def _dominant_family(scan: SourceScan) -> Optional[Tuple[str, bool]]:
+    """The largest image family as ``(family, only_in_camera_folders)``, else None.
+
+    Root files decide when there are any (``.ims`` ignored). Otherwise camera folders
+    are summed per family. A tie for the largest gives None.
+    """
+    root = {
+        f: _family_count(scan.root_ext_counts, f) for f in FAMILY_EXTS if f != "ims"
+    }
+    folders = {
+        f: sum(_family_count(d.ext_counts, f) for d in _qualifying_folders(scan, f))
+        for f in _FOLDER_FAMILIES
+    }
+    for totals, in_folders in ((root, False), (folders, True)):
+        present = {f: n for f, n in totals.items() if n > 0}
+        if not present:
+            continue
+        top = max(present.values())
+        leaders = [f for f, n in present.items() if n == top]
+        return (leaders[0], in_folders) if len(leaders) == 1 else None
+    return None
+
+
+def rule_wrong_type(inp: RuleInput) -> List[Suggestion]:
+    """The folder mostly holds a different image family than the configured type."""
+    scan, ctx = inp.scan, inp.ctx
+    if not (scan.exists and scan.is_dir):
+        return []
+    dominant = _dominant_family(scan)
+    if dominant is None or dominant[0] == TYPE_FAMILY[ctx.image_type]:
+        return []
+    family, in_folders = dominant
+    image_type = _FAMILY_TYPE[family]
+    label = f"Switch to {IMAGE_TYPE_LABELS[image_type]}"
+    found_in = "its camera folders" if in_folders else "it"
+    message = (
+        f"{scan.path.as_posix()} mostly holds {IMAGE_TYPE_LABELS[image_type]} "
+        f"files in {found_in}, not {IMAGE_TYPE_LABELS[ctx.image_type]}."
+    )
+    if family == "set":
+        ordered = _ordered_set_names(scan)
+        return [
+            make_suggestion(
+                "wrong_type",
+                message,
+                label,
+                {
+                    "image_type": image_type,
+                    "source_path": str(scan.path / ordered[0]),
+                },
+            )
+        ]
+    if in_folders:
+        folders = _qualifying_folders(scan, family)
+        names = [
+            n
+            for n in _list_dir(scan.path / folders[0].name).image_names
+            if family_of(n) == family
+        ]
+        folder = scan.path / folders[0].name
+    else:
+        folders = []
+        names = [n for n in scan.root_names if family_of(n) == family]
+        folder = scan.path
+    fragment = format_apply(names, image_type, folder, ctx)
+    if fragment is None:
+        return []
+    base: Dict[str, Any] = {"image_type": image_type, **fragment}
+    if not in_folders:
+        return [make_suggestion("wrong_type", message, label, base)]
+    out: List[Suggestion] = []
+    for index, (extra, variant_label) in enumerate(
+        _folder_variants(scan, ctx, image_type, folders)
+    ):
+        apply = {**base, **extra}
+        text = (
+            label
+            if index == 0
+            else f"{label}, {variant_label[0].lower()}{variant_label[1:]}"
+        )
+        out.append(
+            make_suggestion(
+                "wrong_type",
+                message,
+                cross_store_label(ctx, "wrong_type", text, apply),
+                apply,
+            )
+        )
+    return out
+
+
+def rule_camera_folders(inp: RuleInput) -> List[Suggestion]:
+    """No file matches at the root, but camera-numbered subfolders hold the configured family."""
+    scan, ctx = inp.scan, inp.ctx
+    family = TYPE_FAMILY[ctx.image_type]
+    if not (scan.exists and scan.is_dir) or family not in _FOLDER_FAMILIES:
+        return []
+    if _root_matches(scan, ctx):
+        return []
+    folders = _qualifying_folders(scan, family)
+    if not folders:
+        return []
+    names = [d.name for d in folders]
+    message = (
+        f"No file matching {', '.join(_configured_patterns(ctx)) or 'the pattern'} "
+        f"sits directly in {scan.path.as_posix()}, but "
+        f"{_plural(len(names), 'camera folder')} ({_names_text(names)}) hold "
+        f"{_family_exts_text(family)} files."
+    )
+    out: List[Suggestion] = []
+    for apply, label in _folder_variants(scan, ctx, ctx.image_type, folders):
+        if apply:
+            out.append(
+                make_suggestion(
+                    "camera_folders",
+                    message,
+                    cross_store_label(ctx, "camera_folders", label, apply),
+                    apply,
+                )
+            )
+    return out
+
+
+def _family_exts_text(family: str) -> str:
+    """``.tif/.tiff/.png`` for a family, as used in messages."""
+    return "/".join(FAMILY_EXTS[family])
+
+
+def rule_inside_camera_folder(inp: RuleInput) -> List[Suggestion]:
+    """The source is one camera folder of several. Offer the parent with its camera folders."""
+    scan, ctx = inp.scan, inp.ctx
+    family = TYPE_FAMILY[ctx.image_type]
+    if not (scan.exists and scan.is_dir) or family not in _FOLDER_FAMILIES:
+        return []
+    if camera_number_of(scan.path.name) is None:
+        return []
+    parent = scan.path.parent
+    parent_scan = scan_source(parent)
+    folders = _qualifying_folders(parent_scan, family)
+    if len(folders) < 2 or scan.path.name not in {d.name for d in folders}:
+        return []
+    apply: Dict[str, Any] = {
+        "source_path": str(parent),
+        **_folder_variants(parent_scan, ctx, ctx.image_type, folders)[0][0],
+    }
+    parent_name = parent.name or parent.as_posix()
+    return [
+        make_suggestion(
+            "inside_camera_folder",
+            f"{scan.path.as_posix()} is one of {len(folders)} camera folders in "
+            f"{parent.as_posix()} ({_names_text([d.name for d in folders])}).",
+            cross_store_label(
+                ctx,
+                "inside_camera_folder",
+                f"Use {parent_name}/ with its camera folders",
+                apply,
+            ),
+            apply,
+        )
+    ]
+
+
+def rule_flat_with_subfolders(inp: RuleInput) -> List[Suggestion]:
+    """Camera subfolders are expected but the matching files sit at the root."""
+    scan, ctx = inp.scan, inp.ctx
+    if not (scan.exists and scan.is_dir) or inp.camera_path.exists():
+        return []
+    expects_folders = (
+        ctx.image_type == "lavision_im7" and ctx.use_camera_subfolders
+    ) or (ctx.image_type == "standard" and ctx.camera_count > 1)
+    if not expects_folders:
+        return []
+    matches = _root_matches(scan, ctx)
+    if not matches or _qualifying_folders(scan, TYPE_FAMILY[ctx.image_type]):
+        return []
+    shown = ", ".join(matches[:FOUND_MAX_NAMES])
+    if ctx.image_type == "lavision_im7":
+        apply: Dict[str, Any] = {"use_camera_subfolders": False}
+        label = "Turn off camera subfolders"
+    else:
+        apply = {"camera_count": 1, "camera_numbers": [1]}
+        label = "Use 1 camera"
+    return [
+        make_suggestion(
+            "flat_with_subfolders",
+            f"{inp.camera_path.as_posix()} does not exist, but files matching the "
+            f"pattern sit directly in {scan.path.as_posix()} ({shown}). The images "
+            "are in one folder, not in camera subfolders.",
+            cross_store_label(ctx, "flat_with_subfolders", label, apply),
+            apply,
+        )
+    ]

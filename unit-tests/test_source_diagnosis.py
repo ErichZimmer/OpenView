@@ -26,12 +26,19 @@ from pivtools_core.image_handling.source_diagnosis import (  # noqa: E402
     StreamInfo,
     SubdirInfo,
     camera_number_of,
+    camera_numbers_for,
+    cine_pattern,
     found_for,
     make_suggestion,
     pass_sentence,
+    rule_camera_folders,
+    rule_inside_camera_folder,
+    rule_path_case,
+    rule_picked_file,
     rule_set_companion,
     rule_set_in_folder,
     rule_set_streams,
+    rule_wrong_type,
     scan_sentence,
     scan_source,
     set_stream_infos,
@@ -666,3 +673,290 @@ def test_set_streams_message_plif_verbatim():
         "5 streams = 3 cameras. Camera 1 = stream 0 (2160\u00d72560); "
         "cameras 2\u20133 = A/B pairs (1\u20132, 3\u20134). Set 3 cameras."
     )
+
+
+# --- folder rules ---
+
+
+def test_camera_folders_im7_flag_off_count_one(tmp_path):
+    for i in (1, 2, 3):
+        touch(tmp_path / f"camera{i}", ["B00001.im7", "B00002.im7"])
+    out = rule_camera_folders(
+        _inp(tmp_path, image_type="lavision_im7", image_format=("B%05d.im7",))
+    )
+    assert [(s["apply"], s["label"]) for s in out] == [
+        (
+            {
+                "use_camera_subfolders": True,
+                "camera_subfolders": ["camera1", "camera2", "camera3"],
+                "camera_count": 3,
+                "camera_numbers": [1, 2, 3],
+            },
+            "Set camera count to 3",
+        ),
+        ({"source_path": str(tmp_path / "camera1")}, "Use camera1/ only"),
+    ]
+    cal = rule_camera_folders(
+        _inp(
+            tmp_path,
+            image_type="lavision_im7",
+            image_format=("B%05d.im7",),
+            calibration=True,
+        )
+    )
+    assert cal[0]["label"] == "Set camera count to 3 (also changes Setup)"
+    assert cal[1]["label"] == "Use camera1/ only"
+
+
+def test_camera_folders_im7_flag_off_count_three(tmp_path):
+    for i in (1, 2, 3):
+        touch(tmp_path / f"camera{i}", ["B00001.im7"])
+    [s] = rule_camera_folders(
+        _inp(
+            tmp_path,
+            image_type="lavision_im7",
+            image_format=("B%05d.im7",),
+            camera_count=3,
+            camera_numbers=(1, 2, 3),
+        )
+    )
+    assert s["apply"] == {
+        "use_camera_subfolders": True,
+        "camera_subfolders": ["camera1", "camera2", "camera3"],
+    }
+    assert s["label"] == "Use folders camera1, camera2, camera3"
+
+
+def test_camera_folders_cam_01_naming(tmp_path):
+    for i in (1, 2):
+        touch(tmp_path / f"cam_0{i}", ["B00001.im7"])
+    [s] = rule_camera_folders(
+        _inp(
+            tmp_path,
+            image_type="lavision_im7",
+            image_format=("B%05d.im7",),
+            use_camera_subfolders=True,
+            camera_count=2,
+            camera_numbers=(1, 2),
+        )
+    )
+    assert s["apply"] == {"camera_subfolders": ["cam_01", "cam_02"]}
+
+
+def test_camera_folders_two_folders_count_three(tmp_path):
+    for i in (1, 2):
+        touch(tmp_path / f"camera{i}", ["B00001.im7"])
+    [s] = rule_camera_folders(
+        _inp(
+            tmp_path,
+            image_type="lavision_im7",
+            image_format=("B%05d.im7",),
+            use_camera_subfolders=True,
+            camera_count=3,
+            camera_numbers=(1, 2, 3),
+        )
+    )
+    assert s["apply"] == {
+        "camera_subfolders": ["camera1", "camera2"],
+        "camera_count": 2,
+        "camera_numbers": [1, 2],
+    }
+
+
+def test_camera_folders_standard_spaced_names(tmp_path):
+    for i in (1, 2):
+        touch(tmp_path / f"Camera {i}", ["B00001.tif"])
+    [s] = rule_camera_folders(_inp(tmp_path, camera_count=2, camera_numbers=(1, 2)))
+    assert s["apply"] == {"camera_subfolders": ["Camera 1", "Camera 2"]}
+
+
+def test_camera_folders_single_folder_becomes_source_path(tmp_path):  # B9
+    touch(tmp_path / "camera1", ["B00001.tif"])
+    [s] = rule_camera_folders(_inp(tmp_path, camera_count=2, camera_numbers=(1, 2)))
+    assert s["apply"] == {
+        "source_path": str(tmp_path / "camera1"),
+        "camera_count": 1,
+        "camera_numbers": [1],
+    }
+    assert s["label"] == "Use camera1/ as the source"
+
+
+def test_camera_folders_silent_when_root_matches_or_already_configured(tmp_path):
+    for i in (1, 2):
+        touch(tmp_path / f"Cam{i}", ["B00001.tif"])
+    # Subfolders already resolve to Cam1, Cam2 at the configured count: nothing to change.
+    assert (
+        rule_camera_folders(_inp(tmp_path, camera_count=2, camera_numbers=(1, 2))) == []
+    )
+    touch(tmp_path, ["B00001.tif"])
+    assert rule_camera_folders(_inp(tmp_path)) == []
+
+
+def test_no_rule_writes_subfolders_into_a_single_camera_setup(tmp_path):  # B9 invariant
+    for i in (1, 2, 3):
+        touch(tmp_path / f"camera{i}", ["B00001.tif"])
+    single = tmp_path / "single"
+    touch(single / "camera1", ["B00001.tif"])  # reaches k == 1
+    for inp in (
+        _inp(tmp_path),
+        _inp(tmp_path / "camera1", camera_count=3, camera_numbers=(1, 2, 3)),
+        _inp(single, camera_count=2, camera_numbers=(1, 2)),
+    ):
+        for rule in (rule_camera_folders, rule_wrong_type, rule_inside_camera_folder):
+            for s in rule(inp):
+                count_after = s["apply"].get("camera_count", inp.ctx.camera_count)
+                assert not ("camera_subfolders" in s["apply"] and count_after == 1)
+
+
+@pytest.mark.parametrize(
+    "current, count, k, expected",
+    [
+        ((1,), 1, 3, [1, 2, 3]),
+        ((2, 3), 3, 2, [2]),
+        ((2, 3), 3, 4, [2, 3]),
+        ((3,), 3, 1, [1]),
+    ],
+)
+def test_camera_numbers_for(tmp_path, current, count, k, expected):
+    ctx = make_ctx(tmp_path, camera_count=count, camera_numbers=current)
+    assert camera_numbers_for(ctx, k) == expected
+
+
+def test_inside_camera_folder(tmp_path):
+    for i in (1, 2, 3):
+        touch(tmp_path / f"camera{i}", ["B00001.tif"])
+    [s] = rule_inside_camera_folder(
+        _inp(tmp_path / "camera1", camera_count=3, camera_numbers=(1, 2, 3))
+    )
+    assert s["apply"] == {
+        "source_path": str(tmp_path),
+        "camera_subfolders": ["camera1", "camera2", "camera3"],
+    }
+    assert s["label"] == f"Use {tmp_path.name}/ with its camera folders"
+
+
+def test_inside_camera_folder_needs_siblings(tmp_path):
+    touch(tmp_path / "camera1", ["B00001.tif"])
+    assert rule_inside_camera_folder(_inp(tmp_path / "camera1")) == []
+
+
+def test_wrong_type_tif_present_im7_chosen(tmp_path):
+    touch(tmp_path, ["B00001.tif", "B00002.tif", "B00003.tif"])
+    [s] = rule_wrong_type(
+        _inp(tmp_path, image_type="lavision_im7", image_format=("B%05d.im7",))
+    )
+    assert (s["apply"], s["label"]) == (
+        {"image_type": "standard", "image_format": ["B%05d.tif"]},
+        "Switch to Standard (TIFF/PNG/JPG)",
+    )
+
+
+def test_wrong_type_set_present_standard_chosen(tmp_path):
+    (tmp_path / "run.set").write_bytes(b"stub")
+    touch(tmp_path / "run", ["Frame0-0.ims"])
+    [s] = rule_wrong_type(_inp(tmp_path))
+    assert s["apply"] == {
+        "image_type": "lavision_set",
+        "source_path": str(tmp_path / "run.set"),
+    }
+    assert s["label"] == "Switch to LaVision recording (.set + .ims folder)"
+
+
+def test_wrong_type_tie_and_same_family_are_silent(tmp_path):
+    touch(tmp_path, ["B00001.tif", "x00001.im7"])
+    assert rule_wrong_type(_inp(tmp_path, image_type="cine")) == []
+    other = tmp_path / "other"
+    touch(other, ["B00001.tif"])
+    assert rule_wrong_type(_inp(other)) == []
+
+
+def test_wrong_type_family_only_in_camera_folders(tmp_path):
+    for i in (1, 2, 3):
+        touch(tmp_path / f"camera{i}", ["B00001.im7", "B00002.im7"])
+    out = rule_wrong_type(_inp(tmp_path))
+    assert [(s["apply"], s["label"]) for s in out] == [
+        (
+            {
+                "image_type": "lavision_im7",
+                "image_format": ["B%05d.im7"],
+                "use_camera_subfolders": True,
+                "camera_subfolders": ["camera1", "camera2", "camera3"],
+                "camera_count": 3,
+                "camera_numbers": [1, 2, 3],
+            },
+            "Switch to LaVision images (.im7)",
+        ),
+        (
+            {
+                "image_type": "lavision_im7",
+                "image_format": ["B%05d.im7"],
+                "source_path": str(tmp_path / "camera1"),
+            },
+            "Switch to LaVision images (.im7), use camera1/ only",
+        ),
+    ]
+
+
+def test_picked_file(tmp_path):
+    touch(tmp_path, ["B00001.tif", "B00002.tif"])
+    [s] = rule_picked_file(_inp(tmp_path / "B00001.tif"))
+    assert s["apply"] == {"source_path": str(tmp_path), "image_format": ["B%05d.tif"]}
+    touch(tmp_path, ["x00001.im7", "x00002.im7"])
+    [t] = rule_picked_file(_inp(tmp_path / "x00001.im7"))
+    assert t["apply"] == {
+        "source_path": str(tmp_path),
+        "image_type": "lavision_im7",
+        "image_format": ["x%05d.im7"],
+    }
+
+
+def test_picked_file_set_and_ims(tmp_path):
+    (tmp_path / "run.set").write_bytes(b"stub")
+    [s] = rule_picked_file(_inp(tmp_path / "run.set"))
+    assert s["apply"] == {"image_type": "lavision_set"}
+    assert rule_picked_file(_inp(tmp_path / "run.set", image_type="lavision_set")) == []
+    touch(tmp_path / "run", ["Frame0-0.ims"])
+    assert rule_picked_file(_inp(tmp_path / "run" / "Frame0-0.ims")) == []
+
+
+def test_path_case_whitespace(tmp_path):
+    touch(tmp_path / "Run 1", ["B00001.tif"])
+    [s] = rule_path_case(_inp(tmp_path / "run1"))
+    assert (s["apply"], s["label"]) == (
+        {"source_path": str(tmp_path / "Run 1")},
+        'Use "Run 1"',
+    )
+
+
+def test_path_case_letter_case(tmp_path):
+    touch(tmp_path / "Run1", ["B00001.tif"])
+    if (tmp_path / "RUN1").exists():
+        pytest.skip("case-insensitive filesystem")
+    [s] = rule_path_case(_inp(tmp_path / "run1" / "sub"))
+    assert s["apply"] == {"source_path": str(tmp_path / "Run1" / "sub")}
+
+
+def test_path_case_silent_when_present_or_unmatched(tmp_path):
+    touch(tmp_path / "Run1", ["B00001.tif"])
+    assert rule_path_case(_inp(tmp_path / "Run1")) == []
+    assert rule_path_case(_inp(tmp_path / "nothing")) == []
+
+
+@pytest.mark.parametrize(
+    "names, count, numbers, expected",
+    [
+        (["Camera1.cine", "Camera2.cine"], 2, [1, 2], "Camera%d.cine"),
+        (["run.cine"], 1, [1], "run.cine"),
+        (["run.cine"], 2, [1, 2], None),
+        (["a.cine", "b.cine"], 1, [1], None),
+    ],
+)
+def test_cine_pattern_b8(tmp_path, names, count, numbers, expected):
+    touch(tmp_path, names)
+    assert cine_pattern(names, tmp_path, count, numbers) == expected
+
+
+def test_cine_pattern_requires_every_selected_camera_file(tmp_path):
+    touch(tmp_path, ["Camera1.cine", "Camera2.cine"])
+    names = ["Camera1.cine", "Camera2.cine"]
+    assert cine_pattern(names, tmp_path, 3, [1, 2, 3]) is None
