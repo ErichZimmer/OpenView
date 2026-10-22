@@ -16,6 +16,7 @@ import logging
 import os
 import re
 import stat
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 from typing import (
@@ -126,6 +127,10 @@ DEFAULT_CROSS_STORE_SUFFIX = " (also changes Setup)"
 _CAMERA_APPLY_KEYS = ("camera_count", "camera_numbers")
 # A camera owns one stream (single frame) or two (an A/B pair).
 _PAIR_STREAMS = 2
+# What read_set_info raises for a recording that is present but unreadable:
+# a missing or short index/data file, a declared-but-unsupported layout, or
+# malformed decoder / manifest XML. Not a catch-all for reader bugs.
+_UNREADABLE_RECORDING = (OSError, ValueError, ET.ParseError)
 
 
 class Suggestion(TypedDict):
@@ -652,6 +657,9 @@ class RuleInput:
     # The core validator's first frame index over the FULL matching listing
     # (``result["detected_start_index"]``); the scan's names are only a sample.
     detected_start_index: Optional[int]
+    # One request's scans, so a rule that lists another directory (the parent,
+    # in ``inside_camera_folder``) shares it across the request's cameras.
+    scan_cache: Optional[Dict[str, SourceScan]] = None
 
 
 Rule = Callable[[RuleInput], List[Suggestion]]
@@ -828,7 +836,10 @@ def rule_set_streams(inp: RuleInput) -> List[Suggestion]:
         return []
     try:
         info = read_set_info(scan.path)
-    except Exception:  # any unreadable recording: ``found`` reports why, not this rule
+    except _UNREADABLE_RECORDING:
+        # ``found`` already reports why (apply_diagnosis read the same container
+        # for the stream table). Anything else is a reader bug and propagates, so
+        # it is logged and named in ``found`` rather than swallowed here.
         return []
     try:
         split = set_camera_streams(scan.path, ctx.camera_count, info)
@@ -1312,7 +1323,7 @@ def rule_inside_camera_folder(inp: RuleInput) -> List[Suggestion]:
     if camera_number_of(scan.path.name) is None:
         return []
     parent = scan.path.parent
-    parent_scan = scan_source(parent)
+    parent_scan = _scan_once(parent, inp.scan_cache)
     folders = _qualifying_folders(parent_scan, family)
     if len(folders) < 2 or scan.path.name not in {d.name for d in folders}:
         return []
@@ -1518,6 +1529,7 @@ def diagnose(
     valid: bool,
     *,
     detected_start_index: Optional[int],
+    scan_cache: Optional[Dict[str, SourceScan]] = None,
 ) -> List[Suggestion]:
     """Ranked, de-duplicated suggestions for one camera's source.
 
@@ -1527,7 +1539,7 @@ def diagnose(
     ``detected_start_index`` is the core result's ``detected_start_index``.
     """
     inp = RuleInput(
-        scan, ctx, camera, camera_path, expected_count, detected_start_index
+        scan, ctx, camera, camera_path, expected_count, detected_start_index, scan_cache
     )
     out: List[Suggestion] = []
     seen: List[Dict[str, Any]] = []
@@ -1621,6 +1633,7 @@ def apply_diagnosis(
             expected_count,
             bool(result["valid"]),
             detected_start_index=result["detected_start_index"],
+            scan_cache=scan_cache,
         )
     except Exception as exc:
         logger.exception("Source diagnosis rules failed for %s", ctx.source_path)

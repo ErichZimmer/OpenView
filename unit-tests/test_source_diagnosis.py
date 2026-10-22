@@ -5,6 +5,7 @@
 import json
 import os
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -1844,3 +1845,43 @@ def test_raster_family_is_exactly_what_the_core_globs(tmp_path):
     scan = scan_source(tmp_path)
     assert scan.root_names == ()
     assert SD.family_of("B00001.bmp") is None
+
+
+def test_inside_camera_folder_reuses_the_request_scan_cache(tmp_path, monkeypatch):
+    # Three cameras validated in one request, each inside camera1/: the parent
+    # listing must be done once, not once per camera.
+    for i in (1, 2, 3):
+        touch(tmp_path / f"camera{i}", ["B00001.tif"])
+    calls = []
+    real = SD.scan_source
+    monkeypatch.setattr(SD, "scan_source", lambda p: calls.append(str(p)) or real(p))
+    cache = {}
+    for camera in (1, 2, 3):
+        inp = _inp(
+            tmp_path / "camera1",
+            camera=camera,
+            camera_count=3,
+            camera_numbers=(1, 2, 3),
+        )
+        inp = replace(inp, scan_cache=cache)
+        assert rule_inside_camera_folder(inp)
+    assert calls.count(str(tmp_path)) == 1
+
+
+def test_set_streams_reader_bug_is_named_in_found(
+    tmp_path, monkeypatch, clean_set_cache
+):
+    # An OSError/ValueError from the reader is an unreadable recording and the rule
+    # stays silent (found reports it). Anything else is a bug: it must not be
+    # swallowed, and apply_diagnosis names it in ``found``.
+    s = build_raw16_set(tmp_path, [(4, 6)] * 2)
+    monkeypatch.setattr(
+        SD, "read_set_info", lambda *a, **k: (_ for _ in ()).throw(KeyError("Frame0"))
+    )
+    with pytest.raises(KeyError):
+        rule_set_streams(_inp(s, image_type="lavision_set", pair_reader=True))
+    ctx = make_ctx(s, image_type="lavision_set", pair_reader=True, camera_count=1)
+    result = {"valid": False, "error": "x", "detected_start_index": None}
+    apply_diagnosis(result, ctx, 1, s, 1)
+    assert result["suggestions"] == []
+    assert "Could not finish the diagnosis" in result["found"]
