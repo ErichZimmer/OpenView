@@ -1013,14 +1013,31 @@ def validate_images_generic(
         return result
 
 
+# Subfolder names listed by _append_folder_contents before "and N more".
+_FOLDER_NAMES_SHOWN = 10
+
+
 def _append_folder_contents(error_msg: str, folder_path: Path) -> str:
-    """Append folder contents to error message for debugging."""
+    """Append what a folder holds to an error message, ignoring dot-names.
+
+    Files are listed when there are any. A folder with only subfolders says so
+    rather than claiming to be empty, and ``Folder is empty`` is kept for a truly
+    empty directory.
+    """
     if folder_path.exists() and folder_path.is_dir():
-        all_files = sorted([f.name for f in folder_path.iterdir() if f.is_file()])[:10]
+        entries = [e for e in folder_path.iterdir() if not e.name.startswith(".")]
+        all_files = sorted(e.name for e in entries if e.is_file())[:10]
+        folders = sorted(e.name for e in entries if e.is_dir())
         if all_files:
             error_msg += f". Found {len(all_files)} files: {', '.join(all_files[:5])}"
             if len(all_files) > 5:
                 error_msg += f" and {len(all_files) - 5} more..."
+        elif folders:
+            shown = ", ".join(folders[:_FOLDER_NAMES_SHOWN])
+            extra = len(folders) - _FOLDER_NAMES_SHOWN
+            if extra > 0:
+                shown += f" and {extra} more"
+            error_msg += f". No files here, only folders: {shown}"
         else:
             error_msg += f". Folder is empty: {folder_path}"
     return error_msg

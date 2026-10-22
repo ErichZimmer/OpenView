@@ -7,14 +7,28 @@ so the resolver, reader and config tests build containers one way.
 import struct
 
 import numpy as np
+import pytest
 import yaml
 
 from pivtools_core.config import Config
+from pivtools_core.image_handling.readers.set_reader import clear_set_info_cache
 
 # Index layout, mirroring _parse_ims_index: 256-byte header (width at offset 12,
 # height at 16) then 768 bytes of padding, then 20-byte entries.
 TABLE_OFFSET = 256 + 768
 ENTRY_STRUCT = "<iqq"  # flag int32, offset int64, size int64
+
+# Stream 0 differs, streams 1-4 are equal (2160x2560 + 4 x 2048x2048, scaled down).
+# (height, width) per stream.
+PLIF = [(6, 8)] + [(4, 6)] * 4
+
+
+@pytest.fixture()
+def clean_set_cache():
+    """Empty the process-wide SetInfo cache before and after the test."""
+    clear_set_info_cache()
+    yield
+    clear_set_info_cache()
 
 
 def build_set(

@@ -23,12 +23,14 @@ from typing import (
     List,
     Mapping,
     Optional,
+    Sequence,
     Tuple,
     TypedDict,
     Union,
 )
 
 from .path_utils import normalise_source_path
+from .readers.set_reader import read_set_info, set_camera_streams
 
 # One-level scan caps. A source folder with tens of thousands of frames must not
 # stall the validate request, and a rule only needs a representative sample.
@@ -38,6 +40,9 @@ SCAN_MAX_SUBDIRS = 64
 # SCAN_MAX_ENTRIES. Bounds the walk of a huge folder whose other kind of entry
 # (files vs. subdirectories) has not yet reached its own cap.
 SCAN_HARD_STOP_FACTOR = 10
+
+# Folder names listed in a ``found`` sentence before the rest collapse to "and N more".
+FOUND_MAX_NAMES = 5
 
 FAMILY_EXTS: Dict[str, Tuple[str, ...]] = {
     "set": (".set",),
@@ -81,6 +86,10 @@ _STREAMSET_XML = "streamset.xml"
 # A DaVis data folder holds one ``<prefix>-0.ims`` per stream (the first frame).
 _DAVIS_FIRST_FRAME_RE = re.compile(r".*-0\.ims", re.IGNORECASE)
 _DIGITS_RE = re.compile(r"(\d+)")
+_SET_SUFFIX = ".set"
+# A stream's data file is ``{prefix}-1.ims`` (see IMSFrameInfo.data_path).
+_STREAM_DATA_SUFFIX = "-1.ims"
+_STREAM_INDEX_SUFFIX = "-0.ims"
 
 
 class Suggestion(TypedDict):
@@ -369,3 +378,207 @@ def scan_source(path: Union[str, Path]) -> SourceScan:
         truncated=truncated,
         errors=tuple(errors),
     )
+
+
+def _plural(count: int, noun: str) -> str:
+    """``1 folder`` / ``3 folders``."""
+    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+
+
+def _count_text(count: int, truncated: bool) -> str:
+    """A count, suffixed ``+`` when the scan stopped counting early."""
+    return f"{count}+" if truncated else str(count)
+
+
+def _ext_counts_text(counts: Mapping[str, int], truncated: bool, files: bool) -> str:
+    """``500 .tif files`` (several extensions joined by ``, ``), ``files`` word optional."""
+    parts = []
+    for ext in sorted(counts):
+        count = counts[ext]
+        text = f"{_count_text(count, truncated)} {ext}"
+        if files:
+            text += " file" if count == 1 and not truncated else " files"
+        parts.append(text)
+    return ", ".join(parts)
+
+
+def _names_text(names: Sequence[str]) -> str:
+    """Up to ``FOUND_MAX_NAMES`` names, then ``and N more``."""
+    shown = ", ".join(names[:FOUND_MAX_NAMES])
+    extra = len(names) - FOUND_MAX_NAMES
+    return f"{shown} and {extra} more" if extra > 0 else shown
+
+
+def _folders_clause(subdirs: Sequence[SubdirInfo]) -> str:
+    """The subfolder part of a scan sentence."""
+    head = (
+        f"{_plural(len(subdirs), 'folder')} ({_names_text([d.name for d in subdirs])})"
+    )
+    if all(not d.ext_counts for d in subdirs):
+        return f"{head}, none with images"
+    signatures = {tuple(sorted(d.ext_counts.items())) + (d.truncated,) for d in subdirs}
+    first = subdirs[0]
+    if len(signatures) == 1 and len(first.ext_counts) == 1:
+        files = _ext_counts_text(first.ext_counts, first.truncated, files=True)
+        return (
+            f"{head} with {files}"
+            if len(subdirs) == 1
+            else f"{head}, each with {files}"
+        )
+    details = []
+    for d in subdirs[:FOUND_MAX_NAMES]:
+        text = (
+            _ext_counts_text(d.ext_counts, d.truncated, files=False)
+            if d.ext_counts
+            else "no images"
+        )
+        details.append(f"{d.name}: {text}")
+    return f"{head}: {', '.join(details)}"
+
+
+def scan_sentence(scan: SourceScan) -> str:
+    """Describe what is on disk at the source, in one or two plain sentences.
+
+    Used as ``found`` when the source does not load. Counts that hit the scan caps
+    carry a ``+``. Listing failures recorded in ``scan.errors`` are appended.
+    """
+    parts: List[str] = []
+    if scan.listed_is_companion and scan.companion_of is not None and scan.listed:
+        prefixes = {
+            name[: -len(_STREAM_INDEX_SUFFIX)]
+            for name in scan.root_names
+            if name.lower().endswith(_STREAM_INDEX_SUFFIX)
+        }
+        parts.append(
+            f"{scan.listed.as_posix()} is the data folder of "
+            f"{scan.companion_of.as_posix()} ({_plural(len(prefixes), 'stream')})."
+        )
+    else:
+        if not scan.exists:
+            parts.append(f"{scan.path.as_posix()} does not exist.")
+        if scan.listed is None:
+            parts.append("None of its parent folders exist.")
+        else:
+            total = sum(scan.root_ext_counts.values())
+            root_truncated = scan.truncated and total >= SCAN_MAX_ENTRIES
+            clauses = []
+            if scan.root_ext_counts:
+                clauses.append(
+                    _ext_counts_text(scan.root_ext_counts, root_truncated, files=True)
+                )
+            elif scan.subdirs:
+                clauses.append("no images here")
+            if scan.subdirs:
+                clauses.append(_folders_clause(scan.subdirs))
+            body = "; ".join(clauses) if clauses else "no images here and no folders"
+            parts.append(f"In {scan.listed.as_posix()}: {body}.")
+    for error in scan.errors:
+        parts.append(f"{error[:1].upper()}{error[1:]}.")
+    return " ".join(parts)
+
+
+def pass_sentence(
+    camera_count: int, found_count: int, unit: str, image_size: Tuple[int, int]
+) -> str:
+    """``3 cameras × 500 .im7, 1280×1024.`` for a source that loads.
+
+    ``image_size`` is ``(W, H)`` exactly as the validator returns it.
+    """
+    return f"{_pass_head(camera_count, found_count, unit)}, {image_size[0]}\u00d7{image_size[1]}."
+
+
+def _pass_head(camera_count: int, found_count: Any, unit: str) -> str:
+    """``3 cameras × 500 .im7`` (the camera factor only for several cameras)."""
+    count = f"{found_count} {unit}"
+    return f"{camera_count} cameras \u00d7 {count}" if camera_count > 1 else count
+
+
+def streams_sentence(set_name: str, streams: Sequence[StreamInfo]) -> str:
+    """List a ``.set`` recording's streams, merging consecutive equal ones into ranges."""
+    groups: List[List[StreamInfo]] = []
+    for stream in streams:
+        key = (stream["width"], stream["height"], stream["decoder"])
+        if groups and key == (
+            groups[-1][0]["width"],
+            groups[-1][0]["height"],
+            groups[-1][0]["decoder"],
+        ):
+            groups[-1].append(stream)
+        else:
+            groups.append([stream])
+    items = []
+    for group in groups:
+        first, last = group[0], group[-1]
+        label = (
+            str(first["index"])
+            if len(group) == 1
+            else f"{first['index']}\u2013{last['index']}"
+        )
+        items.append(
+            f"{label}: {first['width']}\u00d7{first['height']} {first['decoder']}"
+        )
+    return f"{set_name}: {_plural(len(streams), 'stream')} \u2014 {', '.join(items)}."
+
+
+def set_stream_infos(set_path: Path, camera_count: int) -> List[StreamInfo]:
+    """Per-stream table of a ``.set`` recording, with each stream's camera.
+
+    ``camera`` is the 1-based position in the unique stream split for
+    ``camera_count`` cameras, or None for every stream when no unique split exists.
+
+    Raises
+    ------
+    Exception
+        Whatever ``read_set_info`` raises for an unreadable recording.
+    """
+    info = read_set_info(set_path)
+    try:
+        split = set_camera_streams(set_path, camera_count, info)
+    except ValueError:
+        split = []
+    camera_of = {idx: cam for cam, group in enumerate(split, start=1) for idx in group}
+    return [
+        StreamInfo(
+            index=frame.frame_idx,
+            prefix=frame.data_path.name[: -len(_STREAM_DATA_SUFFIX)],
+            width=frame.width,
+            height=frame.height,
+            decoder=frame.decoder,
+            camera=camera_of.get(frame.frame_idx),
+        )
+        for frame in info.frames
+    ]
+
+
+def found_for(
+    scan: SourceScan,
+    ctx: DiagnosisContext,
+    result: Mapping[str, Any],
+    streams: Optional[List[StreamInfo]],
+    streams_error: Optional[str],
+) -> str:
+    """The ``found`` sentence for a validation result.
+
+    A ``.set`` file target reports its stream table (or why there is none). Any
+    other valid source reports what loaded. Everything else reports what is on disk.
+    """
+    if ctx.image_type == "lavision_set" and scan.path.suffix.lower() == _SET_SUFFIX:
+        companion = scan.path.with_suffix("")
+        if streams:
+            return streams_sentence(scan.path.name, streams)
+        if not companion.is_dir():
+            return (
+                f"{scan.path.as_posix()} has no data folder "
+                f"{companion.as_posix()} beside it."
+            )
+        if streams_error is not None:
+            return f"{scan.path.name}: streams could not be read ({streams_error})."
+    fmt = result.get("format_detected")
+    if result.get("valid") and fmt:
+        unit = {"set": "entries", "cine": "frames"}.get(fmt, f".{fmt}")
+        head = _pass_head(ctx.camera_count, result["found_count"], unit)
+        size = result.get("image_size")
+        if size is None:
+            return f"{head}, image size could not be read."
+        return pass_sentence(ctx.camera_count, result["found_count"], unit, size)
+    return scan_sentence(scan)
