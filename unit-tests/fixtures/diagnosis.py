@@ -133,10 +133,13 @@ def piv_route_response(
 class FakeCalibrationConfig:
     """The ``Config`` members the calibration loader and blueprint read."""
 
-    def __init__(self, source: Path, camera_count: int = 1):
+    def __init__(
+        self, source: Path, camera_count: int = 1, time_resolved: bool = False
+    ):
         self._source = source
         self.camera_count = camera_count
         self.camera_numbers = list(range(1, camera_count + 1))
+        self.time_resolved = time_resolved
         # The blueprint's helpers also read the calibration pointer block.
         self.calibration = {"active": "dotboard"}
 
@@ -146,12 +149,12 @@ class FakeCalibrationConfig:
 
 
 def calibration_client(
-    source: Path, monkeypatch: Any, camera_count: int = 1
+    source: Path, monkeypatch: Any, camera_count: int = 1, time_resolved: bool = False
 ) -> FlaskClient:
     """A test client for the calibration blueprint with ``source`` as its source."""
     import pivtools_gui.calibration.app.views as views
 
-    config = FakeCalibrationConfig(source, camera_count)
+    config = FakeCalibrationConfig(source, camera_count, time_resolved)
     monkeypatch.setattr(views, "get_config", lambda: config)
     app = Flask(__name__)
     app.register_blueprint(views.calibration_bp)

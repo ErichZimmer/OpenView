@@ -197,7 +197,7 @@ class DiagnosisContext:
     use_camera_subfolders: bool
     camera_subfolders: Tuple[str, ...]
     pairing_preset: Optional[str]  # None on calibration
-    pair_reader: bool  # Setup: not cfg.time_resolved; calibration: False
+    pair_reader: bool  # PIV pairs streams (not cfg.time_resolved), on both pages
     start_index: int
     calibration: bool
 
@@ -1179,10 +1179,10 @@ def rule_wrong_type(inp: RuleInput) -> List[Suggestion]:
     family, in_folders = dominant
     image_type = _FAMILY_TYPE[family]
     label = f"Switch to {IMAGE_TYPE_LABELS[image_type]}"
-    found_in = "its camera folders" if in_folders else "it"
+    found_in = " in its camera folders" if in_folders else ""
     message = (
-        f"{scan.path.as_posix()} mostly holds {IMAGE_TYPE_LABELS[image_type]} "
-        f"files in {found_in}, not {IMAGE_TYPE_LABELS[ctx.image_type]}."
+        f"{scan.path.as_posix()} mostly holds {_family_exts_text(family)} "
+        f"files{found_in}, but the image type is {IMAGE_TYPE_LABELS[ctx.image_type]}."
     )
     if family == "set":
         ordered = _ordered_set_names(scan)

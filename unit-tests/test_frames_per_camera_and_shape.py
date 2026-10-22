@@ -66,7 +66,7 @@ def test_set_split_accepts_the_two_uniform_layouts(tmp_path, _clean_set_cache):
     assert set_camera_streams(four, 2) == [(0, 1), (2, 3)]
     assert set_camera_streams(four, 4) == [(0,), (1,), (2,), (3,)]
     assert set_camera_streams(five, 5) == [(i,) for i in range(5)]
-    with pytest.raises(ValueError, match=r"cannot split into 1 cameras"):
+    with pytest.raises(ValueError, match=r"cannot split into 1 camera of 1 or 2"):
         set_camera_streams(five, 1)
 
 

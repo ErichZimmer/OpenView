@@ -158,12 +158,13 @@ def test_build_calibration_path_standard_multi_camera(tmp_path):
 
 
 class _FakeConfig:
-    """The two Config members the calibration loader reads."""
+    """The Config members the calibration loader reads."""
 
     def __init__(self, source: Path, camera_count: int = 1):
         self._source = source
         self.camera_count = camera_count
         self.camera_numbers = list(range(1, camera_count + 1))
+        self.time_resolved = False
 
     def get_calibration_source(self, idx: int) -> Path:
         return self._source

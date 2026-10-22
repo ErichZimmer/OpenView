@@ -81,12 +81,13 @@ CAL_FMT = "cal_%03d.tif"
 
 
 class _FakeConfig:
-    """The two Config members the calibration loader reads."""
+    """The Config members the calibration loader reads."""
 
     def __init__(self, source: Path):
         self._source = source
         self.camera_count = 1
         self.camera_numbers = [1]
+        self.time_resolved = False
 
     def get_calibration_source(self, idx: int) -> Path:
         return self._source

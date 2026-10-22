@@ -869,6 +869,10 @@ def test_wrong_type_tif_present_im7_chosen(tmp_path):
         {"image_type": "standard", "image_format": ["B%05d.tif"]},
         "Switch to Standard (TIFF/PNG/JPG)",
     )
+    assert s["message"] == (
+        f"{tmp_path.as_posix()} mostly holds .tif/.tiff/.png/.jpg/.jpeg files, "
+        "but the image type is LaVision images (.im7)."
+    )
 
 
 def test_wrong_type_set_present_standard_chosen(tmp_path):
@@ -915,6 +919,10 @@ def test_wrong_type_family_only_in_camera_folders(tmp_path):
             "Switch to LaVision images (.im7), use camera1/ only",
         ),
     ]
+    assert out[0]["message"] == (
+        f"{tmp_path.as_posix()} mostly holds .im7 files in its camera folders, "
+        "but the image type is Standard (TIFF/PNG/JPG)."
+    )
 
 
 def test_picked_file(tmp_path):
@@ -1413,6 +1421,39 @@ def test_calibration_route_set_in_folder(tmp_path, monkeypatch):
     assert out["suggestions"][0]["apply"]["source_path"] == str(folder / "run.set")
 
 
+@pytest.mark.parametrize(
+    "time_resolved, apply, label",
+    [
+        (
+            False,
+            {"camera_count": 3, "camera_numbers": [2, 3]},
+            "Use 3 cameras, process 2 and 3 (also changes Setup and PIV)",
+        ),
+        (
+            True,
+            {"camera_count": 3, "camera_numbers": [1, 2, 3]},
+            "Use 3 cameras (also changes Setup and PIV)",
+        ),
+    ],
+)
+def test_calibration_route_plif_set_follows_the_piv_reader(
+    tmp_path, monkeypatch, clean_set_cache, time_resolved, apply, label
+):
+    # camera_numbers is the PIV selection: with the pair reader a single-stream
+    # (PLIF) camera cannot be A/B-paired, so calibration leaves it out as Setup does.
+    s = build_raw16_set(tmp_path, PLIF, name="run")
+    save_settings(
+        s, {"image": {"image_type": "lavision_set", "image_format": "data.set"}}
+    )
+    client = calibration_client(s, monkeypatch, time_resolved=time_resolved)
+    out = client.post(
+        "/calibration/validate", json={"camera": 1, "source_path_idx": 0}
+    ).get_json()
+    top = out["suggestions"][0]
+    assert (top["apply"], top["label"]) == (apply, label)
+    assert ("single frame, likely PLIF" in top["message"]) is not time_resolved
+
+
 def test_calibration_im7_camera_folders_at_count_one(tmp_path, monkeypatch):
     src = tmp_path / "calib"
     for i in (1, 2, 3):
@@ -1885,3 +1926,94 @@ def test_set_streams_reader_bug_is_named_in_found(
     apply_diagnosis(result, ctx, 1, s, 1)
     assert result["suggestions"] == []
     assert "Could not finish the diagnosis" in result["found"]
+
+
+SETTINGS_PARTIAL = {"image": {"image_type": "lavision_im7"}}
+
+
+def _post_settings(source, monkeypatch):
+    return calibration_client(source, monkeypatch).post(
+        "/calibration/settings",
+        json={"source_path_idx": 0, "settings": SETTINGS_PARTIAL},
+    )
+
+
+def test_save_settings_refuses_missing_source_folder(tmp_path, monkeypatch):
+    # F8: a typo'd source must not get a calibration/ folder made under it.
+    missing = tmp_path / "calib" / "camera9"
+    r = _post_settings(missing, monkeypatch)
+    assert r.status_code == 400
+    assert r.get_json()["error"] == (
+        f"Calibration source {missing.as_posix()} does not exist. "
+        "Check the Calibration Images Location."
+    )
+    assert not (tmp_path / "calib").exists()
+
+
+def test_save_settings_refuses_a_file_source(tmp_path, monkeypatch):
+    # F8: a single image (not a .set/.cine recording) is not a source folder.
+    image = tmp_path / "B00003.im7"
+    image.touch()
+    r = _post_settings(image, monkeypatch)
+    assert r.status_code == 400
+    assert r.get_json()["error"] == (
+        f"Calibration source {image.as_posix()} is a file, not a folder. "
+        "Point it at the folder holding the calibration images."
+    )
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["B00003.im7"]
+
+
+def test_save_settings_refuses_missing_recording(tmp_path, monkeypatch):
+    missing = tmp_path / "run.set"
+    r = _post_settings(missing, monkeypatch)
+    assert r.status_code == 400
+    assert r.get_json()["error"] == (
+        f"Calibration source {missing.as_posix()} does not exist. "
+        "Check the Calibration Images Location."
+    )
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("container", [False, True])
+def test_save_settings_writes_for_an_existing_source(tmp_path, monkeypatch, container):
+    source = tmp_path / ("run.set" if container else "calib")
+    if container:
+        source.write_bytes(b"stub")
+    else:
+        source.mkdir()
+    r = _post_settings(source, monkeypatch)
+    assert r.status_code == 200
+    assert r.get_json()["settings"]["image"]["image_type"] == "lavision_im7"
+
+
+def test_save_settings_refuses_a_folder_named_like_a_recording(tmp_path, monkeypatch):
+    folder = tmp_path / "run.set"
+    folder.mkdir()
+    r = _post_settings(folder, monkeypatch)
+    assert r.status_code == 400
+    assert r.get_json()["error"] == (
+        f"Calibration source {folder.as_posix()} is a folder, not a .set recording."
+    )
+    assert list(folder.iterdir()) == []
+
+
+def test_first_frame_read_error_with_no_message_names_the_exception(tmp_path):
+    # Q1: an empty exception message must not become ``error: None`` on a failure.
+    touch(tmp_path, ["B00001.im7"])
+
+    def _read(_idx):
+        raise RuntimeError()
+
+    result = validate_images_generic(
+        camera_path=tmp_path,
+        camera=1,
+        image_format="B%05d.im7",
+        image_type="lavision_im7",
+        expected_count=1,
+        zero_based_indexing=False,
+        read_frame_fn=_read,
+        diagnosis=make_ctx(
+            tmp_path, image_type="lavision_im7", image_format=("B%05d.im7",)
+        ),
+    )
+    assert (result["valid"], result["error"]) == (False, "RuntimeError")

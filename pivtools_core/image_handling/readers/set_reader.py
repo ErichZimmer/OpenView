@@ -1174,10 +1174,15 @@ def _require_positive_cameras(num_cameras: int, set_path: Union[str, Path]) -> N
         )
 
 
+def _size(width: int, height: int) -> str:
+    """``216\u00d7256``: width first, as the diagnosis found line and stream table show it."""
+    return f"{width}\u00d7{height}"
+
+
 def _stream_table(info: SetInfo) -> str:
     """One-line stream listing for error messages."""
     return "; ".join(
-        f"{f.frame_idx}: {f.height}x{f.width} {f.decoder}" for f in info.frames
+        f"{f.frame_idx}: {_size(f.width, f.height)} {f.decoder}" for f in info.frames
     )
 
 
@@ -1220,14 +1225,15 @@ def set_camera_streams(
     ]
     fits = ", ".join(str(k) for k in fitting) if fitting else "none"
     table = _stream_table(info)
+    cameras = f"{num_cameras} camera" if num_cameras == 1 else f"{num_cameras} cameras"
     if not splits:
         raise ValueError(
             f"{name} holds {len(shapes)} frame streams, which cannot split into "
-            f"{num_cameras} cameras of 1 or 2 consecutive streams (an A/B pair must "
+            f"{cameras} of 1 or 2 consecutive streams (an A/B pair must "
             f"match in shape). Camera counts that fit: {fits}. Streams: {table}"
         )
     raise ValueError(
-        f"{name}: {len(splits)} different splits fit {num_cameras} cameras, so the "
+        f"{name}: {len(splits)} different splits fit {cameras}, so the "
         f"stream->camera mapping is ambiguous. Camera counts that fit: {fits}. "
         f"Streams: {table}"
     )
@@ -1263,7 +1269,7 @@ def camera_streams(
         frame = info.frames[streams[0]]
         raise ValueError(
             f"Camera {camera} has one stream ({frame.frame_idx}: "
-            f"{frame.height}x{frame.width}) in {name}, but A/B pairing needs two. "
+            f"{_size(frame.width, frame.height)}) in {name}, but A/B pairing needs two. "
             f"Deselect camera {camera} in the PIV camera selection."
         )
     return streams

@@ -19,6 +19,7 @@ class _FakeConfig:
         self._source = source
         self.camera_count = camera_count
         self.camera_numbers = list(range(1, camera_count + 1))
+        self.time_resolved = False
 
     def get_calibration_source(self, idx):
         return self._source

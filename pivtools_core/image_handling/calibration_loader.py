@@ -677,7 +677,10 @@ def validate_calibration_images(
         use_camera_subfolders=bool(image.get("use_camera_subfolders", False)),
         camera_subfolders=tuple(image.get("camera_subfolders") or ()),
         pairing_preset=None,
-        pair_reader=False,
+        # camera_numbers is the PIV selection, so a suggestion writing it must keep
+        # out cameras the PIV pair reader cannot pair (calibration itself reads
+        # single frames either way).
+        pair_reader=not config.time_resolved,
         start_index=0 if zero_based else 1,
         calibration=True,
     )

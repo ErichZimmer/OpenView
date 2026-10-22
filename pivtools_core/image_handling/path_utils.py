@@ -1043,7 +1043,7 @@ def _validate_core(
             # The reason already names the file (e.g. the frame-count mismatch).
             # A start-index hint already explains a missing first file; keep it.
             if not start_hint:
-                result["error"] = str(e)
+                result["error"] = str(e) or type(e).__name__
             return result
         try:
             result["image_size"] = (img.shape[1], img.shape[0])

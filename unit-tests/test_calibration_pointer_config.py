@@ -130,7 +130,7 @@ def test_blank_calibration_source_is_rejected(tmp_path, blank):
     )
     cfg = Config(path=str(yaml_path))
     assert cfg.get_calibration_source(0) == Path("/data/calib_a")
-    with pytest.raises(ValueError, match=r"calibration_sources\[1\] is empty"):
+    with pytest.raises(ValueError, match=r"Calibration source 2 is empty"):
         cfg.get_calibration_source(1)
 
 
@@ -157,9 +157,7 @@ def test_blank_calibration_source_explains_the_folder(tmp_path):
     cfg = Config(path=str(yaml_path))
     with pytest.raises(ValueError) as exc:
         cfg.get_calibration_source(0)
-    assert str(exc.value) == (
-        f"calibration.calibration_sources[0] is empty. {_SOURCE_PURPOSE}"
-    )
+    assert str(exc.value) == (f"Calibration source 1 is empty. {_SOURCE_PURPOSE}")
 
 
 def test_image_format_default_is_tif(tmp_path):

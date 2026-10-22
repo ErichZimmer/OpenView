@@ -1428,7 +1428,7 @@ class Config:
         # and report success.
         if source == Path():
             raise ValueError(
-                f"calibration.calibration_sources[{source_path_idx}] is empty. "
+                f"Calibration source {source_path_idx + 1} is empty. "
                 f"{_CALIBRATION_SOURCE_PURPOSE}"
             )
         return source

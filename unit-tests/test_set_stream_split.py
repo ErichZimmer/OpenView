@@ -87,7 +87,7 @@ def test_set_camera_streams_cannot_split_names_counts_that_fit(
     with pytest.raises(ValueError, match=r"cannot split into 2 cameras") as e:
         set_camera_streams(s, 2)
     assert "Camera counts that fit: 3, 5" in str(e.value)
-    assert "0: 6x8 raw-16-bit" in str(e.value)  # stream table
+    assert "0: 8\u00d76 raw-16-bit" in str(e.value)  # stream table, width first
 
 
 def test_set_camera_streams_ambiguous_raises(tmp_path, clean_set_cache):
@@ -105,7 +105,7 @@ def test_camera_streams_pair_and_single(tmp_path, clean_set_cache):
 def test_pairing_check_names_single_stream_camera(tmp_path, clean_set_cache):
     s = build_raw16_set(tmp_path, PLIF)
     with pytest.raises(
-        ValueError, match=r"Camera 1 has one stream \(0: 6x8\).*Deselect camera 1"
+        ValueError, match=r"Camera 1 has one stream \(0: 8\u00d76\).*Deselect camera 1"
     ):
         camera_streams(s, 1, 3, pair=True)
 

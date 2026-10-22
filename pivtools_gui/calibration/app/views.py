@@ -349,6 +349,32 @@ def get_calibration_settings():
     return jsonify({"exists": False, "settings": seed_settings(source)})
 
 
+def _source_on_disk_error(source: Path) -> Optional[str]:
+    """Why the sidecar cannot be written for ``source``, or None when it can.
+
+    The sidecar lives beside the images (``root_for_source``), so the source must
+    already be on disk: a ``.set``/``.cine`` recording as a file, anything else as a
+    folder. Saving into a typo'd path would create folders the user never asked for.
+    """
+    if not source.exists():
+        return (
+            f"Calibration source {source.as_posix()} does not exist. "
+            "Check the Calibration Images Location."
+        )
+    if source.suffix.lower() in cs.CONTAINER_SUFFIXES:
+        if not source.is_file():
+            return (
+                f"Calibration source {source.as_posix()} is a folder, not a "
+                f"{source.suffix.lower()} recording."
+            )
+    elif not source.is_dir():
+        return (
+            f"Calibration source {source.as_posix()} is a file, not a folder. "
+            "Point it at the folder holding the calibration images."
+        )
+    return None
+
+
 @calibration_bp.route("/calibration/settings", methods=["POST"])
 def save_calibration_settings():
     """Deep-merge a partial settings payload into the source's sidecar.
@@ -379,6 +405,9 @@ def save_calibration_settings():
         source = _source_path(_source_idx(data.get))
     except (ValueError, IndexError) as e:
         return jsonify({"error": str(e)}), 400
+    on_disk_error = _source_on_disk_error(source)
+    if on_disk_error is not None:
+        return jsonify({"error": on_disk_error}), 400
     try:
         if not cs.settings_path(source).exists():
             # First save for this source: persist the record-recovered seed as
