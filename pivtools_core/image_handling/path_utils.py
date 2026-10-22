@@ -36,6 +36,15 @@ def format_to_glob(fmt: str) -> str:
     return re.sub(r"%\d*d", "*", fmt)
 
 
+def normalise_source_path(raw: str) -> str:
+    """Strip whitespace, then one layer of surrounding quotes, then whitespace again.
+
+    A path pasted from a shell or file manager often carries ``"..."`` / ``'...'``
+    quotes and stray spaces, which the filesystem would take literally.
+    """
+    return raw.strip().strip("\"'").strip()
+
+
 def infer_image_type(image_format: str) -> str:
     """Infer the image type from a format string's extension.
 
@@ -47,9 +56,9 @@ def infer_image_type(image_format: str) -> str:
     fmt = (image_format or "").lower()
     if ".cine" in fmt:
         return "cine"
-    if ".set" in fmt:
+    if ".set" in fmt or ".ims" in fmt:
         return "lavision_set"
-    if ".im7" in fmt or ".ims" in fmt:
+    if ".im7" in fmt:
         return "lavision_im7"
     return "standard"
 

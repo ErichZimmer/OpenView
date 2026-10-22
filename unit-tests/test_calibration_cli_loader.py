@@ -26,7 +26,7 @@ from pivtools_core.image_handling.path_utils import infer_image_type
 
 def test_infer_image_type_by_extension():
     assert infer_image_type("B%05d.im7") == "lavision_im7"
-    assert infer_image_type("frame.ims") == "lavision_im7"
+    assert infer_image_type("frame.ims") == "lavision_set"
     assert infer_image_type("data.set") == "lavision_set"
     assert infer_image_type("Camera%d.cine") == "cine"
     assert infer_image_type("calib%05d.tif") == "standard"

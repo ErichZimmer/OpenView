@@ -416,12 +416,11 @@ class Config:
         fmt = self.image_format[0].lower()
         if ".cine" in fmt:
             return "cine"
-        elif ".set" in fmt:
+        elif ".set" in fmt or ".ims" in fmt:
+            # A bare .ims is one DaVis stream inside a .set recording's data folder.
             return "lavision_set"
         elif ".im7" in fmt:
             return "lavision_im7"
-        elif ".ims" in fmt:
-            return "lavision_im7"  # .ims treated same as .im7
         else:
             return "standard"
 
@@ -493,7 +492,12 @@ class Config:
 
     @property
     def source_paths(self):
-        return [Path(s) for s in self.data["paths"]["source_paths"]]
+        from .image_handling.path_utils import normalise_source_path
+
+        return [
+            Path(normalise_source_path(str(s)))
+            for s in self.data["paths"]["source_paths"]
+        ]
 
     @property
     def camera_count(self):
@@ -1376,10 +1380,15 @@ class Config:
         """
         calib_block = self.data.get("calibration", {}) or {}
         sources = calib_block.get("calibration_sources", [])
-        # str().strip(): a pasted path with a stray leading space reaches mkdir as
-        # ' C:\...' and Windows rejects it (WinError 123, seen 2026-08-28).
+        # normalise_source_path: a pasted path with a stray leading space reaches
+        # mkdir as ' C:\...' and Windows rejects it (WinError 123, seen 2026-08-28);
+        # surrounding quotes from a shell paste are stripped the same way.
+        from .image_handling.path_utils import normalise_source_path
+
         return (
-            [Path(str(s).strip()) for s in sources if s is not None] if sources else []
+            [Path(normalise_source_path(str(s))) for s in sources if s is not None]
+            if sources
+            else []
         )
 
     def get_calibration_source(self, source_path_idx: int = 0) -> Path:
