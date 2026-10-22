@@ -18,7 +18,6 @@ Usage:
     pytest unit-tests/test_frames_per_camera_and_shape.py -v
 """
 
-import struct
 import sys
 from pathlib import Path
 
@@ -28,6 +27,8 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from fixtures.lavision import build_raw16_set, make_set_config
+
 from pivtools_core.config import Config
 from pivtools_core.image_handling.load_images import (
     _detect_im7_frames_per_camera,
@@ -36,61 +37,12 @@ from pivtools_core.image_handling.load_images import (
 from pivtools_core.image_handling.readers import im7_reader
 from pivtools_core.image_handling.readers.set_reader import clear_set_info_cache
 
-_TABLE_OFFSET = 256 + 768
-_ENTRY_STRUCT = "<iqq"
-
 
 @pytest.fixture()
 def _clean_set_cache():
     clear_set_info_cache()
     yield
     clear_set_info_cache()
-
-
-def _build_raw16_set(tmp_path, shapes, name="shaped"):
-    """A .set whose stream k is one zero entry of shapes[k] = (H, W).
-
-    Mirrors test_set_decoders._build_set but takes a per-stream shape, which is
-    the point here: real recordings carry different shapes per stream (alk235's
-    five cameras span 3472-3536 rows).
-    """
-    set_file = tmp_path / f"{name}.set"
-    set_file.write_bytes(b"stub")
-    set_dir = tmp_path / name
-    set_dir.mkdir()
-
-    for idx, (h, w) in enumerate(shapes):
-        payload = np.zeros((h, w), dtype="<u2").tobytes()
-        index = bytearray(1024)
-        struct.pack_into("<i", index, 12, w)
-        struct.pack_into("<i", index, 16, h)
-        index += struct.pack(_ENTRY_STRUCT, 0, 0, len(payload))
-        (set_dir / f"Frame{idx}-0.ims").write_bytes(bytes(index))
-        (set_dir / f"Frame{idx}-1.ims").write_bytes(payload)
-        (set_dir / f"Frame{idx}-decoder.xml").write_text(
-            '<?xml version="1.0" encoding="UTF-8"?>\n'
-            "<FrameDecoder>\n<id>raw-16-bit</id>\n</FrameDecoder>\n"
-        )
-    return set_file
-
-
-def _make_config(tmp_path, set_file, camera_count, camera_numbers, frame_stride=1):
-    cfg = {
-        "paths": {
-            "source_paths": [str(set_file)],
-            "camera_count": camera_count,
-            "camera_numbers": list(camera_numbers),
-        },
-        "images": {
-            "image_format": [set_file.name],
-            "image_type": "lavision_set",
-            "frame_stride": frame_stride,
-            "start_index": 1,
-        },
-    }
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(yaml.dump(cfg, default_flow_style=False))
-    return Config(path=str(config_path))
 
 
 # ---------------------------------------------------------------------------
@@ -101,14 +53,14 @@ def _make_config(tmp_path, set_file, camera_count, camera_numbers, frame_stride=
 def test_set_fpc_rejects_divisor_that_is_not_a_layout(tmp_path, _clean_set_cache):
     """10 streams / 2 cameras divides to 5 — and stride 5 is another camera's
     pixels, not a recording layout. Must raise, not return 5."""
-    set_file = _build_raw16_set(tmp_path, [(4, 6)] * 10)
+    set_file = build_raw16_set(tmp_path, [(4, 6)] * 10)
     with pytest.raises(ValueError, match="not 1 or 2"):
         _detect_set_frames_per_camera(set_file, 2)
 
 
 def test_set_fpc_accepts_the_two_real_layouts(tmp_path, _clean_set_cache):
-    four = _build_raw16_set(tmp_path, [(4, 6)] * 4, name="four")
-    five = _build_raw16_set(tmp_path, [(4, 6)] * 5, name="five")
+    four = build_raw16_set(tmp_path, [(4, 6)] * 4, name="four")
+    five = build_raw16_set(tmp_path, [(4, 6)] * 5, name="five")
     assert _detect_set_frames_per_camera(four, 2) == 2  # pre-paired A/B
     assert _detect_set_frames_per_camera(four, 4) == 1  # time-resolved
     assert _detect_set_frames_per_camera(five, 5) == 1
@@ -117,7 +69,7 @@ def test_set_fpc_accepts_the_two_real_layouts(tmp_path, _clean_set_cache):
 
 
 def test_set_fpc_error_names_the_valid_counts(tmp_path, _clean_set_cache):
-    set_file = _build_raw16_set(tmp_path, [(4, 6)] * 10, name="named")
+    set_file = build_raw16_set(tmp_path, [(4, 6)] * 10, name="named")
     with pytest.raises(ValueError, match=r"5 cameras \(pre-paired A/B\) or 10"):
         _detect_set_frames_per_camera(set_file, 2)
 
@@ -154,13 +106,11 @@ def test_im7_fpc_accepts_the_two_real_layouts(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_set_shape_detection_uses_the_cameras_own_stream(
-    tmp_path, _clean_set_cache
-):
+def test_set_shape_detection_uses_the_cameras_own_stream(tmp_path, _clean_set_cache):
     """Time-resolved, mixed-resolution container: camera 2 must report camera
     2's shape. The old pair-reader route read streams 0+1 regardless."""
-    set_file = _build_raw16_set(tmp_path, [(4, 6), (8, 10), (12, 14)])
-    cfg = _make_config(tmp_path, set_file, camera_count=3, camera_numbers=[2])
+    set_file = build_raw16_set(tmp_path, [(4, 6), (8, 10), (12, 14)])
+    cfg = make_set_config(tmp_path, set_file, camera_count=3, camera_numbers=[2])
     assert cfg.image_shape == (8, 10)
 
 
@@ -169,18 +119,16 @@ def test_set_shape_detection_survives_single_stream_time_resolved(
 ):
     """One-stream TR container: the old route demanded streams [0, 1] and
     crashed. Metadata has the answer without touching pixels."""
-    set_file = _build_raw16_set(tmp_path, [(6, 9)], name="single")
-    cfg = _make_config(tmp_path, set_file, camera_count=1, camera_numbers=[1])
+    set_file = build_raw16_set(tmp_path, [(6, 9)], name="single")
+    cfg = make_set_config(tmp_path, set_file, camera_count=1, camera_numbers=[1])
     assert cfg.image_shape == (6, 9)
 
 
-def test_set_shape_detection_pre_paired_uses_stride_two(
-    tmp_path, _clean_set_cache
-):
-    set_file = _build_raw16_set(
+def test_set_shape_detection_pre_paired_uses_stride_two(tmp_path, _clean_set_cache):
+    set_file = build_raw16_set(
         tmp_path, [(4, 6), (4, 6), (8, 10), (8, 10)], name="paired"
     )
-    cfg = _make_config(
+    cfg = make_set_config(
         tmp_path, set_file, camera_count=2, camera_numbers=[2], frame_stride=0
     )
     assert cfg.image_shape == (8, 10)
@@ -235,14 +183,16 @@ def test_im7_shape_detection_single_camera_subfolder(tmp_path):
     # camera_count 2: at 1 the source root is always used (single-camera rule).
     (tmp_path / "Cam2").mkdir()
     _write_pack0_im7(tmp_path / "Cam2" / "B00001.im7", np.zeros((2, 7, 9), np.uint16))
-    cfg = _make_im7_config(tmp_path, camera_count=2, camera_numbers=[2], subfolders=True)
+    cfg = _make_im7_config(
+        tmp_path, camera_count=2, camera_numbers=[2], subfolders=True
+    )
     assert cfg.image_shape == (7, 9)
 
 
 def test_images_shape_key_is_ignored(tmp_path, _clean_set_cache):
     """The dead override is gone: a stored shape never bypasses detection."""
-    set_file = _build_raw16_set(tmp_path, [(6, 9)], name="ignored")
-    cfg = _make_config(tmp_path, set_file, camera_count=1, camera_numbers=[1])
+    set_file = build_raw16_set(tmp_path, [(6, 9)], name="ignored")
+    cfg = make_set_config(tmp_path, set_file, camera_count=1, camera_numbers=[1])
     cfg.data["images"]["shape"] = [999, 999]
     cfg.data["images"]["image_shape"] = [999, 999]
     assert cfg.image_shape == (6, 9)

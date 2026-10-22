@@ -39,10 +39,10 @@ import struct
 import threading
 import xml.etree.ElementTree as ET
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -120,6 +120,11 @@ class SetInfo:
     set_dir: Path
     frames: List[IMSFrameInfo]
     n_entries: int  # number of images (same across all frames)
+    # Resolved stream->camera split per camera count, filled lazily by
+    # set_camera_streams. Lives on SetInfo so it dies with the cache entry.
+    stream_splits: Dict[int, Tuple[Tuple[int, ...], ...]] = field(
+        default_factory=dict, repr=False, compare=False
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -333,7 +338,10 @@ def _streams_from_manifest(
 
     return [
         _StreamSource(
-            index=i, prefix=prefixes[i], scale_prefix=scale_prefixes.get(i), declared=True
+            index=i,
+            prefix=prefixes[i],
+            scale_prefix=scale_prefixes.get(i),
+            declared=True,
         )
         for i in found
     ]
@@ -1032,9 +1040,7 @@ def _apply_scale_inplace(arr: np.ndarray, fi: IMSFrameInfo) -> None:
 # Four covers a multi-loop acquisition's working set. Same reasoning, and the same
 # "raise it only with a measurement" caveat, as _load_dark's lru_cache above.
 _SET_INFO_CACHE_SIZE = 4
-_set_info_cache: "OrderedDict[str, Tuple[Tuple[float, float], SetInfo]]" = (
-    OrderedDict()
-)
+_set_info_cache: "OrderedDict[str, Tuple[Tuple[float, float], SetInfo]]" = OrderedDict()
 
 # The Flask server is threaded, so this dict needs a lock. Each OrderedDict operation
 # is individually atomic under the GIL, but the sequences here are not: a hit's
@@ -1110,6 +1116,141 @@ def read_set_info(set_path: Union[str, Path]) -> SetInfo:
 def get_set_entry_count(set_path: Union[str, Path]) -> int:
     """Get the number of entries (image pairs) in a .set file."""
     return read_set_info(set_path).n_entries
+
+
+# A camera owns one stream (single frame) or two (a pre-paired A/B).
+_MAX_STREAMS_PER_CAMERA = 2
+
+
+def valid_stream_splits(
+    shapes: Sequence[Tuple[int, int]], num_cameras: int
+) -> List[Tuple[Tuple[int, ...], ...]]:
+    """Every way to partition the streams into ``num_cameras`` cameras.
+
+    A partition cuts ``range(len(shapes))``, in order, into exactly
+    ``num_cameras`` consecutive groups of size 1 or 2. A size-2 group is an A/B
+    pair and needs equal shapes.
+
+    Args:
+        shapes: (height, width) of each frame stream, in stream order.
+        num_cameras: number of cameras to split into.
+
+    Returns:
+        Each partition as a tuple of stream-index tuples. Empty when
+        ``num_cameras < 1`` or no partition exists.
+    """
+    n_streams = len(shapes)
+    if num_cameras < 1:
+        return []
+
+    def extend(start: int, cameras_left: int) -> List[Tuple[Tuple[int, ...], ...]]:
+        if cameras_left == 0:
+            return [()] if start == n_streams else []
+        found: List[Tuple[Tuple[int, ...], ...]] = []
+        for size in range(1, _MAX_STREAMS_PER_CAMERA + 1):
+            end = start + size
+            if end > n_streams:
+                break
+            if size == 2 and shapes[start] != shapes[start + 1]:
+                continue
+            group = tuple(range(start, end))
+            found.extend((group,) + rest for rest in extend(end, cameras_left - 1))
+        return found
+
+    return extend(0, num_cameras)
+
+
+def _stream_table(info: SetInfo) -> str:
+    """One-line stream listing for error messages."""
+    return "; ".join(
+        f"{f.frame_idx}: {f.height}x{f.width} {f.decoder}" for f in info.frames
+    )
+
+
+def set_camera_streams(
+    set_path: Union[str, Path],
+    num_cameras: int,
+    set_info: Optional[SetInfo] = None,
+) -> List[Tuple[int, ...]]:
+    """The unique stream->camera split of a .set container.
+
+    Cached on the SetInfo, so it is computed once per container and follows the
+    SetInfo cache's invalidation. Errors are not cached.
+
+    Args:
+        set_path: path to the .set file.
+        num_cameras: number of cameras the recording is split into.
+        set_info: pre-read container metadata, to skip the cache lookup.
+
+    Returns:
+        One tuple of 0-based stream indices per camera, in camera order.
+
+    Raises:
+        ValueError: If no split fits, or more than one does (ambiguous).
+    """
+    info = set_info or read_set_info(set_path)
+    cached = info.stream_splits.get(num_cameras)
+    if cached is not None:
+        return list(cached)
+
+    shapes = [(f.height, f.width) for f in info.frames]
+    splits = valid_stream_splits(shapes, num_cameras)
+    if len(splits) == 1:
+        info.stream_splits[num_cameras] = splits[0]
+        return list(splits[0])
+
+    name = Path(set_path).name
+    fitting = [
+        k for k in range(1, len(shapes) + 1) if len(valid_stream_splits(shapes, k)) == 1
+    ]
+    fits = ", ".join(str(k) for k in fitting) if fitting else "none"
+    table = _stream_table(info)
+    if not splits:
+        raise ValueError(
+            f"{name} holds {len(shapes)} frame streams, which cannot split into "
+            f"{num_cameras} cameras of 1 or 2 consecutive streams (an A/B pair must "
+            f"match in shape). Camera counts that fit: {fits}. Streams: {table}"
+        )
+    raise ValueError(
+        f"{name}: {len(splits)} different splits fit {num_cameras} cameras, so the "
+        f"stream->camera mapping is ambiguous. Camera counts that fit: {fits}. "
+        f"Streams: {table}"
+    )
+
+
+def camera_streams(
+    set_path: Union[str, Path],
+    camera: int,
+    num_cameras: int,
+    pair: bool,
+    set_info: Optional[SetInfo] = None,
+) -> Tuple[int, ...]:
+    """The 0-based stream indices of one camera.
+
+    Args:
+        set_path: path to the .set file.
+        camera: 1-based camera number.
+        num_cameras: number of cameras the recording is split into.
+        pair: True when the caller needs an A/B pair (two streams).
+        set_info: pre-read container metadata.
+
+    Raises:
+        ValueError: If ``camera`` is outside 1..num_cameras, the split is not
+            unique, or ``pair`` is set and the camera has a single stream.
+    """
+    name = Path(set_path).name
+    if not 1 <= camera <= num_cameras:
+        raise ValueError(f"Camera {camera} is outside 1..{num_cameras} for {name}.")
+    info = set_info or read_set_info(set_path)
+    streams = set_camera_streams(set_path, num_cameras, info)[camera - 1]
+    if pair and len(streams) == 1:
+        frame = info.frames[streams[0]]
+        raise ValueError(
+            f"Camera {camera} has one stream ({frame.frame_idx}: "
+            f"{frame.height}x{frame.width}) in {name}, but A/B pairing needs two. "
+            f"Deselect camera {camera} in the PIV camera selection."
+        )
+    return streams
 
 
 def read_set_pair(

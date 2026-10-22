@@ -20,7 +20,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from test_frames_per_camera_and_shape import _build_raw16_set, _make_config  # noqa: E402
+from fixtures.lavision import build_raw16_set, make_set_config  # noqa: E402
 
 from pivtools_core.image_handling.load_images import (  # noqa: E402
     _read_batch,
@@ -44,7 +44,7 @@ def _time_resolved_set(tmp_path):
     pairing consecutive entries (frame_stride 1 -> 4 pairs)."""
     import struct
 
-    set_file = _build_raw16_set(tmp_path, [(4, 6)], name="batch")
+    set_file = build_raw16_set(tmp_path, [(4, 6)], name="batch")
     payloads = [np.full((4, 6), 10 * (k + 1), "<u2").tobytes() for k in range(5)]
     index = bytearray(1024)
     struct.pack_into("<i", index, 12, 6)
@@ -54,7 +54,7 @@ def _time_resolved_set(tmp_path):
     (tmp_path / "batch" / "Frame0-0.ims").write_bytes(bytes(index))
     (tmp_path / "batch" / "Frame0-1.ims").write_bytes(b"".join(payloads))
 
-    cfg = _make_config(tmp_path, set_file, camera_count=1, camera_numbers=[1])
+    cfg = make_set_config(tmp_path, set_file, camera_count=1, camera_numbers=[1])
     cfg.data["images"]["num_images"] = 5
     cfg.data["images"]["pair_stride"] = 1
     return set_file, cfg
@@ -64,9 +64,7 @@ def test_read_batch_matches_stacked_read_pair(tmp_path, _clean_set_cache):
     set_file, cfg = _time_resolved_set(tmp_path)
 
     batch = _read_batch(2, 3, set_file, 1, cfg)
-    expected = np.stack(
-        [read_pair(idx, set_file, 1, cfg) for idx in (2, 3, 4)], axis=0
-    )
+    expected = np.stack([read_pair(idx, set_file, 1, cfg) for idx in (2, 3, 4)], axis=0)
 
     assert batch.shape == (3, 2, 4, 6) and batch.dtype == np.float32
     np.testing.assert_array_equal(batch, expected)
@@ -102,7 +100,6 @@ from test_calibration_cli_loader import _write_pack0_im7  # noqa: E402
 from test_frames_per_camera_and_shape import _make_im7_config  # noqa: E402
 
 from pivtools_core.image_handling.readers import set_reader  # noqa: E402
-from pivtools_core.image_handling.readers.im7_reader import read_im7_camera  # noqa: E402
 
 
 def _assert_out_contract(cfg, camera_path, camera):
@@ -122,8 +119,10 @@ def test_out_set_time_resolved(tmp_path, _clean_set_cache):
 
 
 def test_out_set_pre_paired(tmp_path, _clean_set_cache):
-    set_file = _build_raw16_set(tmp_path, [(4, 6), (4, 6)], name="paired")
-    cfg = _make_config(tmp_path, set_file, camera_count=1, camera_numbers=[1], frame_stride=0)
+    set_file = build_raw16_set(tmp_path, [(4, 6), (4, 6)], name="paired")
+    cfg = make_set_config(
+        tmp_path, set_file, camera_count=1, camera_numbers=[1], frame_stride=0
+    )
     _assert_out_contract(cfg, set_file, 1)
 
 
@@ -151,7 +150,9 @@ def test_out_im7_time_resolved_multi_camera(tmp_path):
 def test_out_im7_single_camera_subfolder_pre_paired(tmp_path):
     (tmp_path / "Cam2").mkdir()
     _write_pack0_im7(tmp_path / "Cam2" / "B00001.im7", np.ones((2, 7, 9), np.uint16))
-    cfg = _make_im7_config(tmp_path, camera_count=2, camera_numbers=[2], subfolders=True)
+    cfg = _make_im7_config(
+        tmp_path, camera_count=2, camera_numbers=[2], subfolders=True
+    )
     cfg.data["images"]["frame_stride"] = 0
     _assert_out_contract(cfg, tmp_path / "Cam2", 2)
 
@@ -164,10 +165,15 @@ def test_out_standard_tif(tmp_path):
         tifffile.imwrite(
             tmp_path / f"B00001_{suffix}.tif", rng.integers(0, 4096, (7, 9), np.uint16)
         )
-    cfg = _make_config(tmp_path, tmp_path / "unused.set", camera_count=1, camera_numbers=[1])
+    cfg = make_set_config(
+        tmp_path, tmp_path / "unused.set", camera_count=1, camera_numbers=[1]
+    )
     cfg.data["images"].update(
-        {"image_type": "standard", "image_format": ["B%05d_A.tif", "B%05d_B.tif"],
-         "frame_stride": 0}
+        {
+            "image_type": "standard",
+            "image_format": ["B%05d_A.tif", "B%05d_B.tif"],
+            "frame_stride": 0,
+        }
     )
     _assert_out_contract(cfg, tmp_path, 1)
 
@@ -175,8 +181,10 @@ def test_out_standard_tif(tmp_path):
 def test_reader_that_ignores_out_is_caught(tmp_path, _clean_set_cache, monkeypatch):
     """A reader that accepts out= and allocates anyway would leave the batch slot
     as uninitialised memory with no error. read_pair checks identity."""
-    set_file = _build_raw16_set(tmp_path, [(4, 6), (4, 6)], name="ignores")
-    cfg = _make_config(tmp_path, set_file, camera_count=1, camera_numbers=[1], frame_stride=0)
+    set_file = build_raw16_set(tmp_path, [(4, 6), (4, 6)], name="ignores")
+    cfg = make_set_config(
+        tmp_path, set_file, camera_count=1, camera_numbers=[1], frame_stride=0
+    )
     real = set_reader.read_set_pair
     monkeypatch.setattr(
         set_reader, "read_set_pair", lambda *a, out=None, **k: real(*a, **k)
@@ -189,8 +197,8 @@ def test_read_batch_refuses_a_camera_whose_shape_differs(tmp_path, _clean_set_ca
     """config.image_shape is detected once per process from the first configured
     camera. A second camera with another shape must fail by name here, not
     produce a batch that disagrees with what Dask was told."""
-    set_file = _build_raw16_set(tmp_path, [(4, 6), (8, 10)], name="mixed")
-    cfg = _make_config(tmp_path, set_file, camera_count=2, camera_numbers=[1, 2])
+    set_file = build_raw16_set(tmp_path, [(4, 6), (8, 10)], name="mixed")
+    cfg = make_set_config(tmp_path, set_file, camera_count=2, camera_numbers=[1, 2])
     assert cfg.image_shape == (4, 6)
     with pytest.raises(ValueError, match=r"detected from camera 1"):
         _read_batch(1, 1, set_file, 2, cfg)
