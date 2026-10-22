@@ -35,6 +35,11 @@ from pivtools_core.image_handling.path_utils import (
 )
 from pivtools_core.paths import count_vector_files_by_name, get_data_paths
 from pivtools_core.validation import validate_memory_for_images
+
+# Calibration is calibration (the legacy v1 `calibration` package was retired — its
+# shared leaves relocated to pivtools_gui/services, calibration/detection, and
+# stereo_reconstruction).
+from pivtools_gui.calibration.app import calibration_bp, calibration_stepped_bp
 from pivtools_gui.errors import register_json_error_handlers
 from pivtools_gui.masking.app.views import masking_bp
 from pivtools_gui.piv_runner import get_runner
@@ -92,11 +97,6 @@ api_bp = Blueprint("api", __name__, url_prefix="/backend")
 app.register_blueprint(vector_plot_bp, url_prefix="/backend/plot")
 app.register_blueprint(transform_bp, url_prefix="/backend/plot")
 app.register_blueprint(masking_bp, url_prefix="/backend")
-# Calibration is calibration (the legacy v1 `calibration` package was retired — its
-# shared leaves relocated to pivtools_gui/services, calibration/detection, and
-# stereo_reconstruction).
-from pivtools_gui.calibration.app import calibration_bp, calibration_stepped_bp
-
 app.register_blueprint(calibration_bp, url_prefix="/backend")
 app.register_blueprint(calibration_stepped_bp, url_prefix="/backend")
 app.register_blueprint(video_maker_bp, url_prefix="/backend/video")
@@ -302,17 +302,6 @@ def _preload_surrounding_frames(
 
     try:
         cfg.image_format[0]
-        image_type = cfg.image_type
-        if image_type in ("lavision_set", "lavision_im7"):
-            source_path = cfg.source_paths[source_path_idx]
-        else:
-            folder = cfg.get_camera_folder(camera)
-            source_path = (
-                cfg.source_paths[source_path_idx] / folder
-                if folder
-                else cfg.source_paths[source_path_idx]
-            )
-
         num_pairs = cfg.num_frame_pairs
 
         # Calculate range to preload: current_idx through current_idx + window - 1
@@ -636,19 +625,7 @@ def filter_images_endpoint():
     )
     indices = list(range(batch_start, batch_end + 1))
 
-    # For .set and .im7 files, don't append camera folder - all cameras are in the source directory
     cfg.image_format[0]
-    image_type = cfg.image_type
-
-    if image_type in ("lavision_set", "lavision_im7"):
-        source_path = cfg.source_paths[source_path_idx]
-    else:
-        folder = cfg.get_camera_folder(camera_number(camera))
-        source_path = (
-            cfg.source_paths[source_path_idx] / folder
-            if folder
-            else cfg.source_paths[source_path_idx]
-        )
 
     def load_pairs_parallel():
         """Load pairs in parallel using ThreadPoolExecutor."""
@@ -824,19 +801,7 @@ def filter_single_frame():
             400,
         )
 
-    # For .set and .im7 files, don't append camera folder
     cfg.image_format[0]
-    image_type = cfg.image_type
-
-    if image_type in ("lavision_set", "lavision_im7"):
-        source_path = cfg.source_paths[source_path_idx]
-    else:
-        folder = cfg.get_camera_folder(camera_number(camera))
-        source_path = (
-            cfg.source_paths[source_path_idx] / folder
-            if folder
-            else cfg.source_paths[source_path_idx]
-        )
 
     try:
         # Multi-loop: resolve global pair index to loop-specific source and local index
