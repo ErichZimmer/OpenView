@@ -11,10 +11,12 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+import yaml
 from flask import Flask
 
 import pivtools_gui.calibration.app.views as V
 from pivtools_cli import calibration_cli as c2
+from pivtools_core.config import Config
 from pivtools_gui.calibration.runio import active_method_name, parse_active_method
 from pivtools_gui.errors import register_json_error_handlers
 
@@ -74,6 +76,24 @@ def test_model_route_without_board_or_active_reports_error(monkeypatch):
     data = response.get_json()
     assert data["success"] is False
     assert "calibration.active is required" in data["error"]
+
+
+def test_joint_model_route_empty_source_is_a_plain_400(monkeypatch, tmp_path):
+    """A blank calibration source is a configuration error: 400, no class name."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.dump({"calibration": {"calibration_sources": [""], "active": "dotboard"}})
+    )
+    config = Config(path=str(config_path))
+    monkeypatch.setattr(V, "get_config", lambda: config)
+    response = _backend_client().get(
+        "/backend/calibration/joint/model?board=dotboard&cameras=1,2,3"
+    )
+    assert response.status_code == 400
+    data = response.get_json()
+    assert data["success"] is False
+    assert data["error"].startswith("Calibration source 1 is empty. It is the folder")
+    assert "ValueError" not in data["error"]
 
 
 def test_model_route_takes_stereo_from_active_when_request_is_silent(

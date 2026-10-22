@@ -19,6 +19,8 @@ from flask import Flask, jsonify, request
 from loguru import logger
 from werkzeug.exceptions import HTTPException, InternalServerError
 
+from pivtools_core.config import CalibrationSourceError
+
 API_PREFIX = "/backend/"
 
 
@@ -27,11 +29,12 @@ def _is_api_request() -> bool:
 
 
 def register_json_error_handlers(app: Flask) -> None:
-    """Attach the two handlers to ``app``.
+    """Attach the handlers to ``app``.
 
     ``HTTPException`` is registered first so ``abort()``, 404 and 405 keep their
-    status code. Everything else becomes a 500 whose traceback goes to the loguru
-    log, not to the browser.
+    status code. An unset or blank calibration source is a configuration error the
+    user fixes, so it is a 400 with its plain message. Everything else becomes a
+    500 whose traceback goes to the loguru log, not to the browser.
     """
 
     @app.errorhandler(HTTPException)
@@ -40,11 +43,15 @@ def register_json_error_handlers(app: Flask) -> None:
             return exc
         return jsonify({"success": False, "error": exc.description}), exc.code
 
+    @app.errorhandler(CalibrationSourceError)
+    def _calibration_source(exc: CalibrationSourceError):
+        if not _is_api_request():
+            return InternalServerError(original_exception=exc)
+        return jsonify({"success": False, "error": str(exc)}), 400
+
     @app.errorhandler(Exception)
     def _unhandled(exc: Exception):
-        logger.exception(
-            "unhandled exception in {} {}", request.method, request.path
-        )
+        logger.exception("unhandled exception in {} {}", request.method, request.path)
         if not _is_api_request():
             return InternalServerError(original_exception=exc)
         return (

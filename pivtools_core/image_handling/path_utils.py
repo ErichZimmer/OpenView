@@ -916,8 +916,17 @@ def _validate_core(
 
         # Read the first frame. A read failure is a genuine error (corrupt/locked
         # container, wrong camera), so surface it instead of passing silently.
+        # A pairing-check failure is a configuration problem, not a read failure,
+        # so its own text is the error.
+        from .readers.set_reader import SetPairingError
+
         try:
             img = read_frame_fn(1)
+        except SetPairingError as e:
+            result["valid"] = False
+            result["error"] = str(e)
+            result["read_error"] = str(e)
+            return result
         except Exception as e:
             # Log as well as return: the caller may replace `error` with its own
             # text, and without this the real reason reached neither the screen

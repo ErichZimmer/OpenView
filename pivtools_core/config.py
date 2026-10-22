@@ -121,6 +121,14 @@ _CALIBRATION_SOURCE_PURPOSE = (
     "models are saved (a scale factor without images needs only the folder)."
 )
 
+
+class CalibrationSourceError(ValueError):
+    """The calibration source is unset or blank: a configuration error the user fixes.
+
+    The GUI's JSON error handler answers it with HTTP 400 and its plain message.
+    """
+
+
 _CONFIG = None  # singleton cache
 _LOGGING_INITIALIZED = False  # Track if logging has been set up
 
@@ -1406,16 +1414,17 @@ class Config:
 
         Raises
         ------
-        ValueError
+        CalibrationSourceError
             If calibration_sources is not configured, or the entry at
-            source_path_idx is blank
+            source_path_idx is blank (a ValueError subclass)
         IndexError
             If source_path_idx is out of range
         """
         sources = self.calibration_sources
         if not sources:
-            raise ValueError(
-                f"calibration.calibration_sources is not set. {_CALIBRATION_SOURCE_PURPOSE}"
+            raise CalibrationSourceError(
+                f"No calibration source set yet. {_CALIBRATION_SOURCE_PURPOSE} "
+                "(calibration.calibration_sources in config.yaml)"
             )
         if source_path_idx >= len(sources):
             raise IndexError(
@@ -1427,7 +1436,7 @@ class Config:
         # Path('.'), the process cwd: a generate route would write its model there
         # and report success.
         if source == Path():
-            raise ValueError(
+            raise CalibrationSourceError(
                 f"Calibration source {source_path_idx + 1} is empty. "
                 f"{_CALIBRATION_SOURCE_PURPOSE}"
             )

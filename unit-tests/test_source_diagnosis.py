@@ -9,6 +9,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from flask import Flask
 
 sys.path.insert(0, os.path.dirname(__file__))
 from fixtures.diagnosis import (  # noqa: E402
@@ -425,6 +426,18 @@ def test_set_stream_infos_plif(tmp_path, clean_set_cache):
     assert [i["camera"] for i in set_stream_infos(s, 2)] == [None] * 5
 
 
+def test_found_for_missing_set_is_not_described_as_present(tmp_path):
+    # A Terminal-escaped path names a .set that does not exist (the backslash is
+    # kept: it is a legal POSIX filename character). The found line must say it
+    # does not exist, not that it lacks a data folder.
+    (tmp_path / "my data").mkdir()
+    missing = tmp_path / "my\\ data" / "ok.set"
+    ctx = make_ctx(missing, image_type="lavision_set")
+    text = found_for(scan_source(missing), ctx, {"valid": False}, None, None)
+    assert text.startswith(f"{missing.as_posix()} does not exist.")
+    assert "data folder" not in text
+
+
 def test_found_for_set_without_companion(tmp_path):
     stub = tmp_path / "run.set"
     stub.write_bytes(b"stub")
@@ -576,6 +589,29 @@ def test_set_streams_plif_right_count_deselects_plif(tmp_path, clean_set_cache):
         )
         == []
     )
+
+
+@pytest.mark.parametrize("selected", [(1, 2, 3, 4, 5), (2, 3)])
+def test_set_streams_plif_all_single_count_offers_pairing_count(
+    tmp_path, clean_set_cache, selected
+):
+    # Count 5 splits PLIF into five single streams: no selected camera can be A/B-
+    # paired, so the count that pairs (3, process 2 and 3) is offered, as at count 1.
+    s = build_raw16_set(tmp_path, PLIF)
+    [x] = rule_set_streams(
+        _inp(
+            s,
+            image_type="lavision_set",
+            camera_count=5,
+            camera_numbers=selected,
+            pair_reader=True,
+        )
+    )
+    assert (x["apply"], x["label"]) == (
+        {"camera_count": 3, "camera_numbers": [2, 3]},
+        "Use 3 cameras, process 2 and 3",
+    )
+    assert "single frame, likely PLIF" in x["message"]
 
 
 def test_set_streams_six_equal_count_one(tmp_path, clean_set_cache):
@@ -1382,6 +1418,67 @@ def test_validate_files_passes_core_set_message_through(tmp_path, monkeypatch):
     assert cam["streams"] is None
     assert not any(k.startswith("suggested_") for k in body)
     assert not any(k.startswith("suggested_") for k in cam)
+
+
+def test_validate_files_plif_pairing_error_is_not_a_read_failure(
+    tmp_path, monkeypatch, clean_set_cache
+):
+    # Count 5 splits PLIF into five single streams. The pairing check is a
+    # configuration problem, so its text is not labelled a read failure, and the
+    # count that pairs is still offered.
+    s = build_raw16_set(tmp_path, PLIF, name="run")
+    body = piv_route_response(
+        tmp_path,
+        monkeypatch,
+        paths={
+            "source_paths": [str(s)],
+            "camera_count": 5,
+            "camera_numbers": [1, 2, 3, 4, 5],
+        },
+        images={
+            "image_type": "lavision_set",
+            "image_format": ["run.set"],
+            "pairing_preset": "pre_paired",
+            "frame_stride": 0,
+            "num_images": 1,
+        },
+    ).get_json()
+    cam = body["details"]["camera_1"]
+    assert cam["error"].startswith(
+        "Camera 1 has one stream (0: 8\u00d76) in run.set, but A/B pairing needs two."
+    )
+    assert "could not read" not in cam["error"]
+    assert [(x["apply"], x["label"]) for x in cam["suggestions"]] == [
+        (
+            {"camera_count": 3, "camera_numbers": [2, 3]},
+            "Use 3 cameras, process 2 and 3",
+        )
+    ]
+
+
+def test_preview_frame_pairs_no_camera_selected_is_400(tmp_path, monkeypatch):
+    # A hand-edited ``camera_numbers: []`` on a container source: the preview names
+    # the container by camera number, so with none selected it is a 400, not an
+    # IndexError 500.
+    import pivtools_gui.app as gui_app
+
+    config = write_config(
+        tmp_path,
+        paths={"source_paths": [str(tmp_path / "run.set")], "camera_numbers": []},
+        images={
+            "image_type": "lavision_set",
+            "image_format": ["run.set"],
+            "pairing_preset": "pre_paired",
+            "frame_stride": 0,
+            "num_images": 3,
+        },
+    )
+    monkeypatch.setattr(gui_app, "get_config", lambda: config)
+    app = Flask(__name__)
+    app.register_blueprint(gui_app.api_bp)
+    r = app.test_client().get("/backend/preview_frame_pairs")
+    assert r.status_code == 400
+    assert r.get_json()["error"] == "No cameras selected for processing."
 
 
 def test_validate_files_flat_files_suggest_one_camera(tmp_path, monkeypatch):

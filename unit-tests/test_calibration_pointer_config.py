@@ -147,7 +147,8 @@ def test_unset_calibration_source_explains_the_folder(tmp_path):
     with pytest.raises(ValueError) as exc:
         cfg.get_calibration_source(0)
     assert str(exc.value) == (
-        f"calibration.calibration_sources is not set. {_SOURCE_PURPOSE}"
+        f"No calibration source set yet. {_SOURCE_PURPOSE} "
+        "(calibration.calibration_sources in config.yaml)"
     )
 
 

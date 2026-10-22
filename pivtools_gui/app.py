@@ -1349,6 +1349,9 @@ def preview_frame_pairs():
                 "start_index": 0,
             }
         )
+    # A container is named by the first selected camera's number.
+    if cfg.is_container_format and not cfg.camera_numbers:
+        return jsonify({"error": "No cameras selected for processing."}), 400
     format_str = img_format[0]
     has_ab = len(img_format) == 2
     is_multi_loop = num_loops > 1

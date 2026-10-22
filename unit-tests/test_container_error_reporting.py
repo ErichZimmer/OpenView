@@ -130,6 +130,10 @@ def test_unsupported_encoding_reports_the_real_reason(client):
     assert result["status"] == "error"
     assert "mono-12pmsb" in result["error"]
     assert "First frame not found" not in result["error"]
+    # A genuine decode failure is still labelled as one.
+    assert result["error"].startswith(
+        "Set file found but could not read the first frame:"
+    )
 
 
 def test_decode_failure_withholds_the_folder_listing(client):

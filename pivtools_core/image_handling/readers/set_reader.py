@@ -1166,6 +1166,14 @@ def valid_stream_splits(
     return extend(0, num_cameras)
 
 
+class SetPairingError(ValueError):
+    """A selected camera resolves to one stream where an A/B pair is needed.
+
+    A configuration problem (camera count or selection), not a read failure, so
+    callers report its text as it stands.
+    """
+
+
 def _require_positive_cameras(num_cameras: int, set_path: Union[str, Path]) -> None:
     """Raise a clear ValueError for a camera count below 1."""
     if num_cameras < 1:
@@ -1256,8 +1264,9 @@ def camera_streams(
         set_info: pre-read container metadata.
 
     Raises:
-        ValueError: If ``camera`` is outside 1..num_cameras, the split is not
-            unique, or ``pair`` is set and the camera has a single stream.
+        ValueError: If ``camera`` is outside 1..num_cameras or the split is not
+            unique.
+        SetPairingError: If ``pair`` is set and the camera has a single stream.
     """
     _require_positive_cameras(num_cameras, set_path)
     name = Path(set_path).name
@@ -1267,7 +1276,7 @@ def camera_streams(
     streams = set_camera_streams(set_path, num_cameras, info)[camera - 1]
     if pair and len(streams) == 1:
         frame = info.frames[streams[0]]
-        raise ValueError(
+        raise SetPairingError(
             f"Camera {camera} has one stream ({frame.frame_idx}: "
             f"{_size(frame.width, frame.height)}) in {name}, but A/B pairing needs two. "
             f"Deselect camera {camera} in the PIV camera selection."

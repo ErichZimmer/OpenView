@@ -617,7 +617,9 @@ def found_for(
         companion = scan.path.with_suffix("")
         if streams:
             return streams_sentence(scan.path.name, streams)
-        if not companion.is_dir():
+        # Only a .set that exists can lack its data folder. A missing one falls
+        # through to the disk description, which says it does not exist.
+        if scan.exists and not companion.is_dir():
             return (
                 f"{scan.path.as_posix()} has no data folder "
                 f"{companion.as_posix()} beside it."
@@ -856,17 +858,38 @@ def rule_set_streams(inp: RuleInput) -> List[Suggestion]:
         1 <= c <= len(split) and len(split[c - 1]) != _PAIR_STREAMS
         for c in ctx.camera_numbers
     )
-    if not has_single_selected or not pairs:
+    if not has_single_selected:
+        return []
+    # The pairing check fails for a selected camera. A count whose split holds more
+    # A/B cameras than this one (e.g. 3 for PLIF at count 5, where every camera is a
+    # single stream) is offered first. Otherwise the count is right and only the
+    # single-stream cameras are deselected.
+    n_pairs = sum(len(g) == _PAIR_STREAMS for g in split)
+    better = _count_suggestions(inp, info, more_pairs_than=n_pairs)
+    if better:
+        return better
+    if not pairs:
         return []
     return [_streams_suggestion(inp, ctx.camera_count, split, pairs, False)]
 
 
-def _count_suggestions(inp: RuleInput, info: Any) -> List[Suggestion]:
-    """Suggestions for a camera count whose stream split does not resolve."""
+def _count_suggestions(
+    inp: RuleInput, info: Any, more_pairs_than: int = -1
+) -> List[Suggestion]:
+    """Suggestions for a camera count whose split resolves (or pairs) better.
+
+    ``more_pairs_than`` keeps only candidates with more A/B cameras than that; the
+    default keeps every candidate (the configured count does not resolve).
+    """
     ctx = inp.ctx
     shapes = [(f.height, f.width) for f in info.frames]
+    candidates = [
+        (k, split)
+        for k, split in _stream_candidates(shapes, ctx.pair_reader)
+        if sum(len(g) == _PAIR_STREAMS for g in split) > more_pairs_than
+    ]
     out: List[Suggestion] = []
-    for k, split in _stream_candidates(shapes, ctx.pair_reader)[:SET_SUGGESTIONS_MAX]:
+    for k, split in candidates[:SET_SUGGESTIONS_MAX]:
         if ctx.pair_reader:
             process = [c for c, g in enumerate(split, 1) if len(g) == _PAIR_STREAMS]
         else:
