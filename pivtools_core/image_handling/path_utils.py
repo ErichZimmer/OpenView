@@ -29,7 +29,7 @@ from ..calibration_settings import CALIBRATION_DIRNAME, SETTINGS_FILENAME
 
 if TYPE_CHECKING:
     from ..config import Config
-    from .source_diagnosis import DiagnosisContext
+    from .source_diagnosis import DiagnosisContext, SourceScan
 
 
 def format_to_glob(fmt: str) -> str:
@@ -40,13 +40,22 @@ def format_to_glob(fmt: str) -> str:
     return re.sub(r"%\d*d", "*", fmt)
 
 
+# Quote characters a pasted path may be wrapped in (one matching pair is removed).
+_SOURCE_QUOTES = "\"'"
+
+
 def normalise_source_path(raw: str) -> str:
-    """Strip whitespace, then one layer of surrounding quotes, then whitespace again.
+    """Strip whitespace, then one matching pair of surrounding quotes, then whitespace.
 
     A path pasted from a shell or file manager often carries ``"..."`` / ``'...'``
-    quotes and stray spaces, which the filesystem would take literally.
+    quotes and stray spaces, which the filesystem would take literally. Only a pair
+    whose opening and closing quote are the same character is removed, and only one
+    pair, so a name that genuinely ends in an apostrophe (``runs'``) is kept.
     """
-    return raw.strip().strip("\"'").strip()
+    path = raw.strip()
+    if len(path) >= 2 and path[0] == path[-1] and path[0] in _SOURCE_QUOTES:
+        path = path[1:-1]
+    return path.strip()
 
 
 def infer_image_type(image_format: str) -> str:
@@ -67,6 +76,11 @@ def infer_image_type(image_format: str) -> str:
     return "standard"
 
 
+# Extensions of the "standard" raster image family. The single source of truth for
+# both the validator's fallback globs and the diagnosis scan's raster family.
+RASTER_EXTENSIONS: Tuple[str, ...] = (".tif", ".tiff", ".png", ".jpg", ".jpeg")
+
+
 def _glob_images(directory: Path, pattern: str) -> List[Path]:
     """glob() a directory, excluding dotfiles.
 
@@ -76,6 +90,14 @@ def _glob_images(directory: Path, pattern: str) -> List[Path]:
     Any leading-dot name (hidden file or AppleDouble sidecar) is excluded.
     """
     return [f for f in directory.glob(pattern) if not f.name.startswith(".")]
+
+
+def _raster_images(directory: Path) -> List[Path]:
+    """Every ``RASTER_EXTENSIONS`` file in ``directory`` (dot-names excluded)."""
+    found: List[Path] = []
+    for ext in RASTER_EXTENSIONS:
+        found.extend(_glob_images(directory, f"*{ext}"))
+    return found
 
 
 def camera_subfolder_name(
@@ -566,16 +588,34 @@ def _start_index_mismatch(
     mismatch, or a missing file the start index does not explain).
     """
     found = detect_start_index(matching_names, pattern)
-    if found is None or found == start_idx or found not in (0, 1):
+    if found is None or not start_index_explains_failure(
+        camera_path, pattern, found, start_idx, expected_count
+    ):
         return None
+    return found
+
+
+def start_index_explains_failure(
+    camera_path: Path,
+    pattern: str,
+    found: int,
+    start_idx: int,
+    expected_count: int,
+) -> bool:
+    """True when files starting at ``found`` explain a failure at ``start_idx``.
+
+    ``found`` must be the other of 0/1, and the first or last expected file
+    (``pattern % start_idx`` / ``pattern % (start_idx + expected_count - 1)``)
+    must be missing from ``camera_path``.
+    """
+    if found == start_idx or found not in (0, 1):
+        return False
     try:
         first = pattern % start_idx
         last = pattern % (start_idx + max(expected_count, 1) - 1)
     except (TypeError, ValueError):
-        return None
-    if (camera_path / first).exists() and (camera_path / last).exists():
-        return None
-    return found
+        return False
+    return not ((camera_path / first).exists() and (camera_path / last).exists())
 
 
 def _validate_file_listing(
@@ -690,6 +730,7 @@ def validate_images_generic(
     read_frame_fn: Callable[[int], np.ndarray],
     *,
     diagnosis: "DiagnosisContext",
+    scan_cache: Optional[Dict[str, "SourceScan"]] = None,
 ) -> Dict[str, Any]:
     """Generic image validation for both PIV and calibration images.
 
@@ -719,6 +760,10 @@ def validate_images_generic(
     diagnosis : DiagnosisContext
         The configured source and page facts; its ``image_type`` must equal
         ``image_type``. Drives ``found`` / ``suggestions`` / ``streams``.
+    scan_cache : dict, optional
+        One request's source scans keyed by source path, shared by the cameras a
+        route validates against the same source so the source is scanned once.
+        None scans afresh. Never keep it beyond one request: the disk changes.
 
     Returns
     -------
@@ -774,7 +819,9 @@ def validate_images_generic(
         read_frame_fn,
         calibration=diagnosis.calibration,
     )
-    apply_diagnosis(result, diagnosis, camera, camera_path, expected_count)
+    apply_diagnosis(
+        result, diagnosis, camera, camera_path, expected_count, scan_cache=scan_cache
+    )
     return result
 
 
@@ -826,8 +873,7 @@ def _validate_core(
             if image_type == "lavision_im7":
                 all_images = _glob_images(camera_path, "*.im7")
             else:
-                for ext in ["*.tif", "*.tiff", "*.png", "*.jpg", "*.jpeg"]:
-                    all_images.extend(_glob_images(camera_path, ext))
+                all_images.extend(_raster_images(camera_path))
             if all_images:
                 all_image_names = [f.name for f in sorted(all_images)]
                 result["sample_files"] = all_image_names[:5]
@@ -1024,8 +1070,7 @@ def _validate_core(
 
             # Try to find image files and suggest pattern
             all_images = []
-            for ext in ["*.tif", "*.tiff", "*.png", "*.jpg", "*.jpeg"]:
-                all_images.extend(_glob_images(camera_path, ext))
+            all_images.extend(_raster_images(camera_path))
 
             if all_images:
                 all_image_names = [f.name for f in sorted(all_images)]
@@ -1054,6 +1099,8 @@ def _validate_core(
 
 # Subfolder names listed by _append_folder_contents before "and N more".
 _FOLDER_NAMES_SHOWN = 10
+# File names listed by _append_folder_contents before "and N more...".
+_FILE_NAMES_SHOWN = 5
 
 
 def is_calibration_output_dir(path: Path) -> bool:
@@ -1079,12 +1126,13 @@ def _append_folder_contents(error_msg: str, folder_path: Path) -> str:
             for e in folder_path.iterdir()
             if not e.name.startswith(".") and not is_calibration_output_dir(e)
         ]
-        all_files = sorted(e.name for e in entries if e.is_file())[:10]
+        all_files = sorted(e.name for e in entries if e.is_file())
         folders = sorted(e.name for e in entries if e.is_dir())
         if all_files:
-            error_msg += f". Found {len(all_files)} files: {', '.join(all_files[:5])}"
-            if len(all_files) > 5:
-                error_msg += f" and {len(all_files) - 5} more..."
+            shown = ", ".join(all_files[:_FILE_NAMES_SHOWN])
+            error_msg += f". Found {len(all_files)} files: {shown}"
+            if len(all_files) > _FILE_NAMES_SHOWN:
+                error_msg += f" and {len(all_files) - _FILE_NAMES_SHOWN} more..."
         elif folders:
             shown = ", ".join(folders[:_FOLDER_NAMES_SHOWN])
             extra = len(folders) - _FOLDER_NAMES_SHOWN
@@ -1256,8 +1304,7 @@ def validate_single_pattern(
             if image_type == "lavision_im7":
                 all_images = _glob_images(camera_path, "*.im7")
             else:
-                for ext in ["*.tif", "*.tiff", "*.png", "*.jpg", "*.jpeg"]:
-                    all_images.extend(_glob_images(camera_path, ext))
+                all_images.extend(_raster_images(camera_path))
             if all_images:
                 all_image_names = [f.name for f in sorted(all_images)]
                 result["sample_files"] = all_image_names[:5]
@@ -1300,8 +1347,7 @@ def validate_single_pattern(
     if image_type == "lavision_im7":
         all_images = _glob_images(camera_path, "*.im7")
     else:
-        for ext in ["*.tif", "*.tiff", "*.png", "*.jpg", "*.jpeg"]:
-            all_images.extend(_glob_images(camera_path, ext))
+        all_images.extend(_raster_images(camera_path))
     all_image_names = [f.name for f in sorted(all_images)] if all_images else []
 
     if not matching_files:

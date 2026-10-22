@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from fixtures.diagnosis import (  # noqa: E402
     _inp,
     calibration_client,
+    detected_start_index_of,
     frame_names,
     make_ctx,
     piv_route_response,
@@ -236,6 +237,7 @@ def _scan(**fields):
         root_names=(),
         root_ext_counts={},
         subdirs=(),
+        subdirs_truncated=False,
         listed_is_companion=False,
         companion_of=None,
         truncated=False,
@@ -1034,7 +1036,15 @@ def test_diagnose_ranks_by_rule(tmp_path):
     ctx = make_ctx(tmp_path, image_type="lavision_im7", image_format=("B%05d.im7",))
     ids = [
         s["id"]
-        for s in diagnose(scan_source(tmp_path), ctx, 1, tmp_path, 1, valid=False)
+        for s in diagnose(
+            scan_source(tmp_path),
+            ctx,
+            1,
+            tmp_path,
+            1,
+            valid=False,
+            detected_start_index=None,
+        )
     ]
     assert ids == ["camera_folders", "camera_folders", "pattern"]
 
@@ -1048,14 +1058,25 @@ def test_diagnose_dedupes_identical_apply(tmp_path, monkeypatch):
         "RULES",
         (("pattern", same("pattern")), ("start_index", same("start_index"))),
     )
-    out = diagnose(scan_source(tmp_path), make_ctx(tmp_path), 1, tmp_path, 1, False)
+    out = diagnose(
+        scan_source(tmp_path),
+        make_ctx(tmp_path),
+        1,
+        tmp_path,
+        1,
+        False,
+        detected_start_index=None,
+    )
     assert [s["id"] for s in out] == ["pattern"]
 
 
 def test_diagnose_on_pass_runs_only_set_streams(tmp_path):
     touch(tmp_path, frame_names("Cam1_%05d.tif", 1, 3))
     ctx = make_ctx(tmp_path, image_format=("nope%05d.tif",))
-    assert diagnose(scan_source(tmp_path), ctx, 1, tmp_path, 3, True) == []
+    out = diagnose(
+        scan_source(tmp_path), ctx, 1, tmp_path, 3, True, detected_start_index=None
+    )
+    assert out == []
 
 
 def test_diagnose_set_target_with_wrong_type_puts_type_fix_first(
@@ -1063,7 +1084,7 @@ def test_diagnose_set_target_with_wrong_type_puts_type_fix_first(
 ):
     s = build_raw16_set(tmp_path, PLIF)
     ctx = make_ctx(s, image_type="standard", camera_count=1, camera_numbers=(1,))
-    out = diagnose(scan_source(s), ctx, 1, s, 1, valid=False)
+    out = diagnose(scan_source(s), ctx, 1, s, 1, valid=False, detected_start_index=None)
     assert out[0]["id"] == "picked_file"
     assert out[0]["apply"] == {"image_type": "lavision_set"}
     ids = [x["id"] for x in out]
@@ -1176,7 +1197,15 @@ ALL_FIXTURE_TREES = [
 @pytest.mark.parametrize("build", ALL_FIXTURE_TREES)  # Review Focus 5
 def test_every_rule_output_is_json_safe(tmp_path, build):
     source, ctx, camera_path, expected_count = build(tmp_path)
-    out = diagnose(scan_source(source), ctx, 1, camera_path, expected_count, False)
+    out = diagnose(
+        scan_source(source),
+        ctx,
+        1,
+        camera_path,
+        expected_count,
+        False,
+        detected_start_index=detected_start_index_of(camera_path, ctx.image_format[0]),
+    )
     assert out, build.__name__  # every tree must fire its rule
     for s in out:
         json.loads(json.dumps(s))
@@ -1191,7 +1220,15 @@ def test_fixture_trees_cover_every_rule(tmp_path):
         emitted |= {
             s["id"]
             for s in diagnose(
-                scan_source(source), ctx, 1, camera_path, expected_count, False
+                scan_source(source),
+                ctx,
+                1,
+                camera_path,
+                expected_count,
+                False,
+                detected_start_index=detected_start_index_of(
+                    camera_path, ctx.image_format[0]
+                ),
             )
         }
     assert emitted == {rule_id for rule_id, _ in RULES}
@@ -1253,7 +1290,12 @@ def test_apply_diagnosis_reports_an_unfinished_diagnosis(tmp_path, monkeypatch):
         raise PermissionError(13, "Permission denied")
 
     monkeypatch.setattr(SD, "diagnose", boom)
-    result = {"valid": False, "error": "core text", "found_count": 0}
+    result = {
+        "valid": False,
+        "error": "core text",
+        "found_count": 0,
+        "detected_start_index": None,
+    }
     apply_diagnosis(result, make_ctx(tmp_path), 1, tmp_path, 1)
     assert result["error"] == "core text"
     assert result["suggestions"] == []
@@ -1521,3 +1563,284 @@ def test_calibration_output_folder_hidden_only_with_its_sidecar(tmp_path):
     assert _append_folder_contents("x", tmp_path) == (
         "x. No files here, only folders: camera1"
     )
+
+
+# --- final review fixes ---
+
+
+def _malformed_decoder_set(root: Path) -> Path:
+    """A ``.set`` whose stream-0 decoder XML is truncated (an ``ET.ParseError``)."""
+    from fixtures.lavision import build_set
+
+    set_file = build_set(
+        root, "raw-16-bit", [[bytes(48)], [bytes(48)]], 6, 4, name="run"
+    )
+    (root / "run" / "Frame0-decoder.xml").write_text(
+        "<FrameDecoder><id>raw-16-bit</id>"
+    )
+    return set_file
+
+
+def test_validate_files_malformed_decoder_keeps_core_error(
+    tmp_path, monkeypatch, clean_set_cache
+):
+    set_file = _malformed_decoder_set(tmp_path)
+    cam = piv_route_response(
+        tmp_path,
+        monkeypatch,
+        paths={"source_paths": [str(set_file)]},
+        images={
+            "image_type": "lavision_set",
+            "image_format": ["run.set"],
+            "pairing_preset": "pre_paired",
+            "frame_stride": 0,
+            "num_images": 1,
+        },
+    ).get_json()["details"]["camera_1"]
+    reason = "no element found: line 1, column 33"
+    assert cam["error"] == f"Could not read the image count of {set_file}: {reason}"
+    assert cam["found"] == f"run.set: streams could not be read ({reason})."
+    assert cam["suggestions"] == []
+
+
+def test_calibration_route_malformed_decoder_keeps_core_error(
+    tmp_path, monkeypatch, clean_set_cache
+):
+    set_file = _malformed_decoder_set(tmp_path)
+    save_settings(
+        set_file, {"image": {"image_type": "lavision_set", "image_format": "run.set"}}
+    )
+    out = (
+        calibration_client(set_file, monkeypatch)
+        .post("/calibration/validate", json={"camera": 1, "source_path_idx": 0})
+        .get_json()
+    )
+    reason = "no element found: line 1, column 33"
+    assert out["error"] == f"Could not read the image count of {set_file}: {reason}"
+    assert out["found"] == f"run.set: streams could not be read ({reason})."
+    assert out["suggestions"] == []
+
+
+@pytest.mark.parametrize("exc", [KeyError("weird_type"), SyntaxError("bad xml")])
+def test_apply_diagnosis_reports_any_rule_failure(tmp_path, monkeypatch, exc):
+    touch(tmp_path, ["Cam1_00001.tif"])
+
+    def boom(*_args, **_kwargs):
+        raise exc
+
+    monkeypatch.setattr(SD, "diagnose", boom)
+    result = {
+        "valid": False,
+        "error": "core text",
+        "found_count": 0,
+        "detected_start_index": None,
+    }
+    apply_diagnosis(result, make_ctx(tmp_path), 1, tmp_path, 1)
+    assert result["error"] == "core text"
+    assert result["suggestions"] == []
+    assert result["found"].endswith(f"Could not finish the diagnosis: {exc}.")
+
+
+def test_apply_diagnosis_reports_a_found_builder_failure(tmp_path, monkeypatch):
+    touch(tmp_path, ["Cam1_00001.tif"])
+
+    def boom(*_args, **_kwargs):
+        raise ValueError("found exploded")
+
+    monkeypatch.setattr(SD, "found_for", boom)
+    result = {
+        "valid": False,
+        "error": "core text",
+        "found_count": 0,
+        "detected_start_index": None,
+    }
+    apply_diagnosis(result, make_ctx(tmp_path), 1, tmp_path, 1)
+    assert result["error"] == "core text"
+    assert result["found"] == "Could not finish the diagnosis: found exploded."
+
+
+def test_start_index_rule_ignores_a_truncated_sample(tmp_path):
+    import dataclasses
+
+    touch(tmp_path, frame_names("B%05d.tif", 0, 49))
+    inp = _inp(tmp_path, start_index=0, expected_count=60)
+    # A capped listing whose arbitrary sample happens to miss frame 0.
+    sample = dataclasses.replace(
+        inp.scan,
+        root_names=tuple(n for n in inp.scan.root_names if n != "B00000.tif"),
+        truncated=True,
+    )
+    assert inp.detected_start_index == 0
+    assert rule_start_index(dataclasses.replace(inp, scan=sample)) == []
+
+
+def _count_scans(monkeypatch) -> list:
+    """Record every ``scan_source`` path the diagnosis makes."""
+    calls = []
+    real = SD.scan_source
+
+    def counting(path):
+        calls.append(path)
+        return real(path)
+
+    monkeypatch.setattr(SD, "scan_source", counting)
+    return calls
+
+
+def test_validate_files_passing_multi_camera_does_not_scan(tmp_path, monkeypatch):
+    src = tmp_path / "src"
+    for c in (1, 2, 3):
+        touch(src / f"Cam{c}", frame_names("B%05d.tif", 1, 3))
+    calls = _count_scans(monkeypatch)
+    body = piv_route_response(
+        tmp_path,
+        monkeypatch,
+        paths={
+            "source_paths": [str(src)],
+            "camera_count": 3,
+            "camera_numbers": [1, 2, 3],
+        },
+        images={"image_format": ["B%05d.tif"], "num_images": 3},
+    ).get_json()
+    assert calls == []
+    for c in (1, 2, 3):
+        cam = body["details"][f"camera_{c}"]
+        assert cam["found"] == "3 cameras × 3 .tif, image size could not be read."
+        assert cam["suggestions"] == []
+
+
+def test_validate_files_failing_multi_camera_scans_once(tmp_path, monkeypatch):
+    src = tmp_path / "src"
+    for c in (1, 2, 3):
+        touch(src / f"Cam{c}", frame_names("B%05d.tif", 1, 3))
+    calls = _count_scans(monkeypatch)
+    body = piv_route_response(
+        tmp_path,
+        monkeypatch,
+        paths={
+            "source_paths": [str(src)],
+            "camera_count": 3,
+            "camera_numbers": [1, 2, 3],
+        },
+        images={"image_format": ["nope%05d.tif"], "num_images": 3},
+    ).get_json()
+    assert len(calls) == 1
+    assert all(body["details"][f"camera_{c}"]["found"] for c in (1, 2, 3))
+
+
+def test_calibration_im7_camera_folders_also_fix_the_pattern(tmp_path, monkeypatch):
+    src = tmp_path / "calib"
+    for i in (1, 2, 3):
+        touch(src / f"camera{i}", ["B00001.im7", "B00002.im7"])
+    save_settings(
+        src,
+        {
+            "image": {
+                "image_type": "lavision_im7",
+                "image_format": "calib%05d.tif",
+                "n_views": 2,
+            }
+        },
+    )
+    out = (
+        calibration_client(src, monkeypatch, camera_count=3)
+        .post("/calibration/validate", json={"camera": 1, "source_path_idx": 0})
+        .get_json()
+    )
+    [s] = [s for s in out["suggestions"] if s["id"] == "camera_folders"]
+    assert s["apply"] == {
+        "use_camera_subfolders": True,
+        "camera_subfolders": ["camera1", "camera2", "camera3"],
+        "image_format": ["B%05d.im7"],
+    }
+
+
+def test_camera_folders_keep_a_matching_pattern(tmp_path):
+    for i in (1, 2, 3):
+        touch(tmp_path / f"camera{i}", ["B00001.im7"])
+    [s] = rule_camera_folders(
+        _inp(
+            tmp_path,
+            image_type="lavision_im7",
+            image_format=("B%05d.im7",),
+            camera_count=3,
+            camera_numbers=(1, 2, 3),
+        )
+    )
+    assert "image_format" not in s["apply"]
+
+
+def test_inside_camera_folder_also_fixes_the_pattern(tmp_path):
+    for i in (1, 2, 3):
+        touch(tmp_path / f"camera{i}", ["B00001.tif", "B00002.tif"])
+    [s] = rule_inside_camera_folder(
+        _inp(
+            tmp_path / "camera1",
+            camera_count=3,
+            camera_numbers=(1, 2, 3),
+            image_format=("nope%05d.tif",),
+        )
+    )
+    assert s["apply"] == {
+        "source_path": str(tmp_path),
+        "camera_subfolders": ["camera1", "camera2", "camera3"],
+        "image_format": ["B%05d.tif"],
+    }
+
+
+def test_found_marks_the_subfolder_cap(tmp_path):
+    for i in range(SD.SCAN_MAX_SUBDIRS + 1):
+        (tmp_path / f"run{i:03d}").mkdir()
+    scan = scan_source(tmp_path)
+    assert scan.subdirs_truncated
+    assert f"; {SD.SCAN_MAX_SUBDIRS}+ folders (" in scan_sentence(scan)
+    (tmp_path / f"run{SD.SCAN_MAX_SUBDIRS:03d}").rmdir()
+    assert f"; {SD.SCAN_MAX_SUBDIRS} folders (" in scan_sentence(scan_source(tmp_path))
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("/data/runs'", "/data/runs'"),  # a trailing apostrophe is part of the name
+        ("'/data/Bob's run'", "/data/Bob's run"),
+        ("\"'/data/run'\"", "'/data/run'"),  # exactly one pair
+        ("\"/data/run'", "\"/data/run'"),  # not a matching pair
+    ],
+)
+def test_normalise_source_path_strips_one_matching_pair(raw, expected):
+    assert normalise_source_path(raw) == expected
+
+
+@pytest.mark.parametrize("blank", ["", "   ", '""'])
+def test_validate_files_blank_source_is_reported_not_scanned(
+    tmp_path, monkeypatch, blank
+):
+    calls = _count_scans(monkeypatch)
+    cam = piv_route_response(
+        tmp_path,
+        monkeypatch,
+        paths={"source_paths": [blank]},
+        images={"image_format": ["B%05d.tif"], "num_images": 1},
+    ).get_json()["details"]["camera_1"]
+    assert calls == []
+    assert cam["status"] == "error"
+    assert cam["error"] == "No source path set."
+    assert cam["found"] == "No source path set."
+    assert (cam["suggestions"], cam["streams"]) == ([], None)
+
+
+def test_append_folder_contents_reports_the_true_count(tmp_path):
+    touch(tmp_path, [f"f{i:02d}.txt" for i in range(12)])
+    assert _append_folder_contents("x", tmp_path) == (
+        "x. Found 12 files: f00.txt, f01.txt, f02.txt, f03.txt, f04.txt and 7 more..."
+    )
+
+
+def test_raster_family_is_exactly_what_the_core_globs(tmp_path):
+    from pivtools_core.image_handling.path_utils import RASTER_EXTENSIONS
+
+    assert SD.FAMILY_EXTS["raster"] == RASTER_EXTENSIONS
+    touch(tmp_path, ["B00001.bmp", "B00002.bmp"])
+    scan = scan_source(tmp_path)
+    assert scan.root_names == ()
+    assert SD.family_of("B00001.bmp") is None

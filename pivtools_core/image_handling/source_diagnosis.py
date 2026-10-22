@@ -12,6 +12,7 @@ Import direction is one-way at module level: this module imports ``path_utils``;
 
 import fnmatch
 import json
+import logging
 import os
 import re
 import stat
@@ -33,13 +34,14 @@ from typing import (
 )
 
 from .path_utils import (
+    RASTER_EXTENSIONS,
     _detect_ab_pair_pattern,
-    _start_index_mismatch,
     _suggest_pattern,
     _suggest_pattern_for_role,
     format_to_glob,
     is_calibration_output_dir,
     normalise_source_path,
+    start_index_explains_failure,
     start_index_hint_message,
 )
 from .readers.set_reader import (
@@ -50,6 +52,12 @@ from .readers.set_reader import (
 
 if TYPE_CHECKING:
     from ..config import Config
+
+logger = logging.getLogger(__name__)
+
+# The validate routes' answer for a blank source path, which is never scanned
+# (``Path("")`` is the server's working directory).
+BLANK_SOURCE_MESSAGE = "No source path set."
 
 # One-level scan caps. A source folder with tens of thousands of frames must not
 # stall the validate request, and a rule only needs a representative sample.
@@ -68,7 +76,7 @@ FAMILY_EXTS: Dict[str, Tuple[str, ...]] = {
     "ims": (".ims",),
     "im7": (".im7",),
     "cine": (".cine",),
-    "raster": (".tif", ".tiff", ".png", ".jpg", ".jpeg", ".bmp"),
+    "raster": RASTER_EXTENSIONS,  # exactly what the validator globs
 }
 TYPE_FAMILY: Dict[str, str] = {
     "lavision_set": "set",
@@ -165,6 +173,7 @@ class SourceScan:
     root_names: Tuple[str, ...]  # natural-sorted image-family file names in listed
     root_ext_counts: Mapping[str, int]
     subdirs: Tuple[SubdirInfo, ...]  # natural-sorted
+    subdirs_truncated: bool  # listed held more than SCAN_MAX_SUBDIRS subfolders
     listed_is_companion: bool  # listed is a DaVis ``.set`` data folder
     companion_of: Optional[Path]  # the ``.set`` whose data folder ``listed`` is
     truncated: bool
@@ -197,6 +206,7 @@ class _Listing:
     subdir_names: Tuple[str, ...]
     is_companion: bool
     truncated: bool
+    subdirs_truncated: bool
     error: Optional[str]
 
 
@@ -258,6 +268,7 @@ def _list_dir(directory: Path) -> _Listing:
     dirs: List[str] = []
     companion = False
     truncated = False
+    subdirs_truncated = False
     seen = 0
     hard_stop = SCAN_HARD_STOP_FACTOR * SCAN_MAX_ENTRIES
     try:
@@ -278,7 +289,7 @@ def _list_dir(directory: Path) -> _Listing:
                     if len(dirs) < SCAN_MAX_SUBDIRS:
                         dirs.append(entry.name)
                     else:
-                        truncated = True
+                        truncated = subdirs_truncated = True
                     continue
                 if family_of(entry.name) is None:
                     continue
@@ -301,6 +312,7 @@ def _list_dir(directory: Path) -> _Listing:
             (),
             False,
             False,
+            False,
             f"could not list {directory.as_posix()}: {exc.strerror}",
         )
     return _Listing(
@@ -309,6 +321,7 @@ def _list_dir(directory: Path) -> _Listing:
         tuple(sorted(dirs, key=natural_key)),
         companion,
         truncated,
+        subdirs_truncated,
         None,
     )
 
@@ -364,7 +377,7 @@ def scan_source(path: Union[str, Path]) -> SourceScan:
         listed = None
 
     truncated = False
-    root = _Listing((), {}, (), False, False, None)
+    root = _Listing((), {}, (), False, False, False, None)
     subdirs: List[SubdirInfo] = []
     companion_of: Optional[Path] = None
     if listed is not None:
@@ -403,6 +416,7 @@ def scan_source(path: Union[str, Path]) -> SourceScan:
         root_names=root.image_names,
         root_ext_counts=root.ext_counts,
         subdirs=tuple(subdirs),
+        subdirs_truncated=root.subdirs_truncated,
         listed_is_companion=root.is_companion,
         companion_of=companion_of,
         truncated=truncated,
@@ -439,10 +453,12 @@ def _names_text(names: Sequence[str]) -> str:
     return f"{shown} and {extra} more" if extra > 0 else shown
 
 
-def _folders_clause(subdirs: Sequence[SubdirInfo]) -> str:
-    """The subfolder part of a scan sentence."""
+def _folders_clause(subdirs: Sequence[SubdirInfo], capped: bool) -> str:
+    """The subfolder part of a scan sentence; ``capped`` marks the count with ``+``."""
+    noun = "folder" if len(subdirs) == 1 and not capped else "folders"
     head = (
-        f"{_plural(len(subdirs), 'folder')} ({_names_text([d.name for d in subdirs])})"
+        f"{_count_text(len(subdirs), capped)} {noun} "
+        f"({_names_text([d.name for d in subdirs])})"
     )
     if all(not d.ext_counts for d in subdirs):
         return f"{head}, none with images"
@@ -499,7 +515,7 @@ def scan_sentence(scan: SourceScan) -> str:
             elif scan.subdirs:
                 clauses.append("no images here")
             if scan.subdirs:
-                clauses.append(_folders_clause(scan.subdirs))
+                clauses.append(_folders_clause(scan.subdirs, scan.subdirs_truncated))
             body = "; ".join(clauses) if clauses else "no images here and no folders"
             parts.append(f"In {scan.listed.as_posix()}: {body}.")
     for error in scan.errors:
@@ -603,16 +619,25 @@ def found_for(
             )
         if streams_error is not None:
             return f"{scan.path.name}: streams could not be read ({streams_error})."
+    loaded = loaded_sentence(ctx, result)
+    return loaded if loaded is not None else scan_sentence(scan)
+
+
+def loaded_sentence(ctx: DiagnosisContext, result: Mapping[str, Any]) -> Optional[str]:
+    """What loaded, for a valid result that says how much; else None.
+
+    A result without ``found_count`` cannot say how much loaded, so the caller
+    describes the disk instead.
+    """
     fmt = result.get("format_detected")
-    # A result without ``found_count`` cannot say how much loaded; describe the disk.
-    if result.get("valid") and fmt and "found_count" in result:
-        unit = {"set": "entries", "cine": "frames"}.get(fmt, f".{fmt}")
-        head = _pass_head(ctx.camera_count, result["found_count"], unit)
-        size = result.get("image_size")
-        if size is None:
-            return f"{head}, image size could not be read."
-        return pass_sentence(ctx.camera_count, result["found_count"], unit, size)
-    return scan_sentence(scan)
+    if not (result.get("valid") and fmt and "found_count" in result):
+        return None
+    unit = {"set": "entries", "cine": "frames"}.get(fmt, f".{fmt}")
+    head = _pass_head(ctx.camera_count, result["found_count"], unit)
+    size = result.get("image_size")
+    if size is None:
+        return f"{head}, image size could not be read."
+    return pass_sentence(ctx.camera_count, result["found_count"], unit, size)
 
 
 @dataclass(frozen=True)
@@ -624,6 +649,9 @@ class RuleInput:
     camera: int
     camera_path: Path
     expected_count: Optional[int]
+    # The core validator's first frame index over the FULL matching listing
+    # (``result["detected_start_index"]``); the scan's names are only a sample.
+    detected_start_index: Optional[int]
 
 
 Rule = Callable[[RuleInput], List[Suggestion]]
@@ -1197,6 +1225,41 @@ def rule_wrong_type(inp: RuleInput) -> List[Suggestion]:
     return out
 
 
+def _folders_format(
+    root: Path, folders: Sequence[SubdirInfo], ctx: DiagnosisContext
+) -> Dict[str, Any]:
+    """The pattern fragment to apply together with camera ``folders`` of ``root``.
+
+    Empty when a configured pattern matches a file of the configured family in any
+    of the folders (listing samples, as capped by the scan), or when ``format_apply``
+    derives no pattern from the first folder's files. Otherwise the fragment, so one
+    click fixes the folders and the pattern together.
+    """
+    family = TYPE_FAMILY[ctx.image_type]
+    globs = [format_to_glob(p) for p in _configured_patterns(ctx)]
+    first_names: List[str] = []
+    for index, folder in enumerate(folders):
+        names = [
+            n
+            for n in _list_dir(root / folder.name).image_names
+            if family_of(n) == family
+        ]
+        if any(fnmatch.fnmatchcase(n, g) for n in names for g in globs):
+            return {}
+        if index == 0:
+            first_names = names
+    fragment = format_apply(first_names, ctx.image_type, root / folders[0].name, ctx)
+    return fragment or {}
+
+
+def _with_format_note(message: str, fragment: Mapping[str, Any]) -> str:
+    """``message`` plus the pattern a folder fix also applies, when it applies one."""
+    if not fragment:
+        return message
+    patterns = " / ".join(f'"{p}"' for p in fragment["image_format"])
+    return f"{message} Their files match {patterns}."
+
+
 def rule_camera_folders(inp: RuleInput) -> List[Suggestion]:
     """No file matches at the root, but camera-numbered subfolders hold the configured family."""
     scan, ctx = inp.scan, inp.ctx
@@ -1215,9 +1278,15 @@ def rule_camera_folders(inp: RuleInput) -> List[Suggestion]:
         f"{_plural(len(names), 'camera folder')} ({_names_text(names)}) hold "
         f"{_family_exts_text(family)} files."
     )
+    variants = _folder_variants(scan, ctx, ctx.image_type, folders)
+    # Folder listings only when a folder fix will be offered.
+    offered = any(apply for apply, _ in variants)
+    fragment = _folders_format(scan.path, folders, ctx) if offered else {}
+    message = _with_format_note(message, fragment)
     out: List[Suggestion] = []
-    for apply, label in _folder_variants(scan, ctx, ctx.image_type, folders):
-        if apply:
+    for apply, label in variants:
+        if apply:  # a fix only for the pattern belongs to the pattern rule
+            apply = {**apply, **fragment}
             out.append(
                 make_suggestion(
                     "camera_folders",
@@ -1250,13 +1319,17 @@ def rule_inside_camera_folder(inp: RuleInput) -> List[Suggestion]:
     variants = _folder_variants(parent_scan, ctx, ctx.image_type, folders)
     if not variants:
         return []
-    apply: Dict[str, Any] = {"source_path": str(parent), **variants[0][0]}
+    fragment = _folders_format(parent, folders, ctx)
+    apply: Dict[str, Any] = {"source_path": str(parent), **variants[0][0], **fragment}
     parent_name = parent.name or parent.as_posix()
     return [
         make_suggestion(
             "inside_camera_folder",
-            f"{scan.path.as_posix()} is one of {len(folders)} camera folders in "
-            f"{parent.as_posix()} ({_names_text([d.name for d in folders])}).",
+            _with_format_note(
+                f"{scan.path.as_posix()} is one of {len(folders)} camera folders in "
+                f"{parent.as_posix()} ({_names_text([d.name for d in folders])}).",
+                fragment,
+            ),
             cross_store_label(
                 ctx,
                 "inside_camera_folder",
@@ -1403,20 +1476,21 @@ def start_index_suggestion(found: int, start: int) -> Suggestion:
 
 
 def rule_start_index(inp: RuleInput) -> List[Suggestion]:
-    """Files start at 0 or 1 but the start index is the other, leaving a file missing."""
+    """Files start at 0 or 1 but the start index is the other, leaving a file missing.
+
+    The first index is the core validator's, read from the full matching listing:
+    the scan's capped sample may miss the lowest-numbered file.
+    """
     ctx = inp.ctx
     primary = ctx.image_format[0] if ctx.image_format else ""
-    if inp.expected_count is None or not primary.strip():
+    found = inp.detected_start_index
+    if found is None or inp.expected_count is None or not primary.strip():
         return []
-    names = _family_names(inp)
-    if not names:
+    if not start_index_explains_failure(
+        inp.camera_path, primary, found, ctx.start_index, inp.expected_count
+    ):
         return []
-    glob = format_to_glob(primary)
-    matching = [n for n in names if fnmatch.fnmatchcase(n, glob)]
-    found = _start_index_mismatch(
-        inp.camera_path, primary, matching, ctx.start_index, inp.expected_count
-    )
-    return [] if found is None else [start_index_suggestion(found, ctx.start_index)]
+    return [start_index_suggestion(found, ctx.start_index)]
 
 
 # Spec rank order (section 4.4). Earlier rules explain the failure more directly.
@@ -1442,14 +1516,19 @@ def diagnose(
     camera_path: Path,
     expected_count: Optional[int],
     valid: bool,
+    *,
+    detected_start_index: Optional[int],
 ) -> List[Suggestion]:
     """Ranked, de-duplicated suggestions for one camera's source.
 
     A passing validation runs only ``set_streams`` (it also annotates passes). A failing
     one runs every rule in ``RULES`` order and drops later suggestions whose ``apply``
     equals an earlier one. Merging across cameras is the caller's job.
+    ``detected_start_index`` is the core result's ``detected_start_index``.
     """
-    inp = RuleInput(scan, ctx, camera, camera_path, expected_count)
+    inp = RuleInput(
+        scan, ctx, camera, camera_path, expected_count, detected_start_index
+    )
     out: List[Suggestion] = []
     seen: List[Dict[str, Any]] = []
     for rule_id, rule in RULES:
@@ -1463,40 +1542,90 @@ def diagnose(
     return out
 
 
+def _exception_text(exc: BaseException) -> str:
+    """An exception's reason for a ``found`` sentence (``strerror`` for OS errors)."""
+    return getattr(exc, "strerror", None) or str(exc) or type(exc).__name__
+
+
+def _unfinished(exc: BaseException) -> str:
+    """The ``found`` sentence for a diagnosis stopped by ``exc``."""
+    return f"Could not finish the diagnosis: {_exception_text(exc)}."
+
+
+def _targets_set_file(ctx: DiagnosisContext) -> bool:
+    """True when the context's source is a ``.set`` recording (its streams are shown)."""
+    source = Path(normalise_source_path(str(ctx.source_path)))
+    return ctx.image_type == "lavision_set" and _is_set_file(source)
+
+
+def _scan_once(path: Path, scan_cache: Optional[Dict[str, SourceScan]]) -> SourceScan:
+    """``scan_source(path)``, reused from ``scan_cache`` (one request's scans) if given."""
+    if scan_cache is None:
+        return scan_source(path)
+    key = str(path)
+    if key not in scan_cache:
+        scan_cache[key] = scan_source(path)
+    return scan_cache[key]
+
+
 def apply_diagnosis(
     result: Dict[str, Any],
     ctx: DiagnosisContext,
     camera: int,
     camera_path: Path,
     expected_count: Optional[int],
+    *,
+    scan_cache: Optional[Dict[str, SourceScan]] = None,
 ) -> None:
     """Add ``found``, ``suggestions`` and ``streams`` to a validation result in place.
 
-    The core ``error`` is never touched. A ``.set`` whose stream table cannot be
-    read keeps ``streams = None`` and ``found`` says why. A filesystem failure
-    inside the rules leaves ``suggestions`` empty and is reported in ``found``.
+    The core ``error`` is never touched. A passing source that is not a ``.set``
+    recording is not scanned: ``found`` says what loaded and no rule runs on a pass
+    except ``set_streams``, which needs the ``.set``. A ``.set`` whose stream table
+    cannot be read keeps ``streams = None`` and ``found`` says why. Any failure while
+    scanning, describing or running the rules is logged, leaves ``suggestions``
+    empty and is reported in ``found`` as ``Could not finish the diagnosis: ...``.
+    ``scan_cache`` shares one scan per source across the cameras of one request.
     """
-    scan = scan_source(ctx.source_path)
+    if result["valid"] and not _targets_set_file(ctx):
+        loaded = loaded_sentence(ctx, result)
+        if loaded is not None:
+            result.update(found=loaded, suggestions=[], streams=None)
+            return
     streams: Optional[List[StreamInfo]] = None
-    streams_error: Optional[str] = None
-    if (
-        ctx.image_type == "lavision_set"
-        and scan.exists
-        and not scan.is_dir
-        and _is_set_file(scan.path)
-    ):
-        try:
-            streams = set_stream_infos(scan.path, ctx.camera_count)
-        except (OSError, ValueError) as exc:
-            streams_error = str(exc)
-    found = found_for(scan, ctx, result, streams, streams_error)
+    try:
+        scan = _scan_once(ctx.source_path, scan_cache)
+        streams_error: Optional[str] = None
+        if (
+            ctx.image_type == "lavision_set"
+            and scan.exists
+            and not scan.is_dir
+            and _is_set_file(scan.path)
+        ):
+            try:
+                streams = set_stream_infos(scan.path, ctx.camera_count)
+            except Exception as exc:  # any unreadable recording: ``found`` says why
+                logger.exception("Could not read the streams of %s", scan.path)
+                streams_error = str(exc)
+        found = found_for(scan, ctx, result, streams, streams_error)
+    except Exception as exc:
+        logger.exception("Source diagnosis of %s failed", ctx.source_path)
+        result.update(found=_unfinished(exc), suggestions=[], streams=streams)
+        return
     try:
         suggestions = diagnose(
-            scan, ctx, camera, camera_path, expected_count, bool(result["valid"])
+            scan,
+            ctx,
+            camera,
+            camera_path,
+            expected_count,
+            bool(result["valid"]),
+            detected_start_index=result["detected_start_index"],
         )
-    except OSError as exc:
+    except Exception as exc:
+        logger.exception("Source diagnosis rules failed for %s", ctx.source_path)
         suggestions = []
-        found += f" Could not finish the diagnosis: {exc.strerror or exc}."
+        found += f" {_unfinished(exc)}"
     result["found"] = found
     result["suggestions"] = suggestions
     result["streams"] = streams

@@ -8,7 +8,12 @@ from flask import Flask
 from flask.testing import FlaskClient
 
 from pivtools_core.config import Config
-from pivtools_core.image_handling.path_utils import camera_subfolder_name
+from pivtools_core.image_handling.path_utils import (
+    _glob_images,
+    camera_subfolder_name,
+    detect_start_index,
+    format_to_glob,
+)
 from pivtools_core.image_handling.source_diagnosis import (
     DiagnosisContext,
     RuleInput,
@@ -47,7 +52,22 @@ def _inp(
         use_camera_subfolders=ctx.use_camera_subfolders,
         camera_subfolders=ctx.camera_subfolders,
     )
-    return RuleInput(scan_source(source), ctx, camera, camera_path, expected_count)
+    return RuleInput(
+        scan_source(source),
+        ctx,
+        camera,
+        camera_path,
+        expected_count,
+        detected_start_index_of(camera_path, ctx.image_format[0]),
+    )
+
+
+def detected_start_index_of(camera_path: Path, pattern: str) -> Optional[int]:
+    """The core validator's ``detected_start_index``: over the FULL matching listing."""
+    if not camera_path.is_dir() or not pattern.strip():
+        return None
+    names = [p.name for p in _glob_images(camera_path, format_to_glob(pattern))]
+    return detect_start_index(names, pattern)
 
 
 def frame_names(fmt: str, start: int, stop: int) -> List[str]:

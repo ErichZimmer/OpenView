@@ -978,12 +978,34 @@ def validate_files():
     overall_valid = True
 
     from pivtools_core.image_handling.path_utils import (
+        normalise_source_path,
         start_index_hint_message,
         validate_single_pattern,
     )
-    from pivtools_core.image_handling.source_diagnosis import piv_diagnosis_context
+    from pivtools_core.image_handling.source_diagnosis import (
+        BLANK_SOURCE_MESSAGE,
+        piv_diagnosis_context,
+    )
+
+    # Config.source_paths turns a blank entry into Path("."), the server's working
+    # directory, so the blank is detected on the raw entry and never validated.
+    raw_source = str(cfg.data["paths"]["source_paths"][source_path_idx])
+    if not normalise_source_path(raw_source):
+        details = {
+            f"camera_{camera_num}": {
+                "status": "error",
+                "error": BLANK_SOURCE_MESSAGE,
+                "found": BLANK_SOURCE_MESSAGE,
+                "suggestions": [],
+                "streams": None,
+            }
+            for camera_num in camera_numbers
+        }
+        return jsonify({"valid": False, "detected_count": None, "details": details})
 
     diagnosis = piv_diagnosis_context(cfg, source_path_idx)
+    # Every camera validates against the same source: scan it once per request.
+    scan_cache = {}
 
     for camera_num in camera_numbers:
         try:
@@ -1055,6 +1077,7 @@ def validate_files():
                 zero_based_indexing=(cfg.start_index == 0),
                 read_frame_fn=read_frame,
                 diagnosis=diagnosis,
+                scan_cache=scan_cache,
             )
 
             # PIV-specific: Test first and last pairs
