@@ -111,12 +111,22 @@ def _parse_header(raw: bytes) -> IM7Header:
     Raises
     ------
     ValueError
-        If raw is not 256 bytes.
+        If raw is not 256 bytes, or any of size_x/size_y/size_z/size_f is below
+        1. Every byte count the pixel decoders compute is a product of these, so
+        a zero or negative one would surface as a division by zero, a negative
+        read length or a huge allocation instead of as a damaged header.
     """
     if len(raw) != HEADER_SIZE:
         raise ValueError(f"Header must be {HEADER_SIZE} bytes, got {len(raw)}")
 
     values = struct.unpack_from(HEADER_FORMAT, raw, 0)
+    dims = dict(zip(("size_x", "size_y", "size_z", "size_f"), values[4:8]))
+    bad = {k: v for k, v in dims.items() if v < 1}
+    if bad:
+        raise ValueError(
+            f"Damaged .im7 header: every dimension must be at least 1, got "
+            f"{', '.join(f'{k}={v}' for k, v in bad.items())}"
+        )
     return IM7Header(
         version=values[0],
         pack_type=values[1],

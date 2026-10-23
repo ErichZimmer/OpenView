@@ -68,6 +68,7 @@ def test_load_one_standard_png_roundtrips(tmp_path):
 import struct
 
 from pivtools_core.image_handling.readers.im7_reader import (
+    HEADER_FORMAT,
     HEADER_SIZE,
     read_im7,
     read_im7_camera,
@@ -581,3 +582,18 @@ def test_pack2_zlib_wrong_block_size_fails_visibly(tmp_path, per):
     # Camera 1 owns both frames, so the per-camera path decodes (not skips) block 1.
     with pytest.raises(IOError, match="inflated to"):
         read_im7_camera(p, 1, 2)
+
+
+@pytest.mark.parametrize("pack_type", [0, 1, 2, 20])
+@pytest.mark.parametrize(
+    "dims", [(0, 4, 1, 1), (-4, 4, 1, 1), (4, 0, 1, 1), (4, 4, 0, 1), (4, 4, 1, 0)]
+)
+def test_header_with_non_positive_dimension_is_rejected(tmp_path, pack_type, dims):
+    """Every pixel byte count is a product of the header dimensions, so a zero or
+    negative one must fail as a damaged header, not as a ZeroDivisionError, a
+    negative read length or a MemoryError deep inside a decoder."""
+    header = struct.pack(HEADER_FORMAT, 7, pack_type, -4, 0, *dims, 0, 0, 0)
+    p = tmp_path / "bad_dims.im7"
+    p.write_bytes(header.ljust(HEADER_SIZE, b"\0") + b"\0" * 64)
+    with pytest.raises(ValueError, match="Damaged .im7 header"):
+        read_im7(p)
