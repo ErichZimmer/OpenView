@@ -164,6 +164,18 @@ def write_stream_set(set_dir, entries):
     )
 
 
+# Extended-header records after the pixels, as DaVis writes them: an IEH_SCALE_X
+# record first (type 1, "slope offset\0unit\0", copied from a real DaVis dark
+# image), then int32 0 (IEH_END). The reader rejects a bare IEH_END, which real
+# files never have, because it is indistinguishable from zero pixel bytes.
+_IM7_SCALE_X_PAYLOAD = b"1 0\x00pixel\x00"
+_IM7_TRAILER = (
+    struct.pack("<ii", 1, len(_IM7_SCALE_X_PAYLOAD))
+    + _IM7_SCALE_X_PAYLOAD
+    + b"\x00\x00\x00\x00"
+)
+
+
 def write_dark_im7(path, arr):
     """Write a minimal uncompressed uint16 .im7 the in-tree reader can read."""
     import struct as _struct
@@ -174,8 +186,7 @@ def write_dark_im7(path, arr):
     # is_sparse, size_x, size_y, size_z, size_f, scalar_n, vector_grid, extra_flags.
     _struct.pack_into("<hhhh", header, 0, 0, 0, -4, 0)  # buffer_format -4 = WORD
     _struct.pack_into("<iiii", header, 8, w, h, 1, 1)
-    # Trailing int32 0 terminates the extended-header record list (IEH_END).
-    path.write_bytes(bytes(header) + arr.astype("<u2").tobytes() + b"\x00\x00\x00\x00")
+    path.write_bytes(bytes(header) + arr.astype("<u2").tobytes() + _IM7_TRAILER)
 
 
 def write_dark_im7_float(path, arr):
@@ -186,7 +197,7 @@ def write_dark_im7_float(path, arr):
     header = bytearray(256)
     _struct.pack_into("<hhhh", header, 0, 0, 0, -3, 0)  # buffer_format -3 = FLOAT
     _struct.pack_into("<iiii", header, 8, w, h, 1, 1)
-    path.write_bytes(bytes(header) + arr.astype("<f4").tobytes() + b"\x00\x00\x00\x00")
+    path.write_bytes(bytes(header) + arr.astype("<f4").tobytes() + _IM7_TRAILER)
 
 
 def build_raw16_set(
