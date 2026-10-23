@@ -5,7 +5,7 @@ No dependency on lvpyio -- works on macOS, Linux, and Windows.
 
 Supports:
 - Uncompressed float32 and uint16 pixel data (pack_type=0)
-- Zlib-compressed data (pack_type=2)
+- Zlib-compressed data (pack_type=2), one block per row or one per frame
 - Fixed 12-bit packed data (pack_type=3)
 - Intensity scale attributes (slope/offset)
 - Multi-frame files (sizeF > 1)
@@ -31,9 +31,13 @@ BUFFER_FORMAT_WORD = -4
 PACK_UNCOMPRESSED = 0
 # DaVis delta+nibble RLE: a 3-byte preamble then a token stream of signed-int8
 # pixel deltas, with 0x81 entering a 4-bit packed-delta run (terminated by a 0x8
-# nibble) and 0x80 introducing a 16-bit little-endian absolute. Reverse-engineered
-# and verified bit-exact against LaVision lvpyio on 5 real DaVis cameras
-# (ALK x25 calibration plates, 2026-06-22). See _decode_packtype1_frame.
+# nibble), 0x80 introducing one 16-bit little-endian absolute, and 0x7f followed
+# by a count byte n introducing n 16-bit little-endian absolutes (so plain deltas
+# span -126..+126). Reverse-engineered and verified bit-exact against LaVision
+# lvpyio on 5 real DaVis cameras (ALK x25 calibration plates, 2026-06-22); the
+# 0x7f token, absent from those plates, verified bit-exact against lvpyio 1.3.1
+# on Bailey's 2048x2048 calibration images (2026-10-23), where it encodes
+# ~200-count intensity jumps. See _decode_packtype1_frame.
 PACK_RLE = 1
 PACK_ZLIB = 2
 PACK_FIXED_12BIT = 3
@@ -51,6 +55,11 @@ IEH_SCALE_Z = 3
 IEH_SCALE_I = 4
 IEH_COMMENT = 5
 IEH_ATTRIBUTE = 6
+# Highest record type seen in real files: a 2026-10-23 survey of 398 DaVis .im7
+# files (pack types 0, 2, 20) found types 0-6, 8, 9 and 11-13, with the first
+# record always IEH_SCALE_X. _read_attributes rejects anything outside 1..13 so
+# a decoder that stopped at the wrong byte fails instead of parsing pixel bytes.
+IEH_TYPE_MAX = 13
 
 HEADER_SIZE = 256
 HEADER_FORMAT = "<hhhh iiii hhh"  # 30 bytes of fields + 226 reserved
@@ -102,12 +111,22 @@ def _parse_header(raw: bytes) -> IM7Header:
     Raises
     ------
     ValueError
-        If raw is not 256 bytes.
+        If raw is not 256 bytes, or any of size_x/size_y/size_z/size_f is below
+        1. Every byte count the pixel decoders compute is a product of these, so
+        a zero or negative one would surface as a division by zero, a negative
+        read length or a huge allocation instead of as a damaged header.
     """
     if len(raw) != HEADER_SIZE:
         raise ValueError(f"Header must be {HEADER_SIZE} bytes, got {len(raw)}")
 
     values = struct.unpack_from(HEADER_FORMAT, raw, 0)
+    dims = dict(zip(("size_x", "size_y", "size_z", "size_f"), values[4:8]))
+    bad = {k: v for k, v in dims.items() if v < 1}
+    if bad:
+        raise ValueError(
+            f"Damaged .im7 header: every dimension must be at least 1, got "
+            f"{', '.join(f'{k}={v}' for k, v in bad.items())}"
+        )
     return IM7Header(
         version=values[0],
         pack_type=values[1],
@@ -281,12 +300,75 @@ def _read_pixels_lz4(f, header: IM7Header, frame_range: tuple = None) -> np.ndar
     return pixels[start:end]
 
 
-def _skip_zlib_rows(f, n_rows: int) -> None:
-    """Skip n_rows of zlib-compressed data by reading size prefixes and seeking."""
-    for _ in range(n_rows):
+def _zlib_block_bytes(f, header: IM7Header) -> int:
+    """Uncompressed size of each zlib block in a pack_type-2 file: a row or a frame.
+
+    DaVis writes pack_type 2 in two layouts, both a sequence of int32-size-
+    prefixed zlib blocks: one block per row (the ReadIM7 reference layout), or
+    one block per frame (DaVis dark images, ``Transformer*-dark.im7`` at
+    1248x1680, found 2026-10-23). The first block tells them apart: inflating at
+    most ``row_bytes + 1`` bytes of it yields exactly ``row_bytes`` for a per-row
+    file and more for a per-frame one. Per-frame blocks are verified on
+    single-frame files only; every block's inflated size is checked on read, so
+    a multi-frame file laid out differently raises instead of decoding wrongly.
+
+    Leaves ``f`` where it found it (at the first block's size prefix).
+    """
+    row_bytes = header.size_x * _pixel_dtype(header).itemsize
+    frame_bytes = row_bytes * header.size_y * header.size_z
+    pos = f.tell()
+    size_raw = f.read(4)
+    if len(size_raw) < 4:
+        raise IOError("Unexpected EOF reading compressed size")
+    comp_size = struct.unpack("<i", size_raw)[0]
+    if comp_size <= 0:
+        raise IOError(f"invalid zlib block size: {comp_size}")
+    head = zlib.decompressobj().decompress(f.read(comp_size), row_bytes + 1)
+    f.seek(pos)
+    if len(head) > row_bytes:
+        return frame_bytes
+    if len(head) == row_bytes:
+        return row_bytes
+    raise IOError(
+        f"First zlib block inflated to {len(head)} bytes; expected one row "
+        f"({row_bytes}) or one frame ({frame_bytes})"
+    )
+
+
+def _read_zlib_block(f, block_bytes: int) -> bytes:
+    """Read one int32-size-prefixed zlib block that must inflate to block_bytes.
+
+    The stream must end exactly at the declared size with nothing left over, so
+    a misread size prefix or layout fails here rather than shifting the image.
+    """
+    size_raw = f.read(4)
+    if len(size_raw) < 4:
+        raise IOError("Unexpected EOF reading compressed size")
+    comp_size = struct.unpack("<i", size_raw)[0]
+    if comp_size <= 0:
+        raise IOError(f"invalid zlib block size: {comp_size}")
+    comp = f.read(comp_size)
+    if len(comp) != comp_size:
+        raise IOError("Unexpected EOF reading compressed data")
+    inflater = zlib.decompressobj()
+    out = inflater.decompress(comp)
+    if not inflater.eof or inflater.unused_data:
+        raise IOError(
+            f"zlib block of {comp_size} bytes does not end at its declared size"
+        )
+    if len(out) != block_bytes:
+        raise IOError(
+            f"zlib block inflated to {len(out)} bytes, expected {block_bytes}"
+        )
+    return out
+
+
+def _skip_zlib_blocks(f, n_blocks: int) -> None:
+    """Skip n_blocks zlib blocks by reading their size prefixes and seeking."""
+    for _ in range(n_blocks):
         comp_size_raw = f.read(4)
         if len(comp_size_raw) < 4:
-            raise IOError("Unexpected EOF skipping compressed rows")
+            raise IOError("Unexpected EOF skipping compressed blocks")
         comp_size = struct.unpack("<i", comp_size_raw)[0]
         f.seek(comp_size, 1)
 
@@ -294,9 +376,10 @@ def _skip_zlib_rows(f, n_rows: int) -> None:
 def _read_pixels_zlib(f, header: IM7Header) -> np.ndarray:
     """Read every frame of zlib-compressed pixel data (pack_type=2).
 
-    Format: for each row, a 4-byte little-endian int32 giving the compressed
-    size, followed by that many bytes of zlib-compressed row data. Whole buffer
-    only, for the reason given on :func:`_read_pixels_uncompressed`.
+    Format: a sequence of blocks, each a 4-byte little-endian int32 giving the
+    compressed size followed by that many bytes of zlib data, one block per row
+    or one per frame (see :func:`_zlib_block_bytes`). Whole buffer only, for the
+    reason given on :func:`_read_pixels_uncompressed`.
 
     Parameters
     ----------
@@ -311,27 +394,13 @@ def _read_pixels_zlib(f, header: IM7Header) -> np.ndarray:
         Pixel array with shape (size_f, sizeZ, sizeY, sizeX).
     """
     dt = _pixel_dtype(header)
-    row_bytes = header.size_x * dt.itemsize
-    rows_per_frame = header.size_z * header.size_y
+    frame_bytes = header.size_x * header.size_y * header.size_z * dt.itemsize
+    block_bytes = _zlib_block_bytes(f, header)
 
     n_frames = header.size_f
-    rows = []
-    for _ in range(n_frames * rows_per_frame):
-        comp_size_raw = f.read(4)
-        if len(comp_size_raw) < 4:
-            raise IOError("Unexpected EOF reading compressed size")
-        comp_size = struct.unpack("<i", comp_size_raw)[0]
-        comp_data = f.read(comp_size)
-        if len(comp_data) != comp_size:
-            raise IOError("Unexpected EOF reading compressed data")
-        decompressed = zlib.decompress(comp_data)
-        if len(decompressed) != row_bytes:
-            raise IOError(
-                f"Decompressed row size {len(decompressed)} != expected {row_bytes}"
-            )
-        rows.append(np.frombuffer(decompressed, dtype=dt))
-
-    pixels = np.stack(rows)
+    n_blocks = n_frames * (frame_bytes // block_bytes)
+    buf = b"".join(_read_zlib_block(f, block_bytes) for _ in range(n_blocks))
+    pixels = np.frombuffer(buf, dtype=dt)
     return pixels.reshape(n_frames, header.size_z, header.size_y, header.size_x)
 
 
@@ -388,13 +457,17 @@ def _decode_packtype1_frame(data: bytes, off: int, npix: int):
     """Decode one pack_type-1 (DaVis delta+nibble RLE) frame.
 
     Token stream (after a 3-byte preamble): the running pixel value starts at 0;
-    each token updates it and emits one pixel, row-major:
+    each token updates it and emits pixels, row-major:
       * 0x80  -> next 2 bytes are a 16-bit little-endian ABSOLUTE value
+      * 0x7f  -> next byte is a count n, then n 16-bit little-endian ABSOLUTE
+                 values, one pixel each
       * 0x81  -> enter a 4-bit packed-delta run: read signed nibbles (high then
                  low) as deltas until a nibble of value 0x8 terminates the run
       * else  -> the byte is a signed int8 DELTA
 
-    Returns (np.ndarray[int32] of length ``npix``, new byte offset). See PACK_RLE.
+    Returns (np.ndarray[int32] of length ``npix``, new byte offset). Raises
+    IndexError if the stream ends before ``npix`` pixels; IOError if a 0x7f run
+    overruns the frame. See PACK_RLE.
     """
     out = np.empty(npix, dtype=np.int32)
     off += 3  # 3-byte preamble (observed "01 01 00")
@@ -423,6 +496,19 @@ def _decode_packtype1_frame(data: bytes, off: int, npix: int):
             off += 2
             out[i] = prev
             i += 1
+        elif b == 0x7F:  # count byte, then that many 16-bit LE absolutes
+            n = data[off]
+            off += 1
+            if i + n > npix:
+                raise IOError(
+                    f"0x7f run of {n} absolutes at pixel {i} overruns the "
+                    f"{npix}-pixel frame"
+                )
+            for _ in range(n):
+                prev = data[off] | (data[off + 1] << 8)
+                off += 2
+                out[i] = prev
+                i += 1
         else:  # signed int8 delta
             prev += b - 256 if b >= 128 else b
             out[i] = prev
@@ -452,7 +538,14 @@ def _read_pixels_packtype1(
     off = 0
     frames = []
     for fi in range(nf):
-        pix, off = _decode_packtype1_frame(data, off, npix)
+        try:
+            pix, off = _decode_packtype1_frame(data, off, npix)
+        except IndexError as exc:
+            raise IOError(
+                f"pack_type 1 stream ended inside frame {fi} of {nf} "
+                f"({len(data)} bytes after the header): truncated file or an "
+                f"unknown RLE token"
+            ) from exc
         if start <= fi < end:
             frames.append(pix)
     # Position f at the attribute records (right after the last frame).
@@ -462,7 +555,7 @@ def _read_pixels_packtype1(
     return arr.reshape(len(frames), header.size_z, header.size_y, header.size_x)
 
 
-def _read_attributes(f) -> IM7Scales:
+def _read_attributes(f, source: str, pack_type: int) -> IM7Scales:
     """Read extended header records (attributes) after the pixel data.
 
     The extended header is a sequence of records, each with:
@@ -475,43 +568,79 @@ def _read_attributes(f) -> IM7Scales:
 
     Only IEH_SCALE_I (type 4) is extracted for the intensity scale.
 
+    This walk is also the check that the pixel decoder stopped at the right
+    byte, for every pack type: a decoder that misread the stream leaves ``f``
+    inside pixel data, and parsing on would yield a garbled image with a
+    default scale and no error. So EOF straight after the pixels is accepted
+    (no records), but otherwise the first record must be a real one (type
+    1..IEH_TYPE_MAX, not a bare IEH_END), every record must have a type in that
+    range and fit in the file, and the chain ends at IEH_END or EOF. Whatever
+    follows IEH_END (real files carry further data there) is not read.
+
     Parameters
     ----------
     f : file object
         Positioned at the start of the attribute section.
+    source : str
+        File name for error messages.
+    pack_type : int
+        The pixel pack type, for error messages.
 
     Returns
     -------
     IM7Scales
         Intensity scale (slope, offset, unit). Defaults to slope=1, offset=0
         if no SCALE_I record is found.
+
+    Raises
+    ------
+    IOError
+        If the bytes after the pixel data are not a valid record chain.
     """
+
+    def fail(pos: int, reason: str) -> IOError:
+        return IOError(
+            f"{source}: pixel data (pack_type {pack_type}) does not end where the "
+            f"attribute records begin ({reason} at byte {pos}). Either the file "
+            f"is damaged or it uses a variant of this pack type the reader does "
+            f"not decode correctly."
+        )
+
     scales = IM7Scales()
+    first = True
 
     while True:
+        pos = f.tell()
         type_raw = f.read(4)
+        if len(type_raw) == 0:
+            break  # EOF: no (more) records
         if len(type_raw) < 4:
-            break  # EOF
+            raise fail(pos, f"{len(type_raw)} stray trailing bytes")
 
         ieh_type = struct.unpack("<i", type_raw)[0]
         if ieh_type == IEH_END:
+            if first:
+                raise fail(pos, "an empty record list")
             break
+        if not 1 <= ieh_type <= IEH_TYPE_MAX:
+            raise fail(pos, f"record type {ieh_type}")
 
         size_raw = f.read(4)
         if len(size_raw) < 4:
-            break
+            raise fail(pos, f"record type {ieh_type} with no size field")
         ieh_size = struct.unpack("<i", size_raw)[0]
-
-        if ieh_size < 0 or ieh_size > 100_000_000:
-            # Corrupt or unexpected record; stop parsing
-            break
+        if ieh_size < 0:
+            raise fail(pos, f"record type {ieh_type} of size {ieh_size}")
 
         data = f.read(ieh_size)
         if len(data) != ieh_size:
-            break  # Truncated
+            raise fail(
+                pos, f"record type {ieh_type} of size {ieh_size} past end of file"
+            )
 
         if ieh_type == IEH_SCALE_I:
             _parse_scale_record(data, scales)
+        first = False
 
     return scales
 
@@ -591,7 +720,7 @@ def _read_im7_internal(filepath: Path) -> tuple:
                 f"or 20 (LZ4)."
             )
 
-        scales = _read_attributes(f)
+        scales = _read_attributes(f, filepath.name, header.pack_type)
 
     return header, pixels, scales
 
@@ -785,15 +914,16 @@ def read_im7_camera(
 
         elif header.pack_type == PACK_ZLIB:
             dt = _pixel_dtype(header)
-            rows_per_frame = header.size_z * header.size_y
+            frame_bytes = header.size_x * header.size_y * header.size_z * dt.itemsize
+            block_bytes = _zlib_block_bytes(f, header)
+            blocks_per_frame = frame_bytes // block_bytes
             if start > 0:
-                _skip_zlib_rows(f, start * rows_per_frame)
+                _skip_zlib_blocks(f, start * blocks_per_frame)
             for i in range(n_frames):
-                rows = []
-                for _ in range(rows_per_frame):
-                    csz = struct.unpack("<i", f.read(4))[0]
-                    rows.append(np.frombuffer(zlib.decompress(f.read(csz)), dtype=dt))
-                frame = np.stack(rows).reshape(
+                buf = b"".join(
+                    _read_zlib_block(f, block_bytes) for _ in range(blocks_per_frame)
+                )
+                frame = np.frombuffer(buf, dtype=dt).reshape(
                     header.size_z, header.size_y, header.size_x
                 )
                 result[i] = (
@@ -801,10 +931,10 @@ def read_im7_camera(
                     if header.size_z == 1
                     else frame.reshape(header.size_y, header.size_x)
                 )
-                del frame, rows
-            # Walk the remaining frames' row-size prefixes (no decompression) so
+                del frame, buf
+            # Walk the remaining frames' block-size prefixes (no decompression) so
             # the attribute records are read from where they actually are.
-            _skip_zlib_rows(f, (header.size_f - end) * rows_per_frame)
+            _skip_zlib_blocks(f, (header.size_f - end) * blocks_per_frame)
 
         elif header.pack_type == PACK_FIXED_12BIT:
             frame_pixels = header.size_x * header.size_y * header.size_z
@@ -865,7 +995,7 @@ def read_im7_camera(
             )
 
         # Read attributes for intensity scale
-        scales = _read_attributes(f)
+        scales = _read_attributes(f, filepath.name, header.pack_type)
 
     # Apply intensity scale in-place
     if scales.slope != 1.0:

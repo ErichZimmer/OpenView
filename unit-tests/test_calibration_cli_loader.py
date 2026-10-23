@@ -17,6 +17,8 @@ dataset runs), not by a stand-in — see the closing note.
 
 from __future__ import annotations
 
+import zlib
+
 import cv2
 import numpy as np
 
@@ -66,7 +68,9 @@ def test_load_one_standard_png_roundtrips(tmp_path):
 import struct
 
 from pivtools_core.image_handling.readers.im7_reader import (
+    HEADER_FORMAT,
     HEADER_SIZE,
+    read_im7,
     read_im7_camera,
 )
 
@@ -144,12 +148,18 @@ def test_pack20_truncated_file_fails_visibly(tmp_path):
 from pivtools_core.image_handling.readers import im7_reader
 from pivtools_core.image_handling.readers.lavision_reader import read_lavision_im7
 
+# IEH_SCALE_X record (type 1) that opens the attribute list of every real DaVis
+# file; payload copied from a real DaVis dark image.
+_SCALE_X_PAYLOAD = b"1 0\x00pixel\x00"
+_SCALE_X_RECORD = struct.pack("<ii", 1, len(_SCALE_X_PAYLOAD)) + _SCALE_X_PAYLOAD
+
 
 def _write_pack0_im7(path, frames: np.ndarray, scale=None) -> None:
     """Minimal pack_type-0 (uncompressed WORD) .im7 with size_f frames.
 
-    ``scale=(slope, offset)`` appends an IEH_SCALE_I record (type 4) before the
-    IEH_END terminator, the way DaVis stores the intensity scale.
+    The records start with an IEH_SCALE_X record (type 1), as in every real
+    DaVis file. ``scale=(slope, offset)`` appends an IEH_SCALE_I record (type 4)
+    before the IEH_END terminator, the way DaVis stores the intensity scale.
     """
     n_f, h, w = frames.shape
     header = struct.pack("<hhhh iiii hhh", 0, 0, -4, 0, w, h, 1, n_f, 0, 1, 0)
@@ -157,6 +167,7 @@ def _write_pack0_im7(path, frames: np.ndarray, scale=None) -> None:
     with open(path, "wb") as f:
         f.write(header)
         f.write(frames.astype("<u2").tobytes())
+        f.write(_SCALE_X_RECORD)
         if scale is not None:
             payload = f"{scale[0]} {scale[1]}\x00counts\x00".encode()
             f.write(struct.pack("<ii", 4, len(payload)) + payload)
@@ -207,9 +218,9 @@ def test_im7_frames_one_reads_half_the_bytes_and_the_same_pixels(tmp_path, monke
 
     assert one.shape == (1, 6, 10)
     np.testing.assert_array_equal(one[0], full[0])
-    # Header once (the second open only seeks) + exactly one frame + the 4-byte
-    # IEH_END terminator read from where the attributes actually are.
-    assert counter.bytes_read == HEADER_SIZE + frame_bytes + 4
+    # Header once (the second open only seeks) + exactly one frame + the
+    # attribute records (scale X, 4-byte IEH_END) read from where they actually are.
+    assert counter.bytes_read == HEADER_SIZE + frame_bytes + len(_SCALE_X_RECORD) + 4
 
 
 def test_read_lavision_im7_passes_frames_down(tmp_path, monkeypatch):
@@ -223,7 +234,7 @@ def test_read_lavision_im7_passes_frames_down(tmp_path, monkeypatch):
 
     assert got.shape == (1, 4, 5)
     np.testing.assert_array_equal(got[0], frames[0].astype(np.float32))
-    assert counter.bytes_read == HEADER_SIZE + 4 * 5 * 2 + 4
+    assert counter.bytes_read == HEADER_SIZE + 4 * 5 * 2 + len(_SCALE_X_RECORD) + 4
 
 
 def test_intensity_scale_applies_to_every_camera_not_just_the_last(tmp_path):
@@ -417,10 +428,172 @@ def test_packtype1_byte_delta_roundtrip(tmp_path):
     vals = [50, 60, 59, 61, 70, 69, 68, 90]  # consecutive deltas all within int8 range
     deltas = [vals[0]] + [vals[i] - vals[i - 1] for i in range(1, len(vals))]
     assert all(
-        -127 <= d <= 127 for d in deltas
-    )  # else byte mode would need a 0x80 escape
+        -126 <= d <= 126 for d in deltas
+    )  # 0x7f, 0x80 and 0x81 are escapes, so a plain int8 delta spans -126..+126
     payload = bytes([0x01, 0x01, 0x00] + [d & 0xFF for d in deltas])
     p = tmp_path / "B00001.im7"
     _write_packtype1_im7(p, size_x=len(vals), size_y=1, payload=payload)
     img = np.asarray(read_im7_camera(p, camera_no=1, frames_per_camera=1)).squeeze()
     np.testing.assert_array_equal(img.astype(int), vals)
+
+
+def test_packtype1_0x7f_absolute_run(tmp_path):
+    """0x7f n introduces n 16-bit LE absolutes (Bailey 2048x2048 calibration
+    images, verified bit-exact vs lvpyio 1.3.1, 2026-10-23). Read as a +127
+    delta, every later byte desynced and the image slid sideways row by row."""
+    payload = bytes(
+        [
+            0x01,
+            0x01,
+            0x00,  # preamble
+            0x64,  # int8 +100 -> 100
+            0x7F,
+            0x03,  # three absolutes follow
+            0x4C,
+            0x03,  # 0x034c = 844
+            0xFB,
+            0x03,  # 0x03fb = 1019
+            0x3A,
+            0x03,  # 0x033a = 826
+            0xA5,  # int8 -91 -> 735
+        ]
+    )
+    expected = [100, 844, 1019, 826, 735]
+    p = tmp_path / "B00001.im7"
+    _write_packtype1_im7(p, size_x=len(expected), size_y=1, payload=payload)
+    img = np.asarray(read_im7_camera(p, camera_no=1, frames_per_camera=1)).squeeze()
+    np.testing.assert_array_equal(img.astype(int), expected)
+
+
+def test_packtype1_0x7f_run_overrunning_frame_raises(tmp_path):
+    payload = bytes([0x01, 0x01, 0x00, 0x7F, 0x05] + [0x10, 0x00] * 5)
+    p = tmp_path / "B00001.im7"
+    _write_packtype1_im7(p, size_x=3, size_y=1, payload=payload)
+    with pytest.raises(IOError, match="overruns"):
+        read_im7_camera(p, camera_no=1, frames_per_camera=1)
+
+
+def test_packtype1_truncated_stream_raises_by_name(tmp_path):
+    payload = bytes([0x01, 0x01, 0x00, 0x64, 0x01])  # 2 pixels for a 4-pixel frame
+    p = tmp_path / "B00001.im7"
+    _write_packtype1_im7(p, size_x=4, size_y=1, payload=payload)
+    with pytest.raises(IOError, match="pack_type 1 stream ended"):
+        read_im7_camera(p, camera_no=1, frames_per_camera=1)
+
+
+def test_packtype1_desynced_stream_fails_instead_of_returning_an_image(tmp_path):
+    """A decoder that stops early leaves pixel tokens where the attribute records
+    should start. That must raise, not return the garbled image with slope 1."""
+    payload = bytes([0x01, 0x01, 0x00, 0x64, 0x01]) + bytes([0x05] * 9)
+    p = tmp_path / "B00001.im7"
+    _write_packtype1_im7(p, size_x=2, size_y=1, payload=payload)
+    with pytest.raises(IOError, match="does not end where the attribute records"):
+        read_im7_camera(p, camera_no=1, frames_per_camera=1)
+
+
+# ---------------------------------------------------------------------------
+# The attribute walk is the end-of-pixel-data check for every pack type.
+# ---------------------------------------------------------------------------
+
+
+def test_attribute_walk_rejects_a_bare_ieh_end(tmp_path):
+    """Four zero bytes look like IEH_END. Real files always carry records before
+    it (first is IEH_SCALE_X in all 398 surveyed), so an empty list is refused."""
+    frames = np.full((1, 2, 3), 9, dtype=np.uint16)
+    header = struct.pack("<hhhh iiii hhh", 0, 0, -4, 0, 3, 2, 1, 1, 0, 1, 0)
+    header += b"\x00" * (HEADER_SIZE - len(header))
+    p = tmp_path / "B00001.im7"
+    p.write_bytes(header + frames.astype("<u2").tobytes() + b"\x00" * 4)
+    with pytest.raises(IOError, match="empty record list"):
+        read_im7_camera(p, camera_no=1, frames_per_camera=1)
+
+
+def test_attribute_walk_rejects_a_record_past_end_of_file(tmp_path):
+    frames = np.full((1, 2, 3), 9, dtype=np.uint16)
+    header = struct.pack("<hhhh iiii hhh", 0, 0, -4, 0, 3, 2, 1, 1, 0, 1, 0)
+    header += b"\x00" * (HEADER_SIZE - len(header))
+    p = tmp_path / "B00001.im7"
+    p.write_bytes(header + frames.astype("<u2").tobytes() + struct.pack("<ii", 1, 50))
+    with pytest.raises(IOError, match="past end of file"):
+        read_im7_camera(p, camera_no=1, frames_per_camera=1)
+
+
+def test_pack20_trailing_pixel_bytes_fail_visibly(tmp_path):
+    frames = np.arange(48, dtype=np.float32).reshape(1, 6, 8)
+    p = tmp_path / "B00001.im7"
+    _write_pack20_im7(p, frames)
+    p.write_bytes(p.read_bytes() + bytes([0xAB] * 12))
+    with pytest.raises(IOError, match="does not end where the attribute records"):
+        read_im7_camera(p, 1, 1)
+
+
+# ---------------------------------------------------------------------------
+# pack_type 2 (zlib): DaVis writes one int32-size-prefixed block per row, or one
+# per frame (DaVis dark images Transformer*-dark.im7, 1248x1680, 2026-10-23;
+# the reader refused them with "Decompressed row size 4193280 != expected 2496").
+# ---------------------------------------------------------------------------
+
+
+def _write_pack2_im7(path, frames: np.ndarray, per: str, block_tamper=None) -> None:
+    """pack_type-2 WORD .im7 with zlib blocks per ``"row"`` or per ``"frame"``.
+
+    ``block_tamper(i, raw) -> raw`` edits block i's uncompressed bytes first.
+    """
+    n_f, h, w = frames.shape
+    header = struct.pack("<hhhh iiii hhh", 0, 2, -4, 0, w, h, 1, n_f, 0, 1, 0)
+    header += b"\x00" * (HEADER_SIZE - len(header))
+    data = frames.astype("<u2")
+    blocks = (
+        [r.tobytes() for r in data.reshape(-1, w)]
+        if per == "row"
+        else [fr.tobytes() for fr in data]
+    )
+    body = bytearray()
+    for i, raw in enumerate(blocks):
+        if block_tamper is not None:
+            raw = block_tamper(i, raw)
+        comp = zlib.compress(raw)
+        body += struct.pack("<i", len(comp)) + comp
+    path.write_bytes(header + bytes(body) + _SCALE_X_RECORD + b"\x00" * 4)
+
+
+@pytest.mark.parametrize("per", ["row", "frame"])
+def test_pack2_zlib_both_block_layouts_roundtrip(tmp_path, per):
+    rng = np.random.default_rng(11)
+    frames = rng.integers(0, 4096, size=(4, 5, 7)).astype(np.uint16)
+    p = tmp_path / "B00001.im7"
+    _write_pack2_im7(p, frames, per)
+    _, whole, _ = read_im7(p)
+    np.testing.assert_array_equal(whole, frames)
+    for cam in (1, 2):  # skips cam 1's blocks, then walks past cam 2's tail
+        got = read_im7_camera(p, cam, 2)
+        np.testing.assert_array_equal(got, frames[2 * (cam - 1) : 2 * cam])
+
+
+@pytest.mark.parametrize("per", ["row", "frame"])
+def test_pack2_zlib_wrong_block_size_fails_visibly(tmp_path, per):
+    frames = np.ones((2, 5, 7), dtype=np.uint16)
+    p = tmp_path / "B00001.im7"
+    _write_pack2_im7(
+        p, frames, per, block_tamper=lambda i, raw: raw[:-2] if i == 1 else raw
+    )
+    with pytest.raises(IOError, match="inflated to"):
+        read_im7(p)
+    # Camera 1 owns both frames, so the per-camera path decodes (not skips) block 1.
+    with pytest.raises(IOError, match="inflated to"):
+        read_im7_camera(p, 1, 2)
+
+
+@pytest.mark.parametrize("pack_type", [0, 1, 2, 20])
+@pytest.mark.parametrize(
+    "dims", [(0, 4, 1, 1), (-4, 4, 1, 1), (4, 0, 1, 1), (4, 4, 0, 1), (4, 4, 1, 0)]
+)
+def test_header_with_non_positive_dimension_is_rejected(tmp_path, pack_type, dims):
+    """Every pixel byte count is a product of the header dimensions, so a zero or
+    negative one must fail as a damaged header, not as a ZeroDivisionError, a
+    negative read length or a MemoryError deep inside a decoder."""
+    header = struct.pack(HEADER_FORMAT, 7, pack_type, -4, 0, *dims, 0, 0, 0)
+    p = tmp_path / "bad_dims.im7"
+    p.write_bytes(header.ljust(HEADER_SIZE, b"\0") + b"\0" * 64)
+    with pytest.raises(ValueError, match="Damaged .im7 header"):
+        read_im7(p)
