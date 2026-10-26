@@ -237,7 +237,7 @@ def _resolve_loop_read(cfg, source_path_idx, pair_idx, camera):
         local_pair = pair_idx
 
     # Derive camera-specific path
-    if image_type in ("lavision_set", "lavision_im7", "cine"):
+    if image_type in ("lavision_set", "lavision_im7", "cine", "pivraw"):
         return effective_base, local_pair
     folder = cfg.get_camera_folder(camera)
     source = effective_base / folder if folder else effective_base
@@ -1062,7 +1062,7 @@ def validate_files():
             color_detected = False
 
             if cfg.is_container_format:
-                # Container formats (.set, .cine): validate_images_generic already
+                # Container formats (.set, .cine, .pivraw): validate_images_generic already
                 # read frame 1 for preview. Frame 1 reading does NOT prove the last
                 # requested entry exists — a container index can declare more entries
                 # than it actually holds, and the user may request more than exist.
@@ -1382,7 +1382,7 @@ def preview_frame_pairs():
         else:
             idx_a, idx_b = cfg.get_frame_pair_indices(p)
             if cfg.is_container_format:
-                # Container files (.cine, .set): frames come from within
+                # Container files (.cine, .pivraw, .set): frames come from within
                 # a single file, not separate files. Format string uses
                 # camera number (not frame index).
                 try:

@@ -64,11 +64,13 @@ def infer_image_type(image_format: str) -> str:
     Standalone twin of ``Config._detect_image_type`` for callers that hold a format
     string but not a ``Config`` (e.g. the calibration CLI, which takes ``--source`` /
     ``--image-format`` directly). Returns one of ``standard``, ``cine``,
-    ``lavision_set``, ``lavision_im7``.
+    ``pivraw``, ``lavision_set``, ``lavision_im7``.
     """
     fmt = (image_format or "").lower()
     if ".cine" in fmt:
         return "cine"
+    if ".pivraw" in fmt:
+        return "pivraw"
     if ".set" in fmt or ".ims" in fmt:
         return "lavision_set"
     if ".im7" in fmt:
@@ -110,9 +112,10 @@ def camera_subfolder_name(
 ) -> str:
     """Subfolder holding one camera's images: THE rule for PIV and calibration alike.
 
-    - Container formats (``lavision_set``, ``cine``) never use a subfolder: all
-      cameras live in one ``.set``, and ``.cine`` files sit side by side in the
-      source directory (``%d`` in the pattern names the camera).
+    - Container formats (``lavision_set``, ``cine``, ``pivraw``) never use a
+      subfolder: all cameras live in one ``.set``, and ``.cine`` / ``.pivraw``
+      files sit side by side in the source directory (``%d`` in the pattern
+      names the camera).
     - IM7 uses a subfolder only when ``use_camera_subfolders`` is True (one
       single-camera ``.im7`` per folder); otherwise one multi-camera ``.im7``
       per time instance sits at the source root. This is the only format the
@@ -127,7 +130,7 @@ def camera_subfolder_name(
     :func:`calibration_camera_folder` (calibration images, the sidecar's
     ``image`` block) both call this, so the two can never disagree.
     """
-    if image_type in ("lavision_set", "cine"):
+    if image_type in ("lavision_set", "cine", "pivraw"):
         return ""
     if image_type == "lavision_im7" and not use_camera_subfolders:
         return ""
@@ -198,7 +201,7 @@ def build_piv_camera_path(
 
     Path structure depends on image type and use_camera_subfolders setting:
     - .set files: source_path IS the .set file (return it directly)
-    - .cine files: source_path directory (no camera subfolder)
+    - .cine / .pivraw files: source_path directory (no camera subfolder)
     - IM7 with use_camera_subfolders=False: source_path (all cameras in file)
     - IM7 with use_camera_subfolders=True: source_path / camera_folder
     - Standard formats: source_path / camera_folder
@@ -218,8 +221,8 @@ def build_piv_camera_path(
     if image_type == "lavision_set":
         return source_path
 
-    # CINE: source_path is directory containing .cine files
-    if image_type == "cine":
+    # CINE / PIVRAW: source_path is the directory holding one file per camera
+    if image_type in ("cine", "pivraw"):
         return source_path
 
     # IM7: check if using camera subfolders
@@ -252,7 +255,7 @@ def resolve_file_path(
     Handles the different file path patterns for each image type:
     - lavision_set: camera_path IS the .set file (return directly)
     - lavision_im7: camera_path / (format_pattern % frame_idx)
-    - cine: camera_path / (format_pattern % camera)
+    - cine, pivraw: camera_path / (format_pattern % camera)
     - standard: camera_path / (format_pattern % frame_idx)
 
     Args:
@@ -260,7 +263,8 @@ def resolve_file_path(
         camera: Camera number (1-based)
         frame_idx: Frame index (1-based)
         format_pattern: File format pattern (e.g., "%05d.tif", "Camera%d.cine")
-        image_type: One of "lavision_set", "lavision_im7", "cine", "standard"
+        image_type: One of "lavision_set", "lavision_im7", "cine", "pivraw",
+            "standard"
         zero_based_indexing: Whether file indices are 0-based
 
     Returns:
@@ -274,8 +278,8 @@ def resolve_file_path(
         # (format_pattern is ignored as source_path contains the full file path)
         return camera_path
 
-    elif image_type == "cine":
-        # .cine files: pattern uses camera number
+    elif image_type in ("cine", "pivraw"):
+        # .cine / .pivraw files: pattern uses camera number
         if "%" in format_pattern:
             return camera_path / (format_pattern % camera)
         return camera_path / format_pattern
@@ -686,6 +690,19 @@ def cine_extension_mismatch(cine_file: Path) -> Optional[str]:
     return f"Image type is CINE but the pattern names {kind} file: {cine_file}"
 
 
+def pivraw_extension_mismatch(pivraw_file: Path) -> Optional[str]:
+    """The error for a PIVRAW image type whose pattern names a non-``.pivraw`` file.
+
+    Twin of :func:`cine_extension_mismatch`: without it the reader would report a
+    missing ``<name>.json`` sidecar for, say, a ``.png``, which hides the real
+    mistake. None when the suffix is ``.pivraw``.
+    """
+    if pivraw_file.suffix.lower() == ".pivraw":
+        return None
+    kind = f"a {pivraw_file.suffix}" if pivraw_file.suffix else "an extension-less"
+    return f"Image type is PIVRAW but the pattern names {kind} file: {pivraw_file}"
+
+
 def _container_count_failure(
     result: Dict[str, Any], container: Path, exc: Exception
 ) -> Dict[str, Any]:
@@ -746,7 +763,8 @@ def validate_images_generic(
     image_format : str
         Image format pattern (e.g., "%05d.tif", "data.set")
     image_type : str
-        One of "lavision_set", "lavision_im7", "cine", "standard"
+        One of "lavision_set", "lavision_im7", "cine", "pivraw",
+        "standard"
     expected_count : int or None
         Expected number of images/frames. A container (.set / .cine) holding
         fewer entries fails validation; more is a processing subset and passes.
@@ -856,7 +874,7 @@ def _validate_core(
         "detected_start_index": None,  # first frame index among matching files
     }
 
-    if expected_count is None and image_type not in ("lavision_set", "cine"):
+    if expected_count is None and image_type not in ("lavision_set", "cine", "pivraw"):
         raise ValueError(
             f"expected_count is required for {image_type} images (only containers "
             "can be validated without one)"
@@ -1000,6 +1018,59 @@ def _validate_core(
             result["first_image_preview"] = _image_to_base64(img)
         except Exception as e:
             logging.warning(f"Could not render preview from .cine file: {e}")
+
+        return result
+
+    elif image_type == "pivraw":
+        if "%" in image_format:
+            pivraw_filename = image_format % camera
+        else:
+            pivraw_filename = image_format
+        pivraw_file = camera_path / pivraw_filename
+
+        if not pivraw_file.exists():
+            result["error"] = f"PIVRAW file not found: {pivraw_file}"
+            # List the .pivraw files present (the pattern rule suggests a pattern).
+            pivraw_files = _glob_images(camera_path, "*.pivraw")
+            if pivraw_files:
+                result["sample_files"] = [f.name for f in pivraw_files[:5]]
+            return result
+
+        mismatch = pivraw_extension_mismatch(pivraw_file)
+        if mismatch is not None:
+            # read_error too, for the same reason as the CINE branch above.
+            result["error"] = mismatch
+            result["read_error"] = mismatch
+            return result
+
+        result["format_detected"] = "pivraw"
+        result["sample_files"] = [pivraw_filename]
+
+        # A sidecar whose frame count cannot be read (missing field, wrong
+        # version, unfinalised run, size mismatch) fails validation visibly.
+        try:
+            from .readers.pivraw_reader import get_pivraw_frame_count
+
+            result["found_count"] = get_pivraw_frame_count(pivraw_file)
+        except Exception as e:
+            return _container_count_failure(result, pivraw_file, e)
+        _check_container_count(result, expected_count)
+
+        try:
+            img = read_frame_fn(1)
+        except Exception as e:
+            logging.warning(f"Could not read first frame of {pivraw_file}: {e}")
+            result["valid"] = False
+            result["error"] = (
+                f"PIVRAW file found but could not read the first frame: {e}"
+            )
+            result["read_error"] = str(e)
+            return result
+        try:
+            result["image_size"] = (img.shape[1], img.shape[0])
+            result["first_image_preview"] = _image_to_base64(img)
+        except Exception as e:
+            logging.warning(f"Could not render preview from .pivraw file: {e}")
 
         return result
 
@@ -1269,7 +1340,8 @@ def validate_single_pattern(
     pattern : str
         Image format pattern to validate (e.g., "B%05d_A.tif")
     image_type : str
-        One of "lavision_set", "lavision_im7", "cine", "standard"
+        One of "lavision_set", "lavision_im7", "cine", "pivraw",
+        "standard"
     expected_count : int
         Expected number of files matching this pattern
     zero_based_indexing : bool
@@ -1323,7 +1395,7 @@ def validate_single_pattern(
         return result
 
     # Container formats don't use per-pattern validation
-    if image_type in ("lavision_set", "cine"):
+    if image_type in ("lavision_set", "cine", "pivraw"):
         result["valid"] = True
         result["found_count"] = "container"
         return result

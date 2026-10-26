@@ -96,9 +96,9 @@ _DEFAULTS: Dict[str, Any] = {
     "schema_version": SCHEMA_VERSION,
     "image": {
         "image_format": None,  # REQUIRED — no default, missing => raise
-        "image_type": None,  # REQUIRED — standard | cine | lavision_set | lavision_im7
+        "image_type": None,  # REQUIRED — standard | cine | pivraw | lavision_set | lavision_im7
         "n_views": None,  # optional; frame-count auto-detect is the fallback
-        # Refused for container types (.set/.cine): the reader numbers entries.
+        # Refused for container types (.set/.cine/.pivraw): the reader numbers entries.
         "zero_based_indexing": False,
         # IM7 ONLY: True = one single-camera .im7 per Cam{N} folder. Standard
         # formats always use Cam{N} (or camera_subfolders) at camera_count > 1
