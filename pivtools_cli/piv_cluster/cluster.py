@@ -9,6 +9,15 @@ from dask_jobqueue import SLURMCluster
 
 from pivtools_core.config import Config
 
+# Dask's HTTP dashboards bind every network interface unless told otherwise. On
+# Windows an all-interface listener raises a Windows Firewall prompt for each
+# process that opens one, and a standard user cannot answer it. A local cluster's
+# dashboard is only ever opened from the same machine, so it binds loopback.
+LOCAL_DASHBOARD_ADDRESS = "127.0.0.1:8788"
+# Loopback with port 0, which lets the OS pick a free port. For the worker
+# dashboards and for in-process clusters, whose ports nobody needs to know.
+LOOPBACK_ANY_PORT = "127.0.0.1:0"
+
 
 class _DaskNoiseFilter(logging.Filter):
     """Filter out noisy Dask worker messages."""
@@ -80,7 +89,8 @@ def make_cluster(
                 "distributed.comm.timeouts.connect": "60s",  # Default: 30s
                 "distributed.comm.timeouts.tcp": "600s",  # Default: 30s
             },
-            dashboard_address=":8788",
+            dashboard_address=LOCAL_DASHBOARD_ADDRESS,
+            worker_dashboard_address=LOOPBACK_ANY_PORT,
         )
         client = Client(cluster)
         logging.info(f"Local Dask cluster started with {len(cluster.workers)} workers.")

@@ -40,6 +40,7 @@ from pivtools_cli.piv.save_results import (
     get_output_path,
     load_ensemble_result,
 )
+from pivtools_cli.piv_cluster.cluster import LOOPBACK_ANY_PORT
 from pivtools_core.config import Config, reload_config
 from pivtools_core.instantaneous import run_instantaneous_piv
 from pivtools_core.vector_loading import read_mat_contents
@@ -206,7 +207,13 @@ def _run_ensemble_piv(fit_method):
     print(f"  {num_pairs} pairs, batch_size=10, omp_threads=4, workers=2")
     print(f"{'='*60}")
 
-    client = Client(processes=False, n_workers=2, threads_per_worker=1)
+    client = Client(
+        processes=False,
+        n_workers=2,
+        threads_per_worker=1,
+        dashboard_address=LOOPBACK_ANY_PORT,
+        worker_dashboard_address=LOOPBACK_ANY_PORT,
+    )
     try:
         run_ensemble_piv(
             config=config,
@@ -352,7 +359,13 @@ def instantaneous_workspace():
 
     from dask.distributed import Client
 
-    client = Client(processes=False, n_workers=1, threads_per_worker=1)
+    client = Client(
+        processes=False,
+        n_workers=1,
+        threads_per_worker=1,
+        dashboard_address=LOOPBACK_ANY_PORT,
+        worker_dashboard_address=LOOPBACK_ANY_PORT,
+    )
     try:
         run_instantaneous_piv(
             config=config,
@@ -838,7 +851,13 @@ def _run_masked(fill, *, ensemble, n_pairs):
     pixel_mask = load_mask_for_camera(1, config)
     vector_masks = compute_vector_mask(pixel_mask, config, ensemble=ensemble)
 
-    client = Client(processes=False, n_workers=1, threads_per_worker=1)
+    client = Client(
+        processes=False,
+        n_workers=1,
+        threads_per_worker=1,
+        dashboard_address=LOOPBACK_ANY_PORT,
+        worker_dashboard_address=LOOPBACK_ANY_PORT,
+    )
     try:
         if ensemble:
             output_path = get_ensemble_output_path(
