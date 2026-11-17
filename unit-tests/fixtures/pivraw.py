@@ -10,6 +10,7 @@ builds a container from its own reading of the format.
 
 import json
 import shutil
+import stat
 from pathlib import Path
 from typing import Any, Dict
 
@@ -43,9 +44,16 @@ def expected_frames(case: str, camera: int) -> np.ndarray:
 
 
 def copy_case(tmp_path: Path, case: str, name: str = "") -> Path:
-    """Copy one contract run folder to ``tmp_path / (name or case)`` and return it."""
+    """Copy one contract run folder to ``tmp_path / (name or case)`` and return it, writable.
+
+    ``copytree`` copies each entry's attributes, and OneDrive marks folders read-only
+    on Windows, so without clearing that flag a test cannot delete or edit the copy
+    (``rmtree`` raises WinError 5).
+    """
     run = tmp_path / (name or case)
     shutil.copytree(CONTRACT_DIR / case, run)
+    for entry in (run, *run.rglob("*")):
+        entry.chmod(entry.stat().st_mode | stat.S_IWRITE)
     return run
 
 
