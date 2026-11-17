@@ -1,7 +1,7 @@
 """PIVTOOLS Acquisition run folders (``.pivraw``) for reader tests.
 
 Every run comes from the committed contract fixtures in ``pivraw_contract/``:
-runs the real recorder wrote (pivtools-acquisition ``745a0c4``, see that
+runs the real recorder wrote (pivtools-acquisition ``7210202``, see that
 folder's README), with every frame decoded by the acquisition package in
 ``expected_arrays.npz`` and the per-case truth in ``expected.json``. Tests copy
 a case into a temporary folder and change one thing at a time, so no test

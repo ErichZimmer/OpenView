@@ -10,7 +10,18 @@ Locks in:
   * Every frame of the contract dark cases equals the acquisition package's
     own ``pixels.decode_minus_dark`` (``<case>__Camera<k>__dark_subtracted`` in
     ``expected_arrays.npz``): the dark of the frame's own A/B role, subtracted
-    per photosite and clipped at 0, before the Bayer 2x2 sum.
+    per photosite and clipped at 0, before the Bayer 2x2 sum. A hand
+    computation shows the Bayer order differs from summing first.
+  * ``dark: null`` reads raw counts, and validation (generic notes,
+    ``validate_config`` warnings, the GUI route) says no dark was subtracted.
+  * A dark that does not fit the camera (geometry, pixel format, mode, frame
+    count, a missing camera file) or a malformed run.yaml ``dark`` is refused
+    by name.
+  * The view rotation from run.yaml ``config.cameras.slots[].view_rotation``,
+    in the app's meaning (cw90 = 90 degrees right), checked against index maps
+    on a hand-written non-square frame, applied after the dark, per camera.
+    A 90-degree camera's shape is (W, H) from ``Config.image_shape_for``
+    without decoding pixels. A camera run.yaml does not list is refused.
 """
 
 import shutil
@@ -37,11 +48,13 @@ from pivtools_core.config import Config  # noqa: E402
 from pivtools_core.image_handling.path_utils import (  # noqa: E402
     validate_images_generic,
 )
+from pivtools_core.image_handling.readers import pivraw_reader  # noqa: E402
 from pivtools_core.image_handling.readers.pivraw_reader import (  # noqa: E402
     PivrawError,
     clear_header_cache,
     get_pivraw_image_shape,
     pivraw_dark_note,
+    read_pivraw_pair,
     read_pivraw_single,
 )
 from pivtools_core.validation import validate_config  # noqa: E402
@@ -150,7 +163,9 @@ def _swap_dark_camera(run: Path, camera: int, source: Path) -> None:
 
 def _foreign_geometry(run: Path) -> None:
     """A BayerRG8 8 x 8 time-resolved dark in a Mono12p 16 x 8 double-frame run."""
-    _swap_dark_camera(run, 1, CONTRACT_DIR / "tr_bayer_dark" / "dark" / "Camera1.pivraw")
+    _swap_dark_camera(
+        run, 1, CONTRACT_DIR / "tr_bayer_dark" / "dark" / "Camera1.pivraw"
+    )
 
 
 def _run_frames_as_dark(run: Path) -> None:
@@ -224,7 +239,9 @@ def _validate(run: Path) -> dict:
 def test_validation_notes_a_run_without_a_dark(tmp_path):
     raw_run = _validate(copy_case(tmp_path, "df_2cam_clean"))
     assert raw_run["valid"] is True
-    assert len(raw_run["notes"]) == 1 and "No dark was subtracted" in raw_run["notes"][0]
+    assert (
+        len(raw_run["notes"]) == 1 and "No dark was subtracted" in raw_run["notes"][0]
+    )
     dark_run = _validate(copy_case(tmp_path, "df_2cam_dark"))
     assert dark_run["valid"] is True and dark_run["notes"] == []
 
@@ -262,6 +279,161 @@ def test_gui_validate_route_carries_the_note(tmp_path, monkeypatch):
     assert resp.status_code == 200, resp.get_json()
     camera = resp.get_json()["details"]["camera_1"]
     assert any("No dark was subtracted" in n for n in camera["notes"]), camera
+
+
+# ---------------------------------------------------------------------------
+# View rotation (run.yaml config.cameras.slots[].view_rotation)
+# ---------------------------------------------------------------------------
+
+ROTATIONS = ("none", "cw90", "ccw90", "180")
+
+
+def _record_slots(run: Path, rotations: dict) -> None:
+    """Write ``config.cameras.slots`` as the recorder does for a present rig:
+    one entry per camera slot, with its view rotation."""
+    path = run / "run.yaml"
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    data["config"]["cameras"]["slots"] = [
+        {"slot": slot, "serial": f"SIM{slot}", "view_rotation": rotation}
+        for slot, rotation in sorted(rotations.items())
+    ]
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+
+
+def _pack_mono12p(img: np.ndarray) -> bytes:
+    """uint16 (H, W) < 4096 -> Mono12p LSB-first bytes (inverse of the byte-plane decode)."""
+    flat = img.reshape(-1, 2).astype(np.uint16)
+    out = np.empty((flat.shape[0], 3), dtype=np.uint8)
+    out[:, 0] = flat[:, 0] & 0xFF
+    out[:, 1] = ((flat[:, 0] >> 8) & 0xF) | ((flat[:, 1] & 0xF) << 4)
+    out[:, 2] = (flat[:, 1] >> 4) & 0xFF
+    return out.tobytes()
+
+
+# A hand-written 8 x 16 frame: the value names its row and column (100 r + c).
+_H, _W = 8, 16
+_HAND = np.array([[100 * r + c for c in range(_W)] for r in range(_H)], np.uint16)
+# The app's meaning (pivtools-acquisition gui/src/lib/frame.ts and its test):
+# cw90 is "90 degrees right", the source top-left ends up top-right; displayed
+# row r, column d of cw90 is source row H-1-d, column r. Written as index maps,
+# independent of np.rot90.
+_INDEX_MAP = {
+    "none": lambda r, d: (r, d),
+    "cw90": lambda r, d: (_H - 1 - d, r),
+    "ccw90": lambda r, d: (d, _W - 1 - r),
+    "180": lambda r, d: (_H - 1 - r, _W - 1 - d),
+}
+
+
+@pytest.mark.parametrize("rotation", ROTATIONS)
+def test_rotation_of_a_hand_written_non_square_frame(tmp_path, rotation):
+    run = copy_case(tmp_path, "df_2cam_clean")
+    _record_slots(run, {1: rotation, 2: "none"})
+    raw = run / "Camera1.pivraw"
+    blob = bytearray(raw.read_bytes())
+    payload = _pack_mono12p(_HAND)
+    blob[: len(payload)] = payload
+    raw.write_bytes(bytes(blob))
+
+    got = read_pivraw_single(raw, 1)
+    rows, cols = (_W, _H) if rotation in ("cw90", "ccw90") else (_H, _W)
+    expected = np.array(
+        [[_HAND[_INDEX_MAP[rotation](r, d)] for d in range(cols)] for r in range(rows)],
+        dtype=np.float32,
+    )
+    np.testing.assert_array_equal(got, expected)
+    if rotation == "cw90":
+        assert got[0, -1] == 0 and got[0, 0] == 100 * (_H - 1)  # top-left -> top-right
+
+
+_ROT90_K = {"none": 0, "cw90": -1, "ccw90": 1, "180": 2}
+
+
+@pytest.mark.parametrize("rotation", ROTATIONS)
+@pytest.mark.parametrize("case", ["df_2cam_dark", "tr_bayer_dark"])
+def test_dark_case_is_subtracted_then_rotated(tmp_path, case, rotation):
+    """Every frame equals the app's ``decode_minus_dark``, rotated after."""
+    run = copy_case(tmp_path, case)
+    cameras = [int(c) for c in CASES[case]["cameras"]]
+    _record_slots(run, {c: rotation for c in cameras})
+    for camera in cameras:
+        raw = run / f"Camera{camera}.pivraw"
+        expected = np.rot90(
+            _dark_subtracted(case, camera), _ROT90_K[rotation], axes=(1, 2)
+        )
+        assert get_pivraw_image_shape(raw) == expected.shape[1:]
+        for k in range(expected.shape[0]):
+            np.testing.assert_array_equal(
+                read_pivraw_single(raw, k + 1), expected[k].astype(np.float32)
+            )
+        pair = read_pivraw_pair(raw, 1)
+        np.testing.assert_array_equal(pair, expected[:2].astype(np.float32))
+
+
+def test_cameras_of_one_run_keep_their_own_rotation(tmp_path):
+    run = copy_case(tmp_path, "df_2cam_dark")
+    _record_slots(run, {1: "cw90", 2: "none"})
+    assert get_pivraw_image_shape(run / "Camera1.pivraw") == (16, 8)
+    assert get_pivraw_image_shape(run / "Camera2.pivraw") == (8, 16)
+
+
+def test_rotated_shape_comes_without_decoding(tmp_path, monkeypatch):
+    """``Config.image_shape_for`` (C1) gives (W, H) for a 90-degree camera."""
+    run = copy_case(tmp_path, "df_2cam_dark")
+    _record_slots(run, {1: "ccw90", 2: "none"})
+    cfg = Config(path=str(write_piv_config(tmp_path, run, 2, 4)))
+
+    def _no_decode(*_a, **_k):
+        raise AssertionError("shape detection decoded pixels")
+
+    monkeypatch.setattr(pivraw_reader, "_sensor_pixels", _no_decode)
+    monkeypatch.setattr(pivraw_reader, "_decode_into", _no_decode)
+    assert cfg.image_shape_for(1) == (16, 8)
+    assert cfg.image_shape_for(2) == (8, 16)
+
+
+def test_pair_out_must_have_the_rotated_shape(tmp_path):
+    run = copy_case(tmp_path, "df_2cam_dark")
+    _record_slots(run, {1: "cw90", 2: "none"})
+    raw = run / "Camera1.pivraw"
+    with pytest.raises(ValueError, match=r"\(2, 16, 8\)"):
+        read_pivraw_pair(raw, 1, out=np.empty((2, 8, 16), np.float32))
+    out = np.empty((2, 16, 8), np.float32)
+    assert read_pivraw_pair(raw, 1, out=out) is out
+
+
+_ROTATION_REFUSALS = {
+    "camera without a slot": (
+        {1: "none"},
+        r"records no view_rotation for Camera2 \(config.cameras.slots has no slot 2\)",
+    ),
+    "unknown rotation": (
+        {1: "none", 2: "cw45"},
+        r"slot 2 view_rotation 'cw45' is not one of \('none', 'cw90', 'ccw90', '180'\)",
+    ),
+}
+
+
+@pytest.mark.parametrize("what", list(_ROTATION_REFUSALS))
+def test_rotation_the_run_does_not_record_is_refused(tmp_path, what):
+    rotations, message = _ROTATION_REFUSALS[what]
+    run = copy_case(tmp_path, "df_2cam_dark")
+    _record_slots(run, rotations)
+    with pytest.raises(PivrawError, match=message):
+        get_pivraw_image_shape(run / "Camera2.pivraw")
+
+
+def test_duplicate_slot_is_refused(tmp_path):
+    run = copy_case(tmp_path, "df_2cam_dark")
+    path = run / "run.yaml"
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    data["config"]["cameras"]["slots"] = [
+        {"slot": 1, "serial": "A", "view_rotation": "none"},
+        {"slot": 1, "serial": "B", "view_rotation": "cw90"},
+    ]
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    with pytest.raises(PivrawError, match=r"slot 1 is listed twice"):
+        get_pivraw_image_shape(run / "Camera1.pivraw")
 
 
 def test_missing_run_yaml_is_refused(tmp_path):
