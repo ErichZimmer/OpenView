@@ -60,7 +60,7 @@ from pivtools_core.validation import later_loop_findings, validate_memory_for_im
 from pivtools_gui.calibration.app import calibration_bp, calibration_stepped_bp
 from pivtools_gui.errors import register_json_error_handlers
 from pivtools_gui.masking.app.views import masking_bp
-from pivtools_gui.piv_runner import get_runner, require_piv_job_inputs
+from pivtools_gui.piv_runner import get_runner, job_paths, require_piv_job_inputs
 from pivtools_gui.plotting.app.plotting_views import vector_plot_bp
 
 # Transform endpoints (per-file storage with backup/restore, used by frontend)
@@ -2241,7 +2241,12 @@ def check_output_exists():
     """Check if output data exists for given paths/cameras."""
     cfg = get_config()
     active_paths_str = request.args.get("active_paths", "")
-    active_paths = [int(p) for p in active_paths_str.split(",") if p.strip()]
+    # A selection is resolved as the PIV job resolves it: a dataset outside the
+    # config or a non-integer is ActivePathsError, a 400 (errors.py). No
+    # selection asks about nothing.
+    active_paths = (
+        cfg.resolve_active_paths(active_paths_str) if active_paths_str.strip() else []
+    )
     mode = request.args.get("mode", "")  # "instantaneous" or "ensemble"
     types_to_check = (
         [mode]
@@ -2261,9 +2266,6 @@ def check_output_exists():
     details = {}
 
     for path_idx in active_paths:
-        if path_idx >= len(cfg.base_paths):
-            logger.warning(f"[check_output_exists] Path index {path_idx} out of range")
-            continue
         base = cfg.base_paths[path_idx]
         path_key = f"path_{path_idx}"
         details[path_key] = {}
@@ -2321,9 +2323,13 @@ def clear_output():
     cleared = []
     errors = []
 
+    # Resolved as the PIV job resolves them, before anything is deleted: a
+    # negative index used to clear another dataset's output (Python indexing),
+    # and an out-of-range one was skipped. Both are ActivePathsError, a 400.
+    if active_paths:
+        active_paths = job_paths(cfg, active_paths)
+
     for path_idx in active_paths:
-        if path_idx >= len(cfg.base_paths):
-            continue
         base = cfg.base_paths[path_idx]
 
         for cam_num in camera_numbers:

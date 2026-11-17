@@ -19,7 +19,11 @@ from flask import Flask, jsonify, request
 from loguru import logger
 from werkzeug.exceptions import HTTPException, InternalServerError
 
-from pivtools_core.config import CalibrationSourceError, PairingStrideError
+from pivtools_core.config import (
+    ActivePathsError,
+    CalibrationSourceError,
+    PairingStrideError,
+)
 from pivtools_core.image_handling.load_images import MaskError
 from pivtools_core.image_handling.readers.pivraw_reader import PivrawError
 from pivtools_core.image_handling.readers.set_reader import SetConfigError
@@ -28,6 +32,7 @@ API_PREFIX = "/backend/"
 # Errors the user fixes in the configuration or the data: answered 400 with
 # their own message (register_json_error_handlers).
 BAD_INPUT_ERRORS = (
+    ActivePathsError,
     CalibrationSourceError,
     MaskError,
     PairingStrideError,
@@ -54,7 +59,8 @@ def register_json_error_handlers(app: Flask) -> None:
     (``SetConfigError``, e.g. ``SetPairingError`` for a single-frame camera
     selected for A/B pairs). So is a pixel mask that cannot be used for its
     camera (``MaskError``: wrong size, or masking on with no readable mask
-    file). Everything else
+    file). So is a dataset selection that names no real dataset
+    (``ActivePathsError``). Everything else
     becomes a 500 whose traceback goes to the loguru log, not to the browser.
     """
 

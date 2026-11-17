@@ -11,7 +11,7 @@ import re
 from pathlib import Path
 from typing import List, Tuple
 
-from pivtools_core.config import Config
+from pivtools_core.config import ActivePathsError, Config
 from pivtools_core.fft_sizes import (
     BUILT_FFT_SIZES,
     SINGLE_MODE_A_SIZES,
@@ -165,11 +165,11 @@ def validate_config(config: Config) -> Tuple[bool, str, List[str]]:
             "must have the same number of entries for paired processing"
         )
 
-    # Check at least one active path
-    if not config.active_paths:
-        errors.append(
-            "No active paths configured. Set active_paths in config or check indices are valid."
-        )
+    # The dataset selection must name real datasets (an empty one is refused too)
+    try:
+        config.active_paths
+    except ActivePathsError as e:
+        errors.append(str(e))
 
     # Check source paths exist
     for i, source_path in enumerate(config.source_paths):
