@@ -37,14 +37,27 @@ Layout facts the reader relies on:
   counted, and a run whose cameras cannot be shown to count from the same
   trigger is refused by name.
 
+Frames arrive as a DaVis image would, with the run's own corrections applied
+(decisions 2026-11-17, ticket P3), in this order:
+
+1. The in-run dark. ``run.yaml`` ``dark: {id, path: "dark"}`` points to
+   ``<run>/dark/``, an ordinary container of one trigger. Per photosite
+   ``max(frame - dark, 0)`` in the sensor's unsigned type, with the dark frame
+   of the frame's own A/B role (or the single dark frame, time-resolved),
+   before the BayerRG8 sum. ``dark: null`` reads raw counts, and validation
+   says so. Only the in-run copy is ever used: the run folder is self-contained.
+2. The view rotation, ``run.yaml`` ``config.cameras.slots[].view_rotation``
+   (``VIEW_ROTATIONS``). A 90-degree view returns (W, H).
+
 The reader is strict and forward-only: a missing or unknown sidecar field, a
 field of the wrong type, a ``format_version`` other than the integer 2, a
-``slot`` that differs from the file name, an unfinalised run, or a sidecar and
-``.idx`` that disagree with each other or with the files on disk raise
-:class:`PivrawError` (a ``ValueError``) naming the file and the field. There is
-no version-1 path. Frame indices are 1-based, like every other container in
-PIVTOOLs. Returned pixels are raw counts as float32: (H, W) for a frame,
-(2, H, W) for a pair.
+``slot`` that differs from the file name, an unfinalised run, a sidecar and
+``.idx`` that disagree with each other or with the files on disk, a run.yaml
+without ``dark`` or without the camera's slot, or a dark that does not fit the
+camera raise :class:`PivrawError` (a ``ValueError``) naming the file and the
+field. There is no version-1 path. Frame indices are 1-based, like every other
+container in PIVTOOLs. Returned pixels are float32 counts: (H, W) for a frame,
+(2, H, W) for a pair, H and W as rotated.
 """
 
 import json
@@ -78,6 +91,20 @@ INDEX_RECORD_BYTES = INDEX_DTYPE.itemsize
 STRIDE_ALIGNMENT = 4096
 # The recorder names camera k's files Camera<k>.pivraw; the sidecar's slot must be k.
 _DATA_NAME = re.compile(r"^Camera(\d+)\.pivraw$")
+# The run description beside the camera files (CONTRACTS section 4).
+RUN_FILE = "run.yaml"
+# run.yaml ``trigger``: what fired the cameras.
+SOFTWARE_TRIGGER = "software"
+RUN_TRIGGERS = (SOFTWARE_TRIGGER, "daq")
+# run.yaml's dark key, and the in-run copy of the dark (container.RUN_DARK_DIR):
+# an ordinary run container of one trigger, <run>/dark/Camera<k>.pivraw.
+RUN_DARK_KEY = "dark"
+RUN_DARK_DIR = "dark"
+# run.yaml config.cameras.slots[].view_rotation -> the ``np.rot90`` k that
+# applies it. The app's own meaning (pivtools-acquisition config.ViewRotation
+# and gui/src/lib/frame.ts): cw90 is 90 degrees right, np.rot90(img, -1), the
+# source top-left ending top-right; ccw90 is np.rot90(img, 1).
+VIEW_ROTATIONS = {"none": 0, "cw90": -1, "ccw90": 1, "180": 2}
 # How many offending run indices an error message lists.
 _LIST_IN_MESSAGE = 8
 
@@ -154,7 +181,9 @@ class PivrawHeader:
 
     @property
     def image_shape(self) -> Tuple[int, int]:
-        """(H, W) of a decoded frame: full sensor for Mono12p, halved for BayerRG8."""
+        """(H, W) of a decoded frame as stored, before any view rotation: full
+        sensor for Mono12p, halved for BayerRG8. The reader returns
+        :attr:`PivrawCamera.image_shape`."""
         if self.pixel_format == BAYER_RG8:
             return (self.height // 2, self.width // 2)
         return (self.height, self.width)
@@ -546,8 +575,10 @@ def read_pivraw_header(file_path: PathLike) -> PivrawHeader:
 
 
 def clear_header_cache() -> None:
-    """Drop every cached header. Mirrors ``cine_reader.clear_metadata_cache``."""
+    """Drop every cached header, run file and dark. Mirrors ``cine_reader.clear_metadata_cache``."""
     _header_cache.clear()
+    _run_file_cache.clear()
+    _dark_pixel_cache.clear()
 
 
 def get_pivraw_frame_count(file_path: PathLike) -> int:
@@ -556,8 +587,274 @@ def get_pivraw_frame_count(file_path: PathLike) -> int:
 
 
 def get_pivraw_image_shape(file_path: PathLike) -> Tuple[int, int]:
-    """(H, W) of a decoded frame, from the sidecar alone (no pixel decode)."""
-    return read_pivraw_header(file_path).image_shape
+    """(H, W) of a frame as the reader returns it, from the sidecar and run.yaml (no pixel decode)."""
+    return read_pivraw_camera(file_path).image_shape
+
+
+@dataclass(frozen=True)
+class PivrawRunFile:
+    """A run's ``run.yaml``, validated: everything PIVTOOLs reads from it.
+
+    One parse serves the alignment (:func:`align_pivraw_run`), the decode path
+    (:func:`read_pivraw_camera`) and the run import.
+
+    ``requested_triggers`` is ``config.record.n`` (pairs double-frame, frames
+    time-resolved). ``trigger`` is what fired the cameras (``RUN_TRIGGERS``).
+    ``dark_id`` is the in-run dark's id (its folder name), None for a run
+    recorded without a dark (``dark: null``). ``view_rotations`` maps each slot
+    of ``config.cameras.slots`` to its ``view_rotation``.
+    """
+
+    path: Path
+    requested_triggers: int
+    trigger: str
+    dark_id: Optional[str]
+    view_rotations: Dict[int, str]
+
+
+@dataclass(frozen=True)
+class PivrawCamera:
+    """One camera of a run, as PIVTOOLs reads it.
+
+    ``dark`` is the validated header of the camera's in-run dark
+    (``<run>/dark/Camera<k>.pivraw``), None when the run has no dark.
+    ``view_rotation`` is applied after the dark (a key of ``VIEW_ROTATIONS``).
+    """
+
+    header: PivrawHeader
+    dark: Optional[PivrawHeader]
+    view_rotation: str
+
+    @property
+    def image_shape(self) -> Tuple[int, int]:
+        """(H, W) of a frame as the reader returns it: a 90-degree view swaps
+        the stored H and W."""
+        h, w = self.header.image_shape
+        return (w, h) if VIEW_ROTATIONS[self.view_rotation] % 2 else (h, w)
+
+
+# {str(run.yaml): (stamp, parsed)}.
+_run_file_cache: Dict[str, Tuple[Tuple[int, int], PivrawRunFile]] = {}
+# {str(dark .pivraw): (stamp, sensor pixels of each dark frame, in file order)}.
+_dark_pixel_cache: Dict[str, Tuple[Tuple[int, ...], Tuple[np.ndarray, ...]]] = {}
+
+
+def _parse_run_record(path: Path, run: Any) -> Tuple[int, str]:
+    """run.yaml's ``config.record.n`` (triggers requested) and ``trigger``.
+
+    Raises:
+        PivrawError: Either key is absent or of the wrong kind.
+    """
+    try:
+        requested = run["config"]["record"]["n"]
+        trigger = run["trigger"]
+    except (KeyError, TypeError) as exc:
+        raise PivrawError(
+            f"{path}: config.record.n or trigger is missing ({exc!r}); not a "
+            "run.yaml the recorder wrote."
+        ) from exc
+    if not _is_int(requested) or requested < 1:
+        raise PivrawError(
+            f"{path}: config.record.n must be a positive integer, got {requested!r}."
+        )
+    if trigger not in RUN_TRIGGERS:
+        raise PivrawError(
+            f"{path}: trigger must be one of {RUN_TRIGGERS}, got {trigger!r}."
+        )
+    return requested, trigger
+
+
+def _parse_run_dark(path: Path, run: Any) -> Optional[str]:
+    """run.yaml's ``dark``: None for ``dark: null``, else the dark's id.
+
+    Raises:
+        PivrawError: ``dark`` is absent, or not ``null`` or ``{id, path}``
+            with ``path`` the in-run copy ``"dark"``.
+    """
+    if not isinstance(run, dict) or RUN_DARK_KEY not in run:
+        raise PivrawError(
+            f"{path}: no '{RUN_DARK_KEY}' key (a stale run.yaml: re-record with "
+            "the current pivtools-acquisition)."
+        )
+    dark = run[RUN_DARK_KEY]
+    if dark is None:
+        return None
+    if (
+        not isinstance(dark, dict)
+        or set(dark) != {"id", "path"}
+        or not isinstance(dark["id"], str)
+        or not dark["id"]
+        or dark["path"] != RUN_DARK_DIR
+    ):
+        raise PivrawError(
+            f"{path}: dark must be null or {{id, path: {RUN_DARK_DIR!r}}} (the "
+            f"in-run copy), got {dark!r}."
+        )
+    return dark["id"]
+
+
+def _parse_view_rotations(path: Path, run: Any) -> Dict[int, str]:
+    """run.yaml's ``config.cameras.slots``: slot -> ``view_rotation``.
+
+    The recorder writes its whole configuration into ``config``, and a run
+    records only slots that are present, so every recorded camera has its entry.
+
+    Raises:
+        PivrawError: The list is absent, an entry has no integer slot or a
+            rotation that is not one of ``VIEW_ROTATIONS``, or a slot repeats.
+    """
+    try:
+        slots = run["config"]["cameras"]["slots"]
+    except (KeyError, TypeError) as exc:
+        raise PivrawError(
+            f"{path}: config.cameras.slots is missing ({exc!r}); not a run.yaml "
+            "the recorder wrote."
+        ) from exc
+    if not isinstance(slots, list):
+        raise PivrawError(
+            f"{path}: config.cameras.slots must be a list, got {slots!r}."
+        )
+    rotations: Dict[int, str] = {}
+    for entry in slots:
+        if (
+            not isinstance(entry, dict)
+            or not _is_int(entry.get("slot"))
+            or "view_rotation" not in entry
+        ):
+            raise PivrawError(
+                f"{path}: config.cameras.slots entry {entry!r} has no integer slot "
+                "and view_rotation."
+            )
+        slot, rotation = entry["slot"], entry["view_rotation"]
+        if rotation not in VIEW_ROTATIONS:
+            raise PivrawError(
+                f"{path}: slot {slot} view_rotation {rotation!r} is not one of "
+                f"{tuple(VIEW_ROTATIONS)}."
+            )
+        if slot in rotations:
+            raise PivrawError(
+                f"{path}: config.cameras.slots: slot {slot} is listed twice."
+            )
+        rotations[slot] = rotation
+    return rotations
+
+
+def read_pivraw_run_file(run_dir: PathLike) -> PivrawRunFile:
+    """``<run_dir>/run.yaml``, validated strictly and cached by its stamp.
+
+    The one run.yaml loader: the alignment, the decode path and the run import
+    all read the run description through it, so each rule holds everywhere.
+
+    Raises:
+        PivrawError: run.yaml is missing or unreadable; ``config.record.n`` or
+            ``trigger`` is absent or invalid; ``dark`` is absent or not
+            ``null`` / ``{id, path: "dark"}``; or ``config.cameras.slots`` is
+            absent, has an entry without an integer slot and a known
+            ``view_rotation``, or repeats a slot.
+    """
+    path = Path(run_dir) / RUN_FILE
+    try:
+        st = path.stat()
+    except OSError as exc:
+        raise PivrawError(
+            f"{path}: cannot read the run description ({exc}). Every recorded "
+            "run holds one; the folder is incomplete."
+        ) from exc
+    stamp = (st.st_mtime_ns, st.st_size)
+    cached = _run_file_cache.get(str(path))
+    if cached is not None and cached[0] == stamp:
+        return cached[1]
+    try:
+        run = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as exc:
+        raise PivrawError(f"{path}: cannot read the run description ({exc}).") from exc
+    requested, trigger = _parse_run_record(path, run)
+    parsed = PivrawRunFile(
+        path=path,
+        requested_triggers=requested,
+        trigger=trigger,
+        dark_id=_parse_run_dark(path, run),
+        view_rotations=_parse_view_rotations(path, run),
+    )
+    _run_file_cache[str(path)] = (stamp, parsed)
+    return parsed
+
+
+def _frames_per_dark(mode: str) -> int:
+    """A dark is one trigger: frames A and B (double-frame) or one frame."""
+    return 2 if mode == DOUBLE_FRAME else 1
+
+
+def _check_dark(header: PivrawHeader, run: PivrawRunFile) -> PivrawHeader:
+    """The validated header of ``header``'s in-run dark.
+
+    Raises:
+        PivrawError: The dark has no file for this camera, or its camera
+            serial, geometry, pixel format, mode or frame count differ from the
+            camera's.
+    """
+    dark_raw = header.path.parent / RUN_DARK_DIR / header.path.name
+    if not dark_raw.is_file():
+        raise PivrawError(
+            f"{run.path} names the in-run dark {run.dark_id}, but {dark_raw} is "
+            f"missing: the dark holds no frames for camera {header.slot}."
+        )
+    dark = read_pivraw_header(dark_raw)
+    differences = [
+        f"{name} {getattr(dark, name)!r} (camera {getattr(header, name)!r})"
+        for name in ("camera_serial", "width", "height", "pixel_format", "mode")
+        if getattr(dark, name) != getattr(header, name)
+    ]
+    if differences:
+        raise PivrawError(
+            f"{dark_raw}: the in-run dark {run.dark_id} does not match camera "
+            f"{header.slot} of {header.path}: {', '.join(differences)}. A dark is "
+            "subtracted only from frames of the camera it was taken with, in its "
+            "own slot, geometry and pixel format."
+        )
+    if dark.n_frames != _frames_per_dark(dark.mode):
+        raise PivrawError(
+            f"{dark_raw}: the in-run dark {run.dark_id} holds {dark.n_frames} "
+            f"frames; a {dark.mode} dark is one trigger, "
+            f"{_frames_per_dark(dark.mode)} frame(s)."
+        )
+    return dark
+
+
+def read_pivraw_camera(file_path: PathLike) -> PivrawCamera:
+    """One camera's header, with its run's dark validated and its view rotation
+    (no pixel decode).
+
+    Raises:
+        FileNotFoundError: The ``.pivraw`` or its sidecar is missing.
+        PivrawError: The container, run.yaml or in-run dark cannot be read as
+            specified, the dark does not match the camera, or run.yaml records
+            no view rotation for the camera.
+    """
+    header = read_pivraw_header(file_path)
+    run = read_pivraw_run_file(header.path.parent)
+    rotation = run.view_rotations.get(header.slot)
+    if rotation is None:
+        raise PivrawError(
+            f"{run.path}: records no view_rotation for Camera{header.slot} "
+            f"(config.cameras.slots has no slot {header.slot}). The recorder "
+            "lists every recorded camera; this run.yaml does not describe "
+            f"{header.path.name}."
+        )
+    dark = None if run.dark_id is None else _check_dark(header, run)
+    return PivrawCamera(header=header, dark=dark, view_rotation=rotation)
+
+
+def pivraw_dark_note(file_path: PathLike) -> Optional[str]:
+    """A plain-words note when a camera's frames are read without a dark, else None."""
+    camera = read_pivraw_camera(file_path)
+    if camera.dark is not None:
+        return None
+    return (
+        f"No dark was subtracted from {camera.header.path.name}: the run was "
+        f"recorded without a dark ({RUN_FILE} says dark: null), so its images "
+        "are raw sensor counts."
+    )
 
 
 def _check_frame_idx(header: PivrawHeader, idx: int, role: str) -> None:
@@ -573,8 +870,12 @@ def _check_frame_idx(header: PivrawHeader, idx: int, role: str) -> None:
         )
 
 
-def _decode_into(header: PivrawHeader, idx: int, dest: np.ndarray) -> None:
-    """Decode 1-based frame ``idx`` of ``header`` straight into float32 ``dest``."""
+def _sensor_pixels(header: PivrawHeader, idx: int) -> np.ndarray:
+    """1-based frame ``idx`` as one writable value per photosite, (height, width).
+
+    Mono12p as uint16, BayerRG8 as the uint8 mosaic: the sensor's own unsigned
+    type, the level at which a dark is subtracted.
+    """
     offset = (idx - 1) * header.frame_stride
     raw = np.fromfile(
         header.path, dtype=np.uint8, count=header.bytes_per_frame, offset=offset
@@ -585,10 +886,56 @@ def _decode_into(header: PivrawHeader, idx: int, dest: np.ndarray) -> None:
             f"{header.bytes_per_frame} bytes at offset {offset})."
         )
     if header.pixel_format == MONO12P:
-        np.copyto(dest, _decode_mono12p(raw, header.width, header.height))
+        return _decode_mono12p(raw, header.width, header.height)
+    return raw.reshape(header.height, header.width)
+
+
+def _dark_frame(camera: PivrawCamera, idx: int) -> np.ndarray:
+    """Sensor pixels of the dark frame of file frame ``idx``'s own role.
+
+    A double-frame file holds A, B, A, B, ... so an odd 1-based frame is an A
+    and takes dark frame 1 (A), an even one dark frame 2 (B). A time-resolved
+    dark is one frame. Decoded once per dark file and cached by its stamp.
+    """
+    dark = camera.dark
+    key = str(dark.path)
+    stamp = _stamp(dark.path)
+    cached = _dark_pixel_cache.get(key)
+    if cached is None or cached[0] != stamp:
+        frames = tuple(_sensor_pixels(dark, k + 1) for k in range(dark.n_frames))
+        for frame in frames:
+            frame.setflags(write=False)
+        cached = (stamp, frames)
+        _dark_pixel_cache[key] = cached
+    role = (idx - 1) % 2 if dark.mode == DOUBLE_FRAME else 0
+    return cached[1][role]
+
+
+def _decode_into(camera: PivrawCamera, idx: int, dest: np.ndarray) -> None:
+    """Decode 1-based frame ``idx`` of ``camera`` into float32 ``dest``.
+
+    With an in-run dark, ``max(frame - dark, 0)`` per photosite in the sensor
+    type, written ``max(frame, dark) - dark`` so the unsigned subtraction never
+    wraps (pivtools-acquisition ``pixels.subtract_dark``). BayerRG8 is then
+    summed R+G+G+B: a photosite below its dark adds 0 to its superpixel, where
+    summing first would let the other three photosites pay for it. The view
+    rotation comes last, on the decoded image (``dest`` has the rotated shape).
+    """
+    header = camera.header
+    pixels = _sensor_pixels(header, idx)
+    if camera.dark is not None:
+        dark = _dark_frame(camera, idx)
+        np.maximum(pixels, dark, out=pixels)
+        pixels -= dark
+    k = VIEW_ROTATIONS[camera.view_rotation]
+    image = dest if k == 0 else np.empty(header.image_shape, dtype=np.float32)
+    if header.pixel_format == MONO12P:
+        np.copyto(image, pixels)
     else:
-        mosaic = raw.reshape(header.height // 2, 2, header.width // 2, 2)
-        mosaic.sum(axis=(1, 3), dtype=np.float32, out=dest)
+        mosaic = pixels.reshape(header.height // 2, 2, header.width // 2, 2)
+        mosaic.sum(axis=(1, 3), dtype=np.float32, out=image)
+    if k:
+        np.copyto(dest, np.rot90(image, k))
 
 
 def read_pivraw_single(
@@ -602,17 +949,18 @@ def read_pivraw_single(
         out: Optional (H, W) float32 C-contiguous destination, written in place
             and returned. Undefined after an exception.
     """
-    header = read_pivraw_header(file_path)
+    camera = read_pivraw_camera(file_path)
+    header = camera.header
     _check_frame_idx(header, idx, "frame")
     if out is None:
-        out = np.empty(header.image_shape, dtype=np.float32)
+        out = np.empty(camera.image_shape, dtype=np.float32)
     else:
         check_out(
             out,
-            header.image_shape,
+            camera.image_shape,
             f"read_pivraw_single frame {idx} of {header.path.name}",
         )
-    _decode_into(header, idx, out)
+    _decode_into(camera, idx, out)
     return out
 
 
@@ -638,7 +986,8 @@ def read_pivraw_pair(
             itself (A/B-format preset), would correlate the wrong exposures
             without any other error, so it is refused by name.
     """
-    header = read_pivraw_header(file_path)
+    camera = read_pivraw_camera(file_path)
+    header = camera.header
     frame_b = idx + 1 if frame_b_idx is None else frame_b_idx
     _check_frame_idx(header, idx, "frame A")
     _check_frame_idx(header, frame_b, "frame B")
@@ -649,13 +998,13 @@ def read_pivraw_pair(
             "skip_frames pairing preset (frame_stride 1, pair_stride 2) with "
             "start_index 1."
         )
-    shape = (2,) + header.image_shape
+    shape = (2,) + camera.image_shape
     if out is None:
         out = np.empty(shape, dtype=np.float32)
     else:
         check_out(out, shape, f"read_pivraw_pair frame {idx} of {header.path.name}")
-    _decode_into(header, idx, out[0])
-    _decode_into(header, frame_b, out[1])
+    _decode_into(camera, idx, out[0])
+    _decode_into(camera, frame_b, out[1])
     return out
 
 
@@ -672,11 +1021,6 @@ def read_pivraw_pair(
 # ``align_run``). Both are held to the outcome of every case in
 # ``pivraw_contract/expected.json``, which keeps the two aligners in agreement.
 
-# The recorder's run description beside the camera files (CONTRACTS section 4).
-RUN_FILE = "run.yaml"
-# run.yaml ``trigger``: what fired the cameras.
-SOFTWARE_TRIGGER = "software"
-RUN_TRIGGERS = (SOFTWARE_TRIGGER, "daq")
 # Fraction of a trigger period two host times may differ by and still be the
 # same trigger. The rig measured its cameras within 0.74 ms of each other at a
 # 200 ms period (pivraw-contract REPORT C8); a quarter period keeps a wide
@@ -849,40 +1193,6 @@ def run_cameras(run_dir: Path) -> Tuple[int, ...]:
     if not slots:
         raise PivrawError(f"{run_dir}: no Camera<k>.pivraw file; not a run folder.")
     return tuple(slots)
-
-
-def _read_run_file(run_dir: Path) -> Tuple[int, str]:
-    """run.yaml's ``config.record.n`` (triggers requested) and ``trigger``.
-
-    Raises:
-        PivrawError: run.yaml is missing or unreadable, or either key is absent
-            or of the wrong kind.
-    """
-    path = run_dir / RUN_FILE
-    try:
-        run = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError) as exc:
-        raise PivrawError(
-            f"{path}: cannot read the run description ({exc}). Every recorded "
-            "run holds one; the folder is incomplete."
-        ) from exc
-    try:
-        requested = run["config"]["record"]["n"]
-        trigger = run["trigger"]
-    except (KeyError, TypeError) as exc:
-        raise PivrawError(
-            f"{path}: config.record.n or trigger is missing ({exc!r}); not a "
-            "run.yaml the recorder wrote."
-        ) from exc
-    if not _is_int(requested) or requested < 1:
-        raise PivrawError(
-            f"{path}: config.record.n must be a positive integer, got {requested!r}."
-        )
-    if trigger not in RUN_TRIGGERS:
-        raise PivrawError(
-            f"{path}: trigger must be one of {RUN_TRIGGERS}, got {trigger!r}."
-        )
-    return requested, trigger
 
 
 def _camera_triggers(header: PivrawHeader) -> _CameraTriggers:
@@ -1067,7 +1377,8 @@ def align_pivraw_run(
         return cached[1]
 
     headers = {s: read_pivraw_header(run_dir / f"Camera{s}.pivraw") for s in slots}
-    requested, trigger_source = _read_run_file(run_dir)
+    run_file = read_pivraw_run_file(run_dir)
+    requested, trigger_source = run_file.requested_triggers, run_file.trigger
     modes = {h.mode for h in headers.values()}
     rates = {h.rate_hz for h in headers.values()}
     if len(modes) != 1 or len(rates) != 1:

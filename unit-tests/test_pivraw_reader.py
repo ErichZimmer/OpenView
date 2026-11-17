@@ -137,11 +137,14 @@ _CAMERA_FRAMES = [
     for cam, facts in spec["cameras"].items()
     if facts["n_frames"] > 0
 ]
+# A run with an in-run dark reads dark-subtracted (test_pivraw_dark_rotation.py).
+_RAW_CAMERA_FRAMES = [(c, k) for c, k in _CAMERA_FRAMES if "dark" not in CASES[c]]
 
 
-@pytest.mark.parametrize("case, camera", _CAMERA_FRAMES)
+@pytest.mark.parametrize("case, camera", _RAW_CAMERA_FRAMES)
 def test_every_contract_frame_reads_bit_identical(case, camera):
-    """Every frame equals the acquisition package's own decode (``expected_arrays.npz``).
+    """Every frame of a run without a dark equals the acquisition package's own
+    decode (``expected_arrays.npz``).
 
     Includes the cases whose pairing P2 decides (drops, offsets, a lost first
     frame): here they are read frame by frame only.
