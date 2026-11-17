@@ -23,14 +23,19 @@ recognised and refused by name -- their bit or channel order cannot be derived
 from the id alone, and a wrong guess yields a plausible-looking wrong image rather
 than a failure.
 
-Stream transformers: StreamSet.xml declares a post-decode correction per stream
-that DaVis applies on read (see ``_IMPLEMENTED_TRANSFORMERS``).
-``dark-image-subtraction`` is applied as ``clamp(decoded - Transformer{N}-dark.im7,
-0)`` and ``rotate-180`` as a 180-degree rotation. A declared correction this reader
-does not implement is refused when that stream is read -- not skipped, because
-skipping one returns different pixels from DaVis with nothing to indicate it
-happened, and not at parse time, because the other streams of the recording are
-still readable.
+Stream transformers: StreamSet.xml binds post-decode transformers to a stream,
+which DaVis applies on read (see ``_CORRECTIONS`` and ``_GEOMETRIES``). Three
+subtract a per-pixel image stored beside the streams, seven are file-less
+geometry. They run in LaVision's fixed order whatever order the manifest lists:
+the corrections in sensor coordinates, each clipped, then at most one geometry.
+Four geometries turn the frame by 90 degrees, so a stream's OUTPUT shape
+(``IMSFrameInfo.shape``) is (W, H) of what its index header stores
+(``IMSFrameInfo.stored_shape``); every caller sizes buffers and splits cameras on
+the output shape. Three known DaVis ids with no measured effect are refused when
+their stream is read, not skipped, because skipping one returns different pixels
+from DaVis with nothing to indicate it happened. An id outside the 13 DaVis ids
+refuses the whole recording at parse: its output shape is unknown, and cameras
+are mapped to streams by shape.
 
 Also supports:
 - Pre-paired pairs: the camera's two streams (camera_streams) via read_set_pair
@@ -48,7 +53,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple, Union
+from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -74,38 +79,58 @@ class IMSIndexEntry:
 
 @dataclass(frozen=True)
 class StreamTransformer:
-    """One post-decode correction StreamSet.xml binds to a frame stream.
+    """One post-decode transformer StreamSet.xml binds to a frame stream.
 
     ``id`` is the DaVis transformer id (``dark-image-subtraction``,
     ``rotate-180``, ...); ``label`` is what the DaVis UI shows for it, kept so a
-    refusal names what the user can see. ``dark_path`` is set only for
-    dark-image subtraction. A stream carries at most one transformer: the order
-    DaVis applies two in is not knowable from the manifest, so two are refused
-    at parse time rather than guessed.
+    refusal names what the user can see. ``correction_path`` is the per-pixel
+    image a correction subtracts (``{FilePrefix}-dark.im7``, ``-bgnd.im7``,
+    ``-scmos-1.im7``), None for geometry and for the refused ids.
     """
 
     id: str
     label: str
-    dark_path: Optional[Path] = None
+    correction_path: Optional[Path] = None
 
 
 @dataclass
 class IMSFrameInfo:
-    """Metadata for one frame stream (one {prefix}-0/1.ims pair plus sidecars)."""
+    """Metadata for one frame stream (one {prefix}-0/1.ims pair plus sidecars).
+
+    ``stored_shape`` is the index header's (H, W), in sensor coordinates: what
+    the payload decodes to, before the transformers. Only the decoder and the
+    correction-image check use it. Everything that sizes a buffer, compares
+    cameras or reports a shape uses :attr:`shape`.
+    """
 
     frame_idx: int  # 0-based frame-stream index
     data_path: Path  # {prefix}-1.ims
     index_path: Path  # {prefix}-0.ims
     decoder: str  # DaVis encoding id, e.g. "mono-12p", "raw-16-bit"
     codec: str  # compression name from the index header, one of _IMS_CODECS
-    width: int
-    height: int
+    stored_shape: Tuple[int, int]
     n_entries: int
     scale_slope: float
     scale_offset: float
     scale_unit: str
     entries: List[IMSIndexEntry]
-    transformer: Optional[StreamTransformer] = None
+    # In application order (LaVision's, not the manifest's); empty when none.
+    transformers: Tuple[StreamTransformer, ...] = ()
+
+    @property
+    def shape(self) -> Tuple[int, int]:
+        """(H, W) of the frame this stream reads as, after its transformers.
+
+        (W, H) of :attr:`stored_shape` when its geometry turns the frame by 90
+        degrees. A refused id is taken to keep the shape: all three are intensity
+        corrections by their DaVis label (HYPOTHESIS, rotation-shape REPORT §5).
+        """
+        h, w = self.stored_shape
+        for tf in self.transformers:
+            geometry = _GEOMETRIES.get(tf.id)
+            if geometry is not None and geometry.swaps_axes:
+                return (w, h)
+        return (h, w)
 
 
 @dataclass(frozen=True)
@@ -336,20 +361,144 @@ def _read_decoder(decoder_path: Path) -> str:
 # Stream transformers (post-decode corrections declared by DaVis)
 # ---------------------------------------------------------------------------
 
-# Transformer IDs this reader implements. StreamSet.xml declares a per-stream
-# post-decode correction; DaVis (and lvpyio) apply it on read, so skipping one
-# silently returns different pixels from what DaVis shows for the same
-# recording. An undeclared correction is normal -- plenty of recordings have
-# none -- but a DECLARED one we do not implement must fail loudly rather than be
-# dropped. The refusal is per STREAM, at read time (see _read_single_image): a
-# five-camera recording whose PLIF camera carries an unimplemented correction
-# still serves its four other cameras.
+# StreamSet.xml binds post-decode transformers to a stream; DaVis (and lvpyio)
+# apply them on read, so skipping one silently returns different pixels from
+# what DaVis shows for the same recording. The 13 ids are LaVision's list, read
+# from lvpyio 1.3.1's Core.DataObjects.dll string table (01-lavision-readers
+# REPORT B3). The effect of the 10 below was measured against lvpyio on
+# synthetic non-square recordings (y down, row 0 at top; rotation-shape REPORT
+# A1, A3); dark-image-subtraction, rotate-180 and intensity-correction-1 also on
+# real recordings. Every transformer declares a FilePrefix, but only the three
+# corrections own a file.
 #
-# rotate-180 declares a FilePrefix like every transformer but has no data file
-# on disk; only dark-image-subtraction owns a Transformer{N}-dark.im7. Both
-# verified bit-exact against lvpyio 1.3.1 on real recordings (2026-08-22 and
-# 2026-08-24).
-_IMPLEMENTED_TRANSFORMERS = ("dark-image-subtraction", "rotate-180")
+# Order (transformer-order REPORT R1, 324 of 324 synthetic cases and two real
+# recordings): lvpyio applies the corrections in the order of _CORRECTIONS, in
+# sensor coordinates, each clipped to its own range, then one geometry, whatever
+# order the manifest lists them in and whatever their FilePrefixes. Dark and
+# background commute (both orders are max(x - D - B, 0)).
+
+# lvpyio adds this pedestal inside intensity-correction-1. Measured constant:
+# lvpyio - raw + T == 300 on 44 M real NTNU pixels, and still 300 with T constant
+# 1000, so it is not derived from T (01-lavision-readers REPORT B1).
+_SCMOS1_PEDESTAL = 300
+_UINT16_MAX = np.iinfo(np.uint16).max
+
+
+def _subtract_clamped(img: np.ndarray, corr: np.ndarray) -> np.ndarray:
+    """``max(img - corr, 0)`` in uint16: one full-frame allocation plus the mask.
+
+    The uint16 subtraction wraps where corr > img, and the wrapped elements are
+    then zeroed in place, so they never reach the output. Not done in place on
+    ``img``: _decode_raw16 returns a read-only np.frombuffer view. Measured on a
+    5312x3528 frame: 23.0 ms here, against 42.9 ms for
+    ``np.where(img > corr, img - corr, 0).astype(np.uint16)``, which allocates four
+    full-frame temporaries.
+    """
+    out = img - corr
+    np.copyto(out, 0, where=img <= corr)
+    return out
+
+
+def _scmos_correction_1(img: np.ndarray, corr: np.ndarray) -> np.ndarray:
+    """``clip(img - corr + 300, 0, 65535)``, DaVis 'Intensity correction 1'.
+
+    int32 holds every intermediate: -65535 + 300 at the low end, 65535 + 300 at
+    the high end. Both clips are observable: a raw pixel near saturation with
+    corr below 300 exceeds 65535 (transformer-order REPORT Q3).
+    """
+    out = img.astype(np.int32)
+    out -= corr
+    out += _SCMOS1_PEDESTAL
+    np.clip(out, 0, _UINT16_MAX, out=out)
+    return out.astype(np.uint16)
+
+
+@dataclass(frozen=True)
+class _Correction:
+    """A transformer that subtracts the per-pixel image ``{FilePrefix}-{suffix}.im7``.
+
+    ``apply(decoded, image)`` takes both in sensor shape, uint16, and returns a
+    new uint16 frame clipped to that step's range.
+    """
+
+    label: str
+    suffix: str
+    apply: Callable[[np.ndarray, np.ndarray], np.ndarray]
+
+
+@dataclass(frozen=True)
+class _Geometry:
+    """A file-less transformer that rearranges pixels.
+
+    ``swaps_axes`` is True when the output is (W, H) of the stored frame. ``apply``
+    returns a negative-stride or transposed VIEW, deliberately not materialised:
+    every caller performs exactly one widening copy into float32 (``result[i] =
+    img``, ``np.copyto``, ``astype``), which absorbs any source strides, and none
+    of them mutates the returned array. On a 90 degree view that copy costs about
+    68 ms more per 5120 x 5120 frame (rotation-shape REPORT C6), accepted for now.
+    """
+
+    label: str
+    swaps_axes: bool
+    apply: Callable[[np.ndarray], np.ndarray]
+
+
+# In LaVision's application order.
+_CORRECTIONS: Dict[str, _Correction] = {
+    "intensity-correction-1": _Correction(
+        "Intensity correction 1", "scmos-1", _scmos_correction_1
+    ),
+    "dark-image-subtraction": _Correction(
+        "Dark image subtraction", "dark", _subtract_clamped
+    ),
+    "background-subtraction": _Correction(
+        "Background subtraction", "bgnd", _subtract_clamped
+    ),
+}
+
+_GEOMETRIES: Dict[str, _Geometry] = {
+    "rotate-180": _Geometry("Rotation by 180", False, lambda x: x[::-1, ::-1]),
+    "vertical-mirror": _Geometry("Vertical mirroring", False, lambda x: x[::-1]),
+    # LaVision's spelling. The correctly spelled id opens 0 buffers in lvpyio,
+    # so it is not matched (it is refused as unknown).
+    "horinzontal-mirror": _Geometry(
+        "Horizontal mirroring", False, lambda x: x[:, ::-1]
+    ),
+    # Clockwise as displayed with row 0 at the top: the sensor's top-left pixel
+    # lands top-right. np.rot90 turns from axis 0 towards axis 1, so k=-1.
+    "rotate-cw-90": _Geometry(
+        "Clockwise rotation by 90", True, lambda x: np.rot90(x, -1)
+    ),
+    "rotate-ccw-90": _Geometry(
+        "Counterclockwise rotation by 90", True, lambda x: np.rot90(x, 1)
+    ),
+    # Rotate, then mirror rows: np.rot90(x, -1)[::-1] is x[::-1, ::-1].T.
+    "rotate-cw-90-vertical-mirror": _Geometry(
+        "Clockwise rotation by 90 plus vertical mirror",
+        True,
+        lambda x: x[::-1, ::-1].T,
+    ),
+    # np.rot90(x, 1)[::-1] is x.T.
+    "rotate-ccw-90-vertical-mirror": _Geometry(
+        "Counterclockwise rotation by 90 plus vertical mirror", True, lambda x: x.T
+    ),
+}
+
+# Known DaVis ids that are refused when their stream is read: lvpyio opens no
+# synthetic recording carrying any of them, so there is no oracle for their
+# effect (01-lavision-readers REPORT B3). id: DaVis label.
+_REFUSED_TRANSFORMERS: Dict[str, str] = {
+    "white-image-correction": "White image subtraction",
+    "add-offset": "Add fixed pixel offset",
+    "image-intensity-correction-2": "Intensity correction 2",
+}
+
+# Position of each id in a stream's transformer tuple. A refused id never runs
+# (its stream is refused first), so where it sits among the others is moot.
+_APPLICATION_RANK: Dict[str, int] = {
+    tid: rank
+    for rank, tid in enumerate([*_CORRECTIONS, *_REFUSED_TRANSFORMERS, *_GEOMETRIES])
+}
 
 # StreamSet.xml is the companion folder's manifest. ReaderInfo nodes declare each
 # file group by FilePrefix and bind it to a frame-stream index through
@@ -548,82 +697,120 @@ def _discover_streams(set_dir: Path, root: Optional[ET.Element]) -> List[_Stream
     return _streams_from_manifest(set_dir, root, frame_readers)
 
 
-def _parse_stream_transformers(set_dir: Path, root: Optional[ET.Element]) -> dict:
-    """Map frame-stream index to its declared correction, from StreamSet.xml.
+def _parse_stream_transformers(
+    set_dir: Path, root: Optional[ET.Element]
+) -> Dict[int, Tuple[StreamTransformer, ...]]:
+    """Map frame-stream index to its declared transformers, from StreamSet.xml.
 
-    DaVis declares each correction as, for example::
+    DaVis declares each transformer as, for example::
 
         <Transformer ID="dark-image-subtraction" Label="Dark image subtraction"
                      FilePrefix="Transformer0" MinDaVisVersion="10.2.0">
             <ContentPurpose IsAssociatedToFrames="true" StartFrame="0" EndFrame="0"/>
         </Transformer>
 
-    Unimplemented ids are recorded here and refused when THAT stream is read;
-    structural faults are refused now, because a correction that cannot be bound
-    to a stream cannot be deferred to one.
+    A stream may carry each correction once and at most one geometry. They are
+    returned in LaVision's application order, not the manifest's. Refused ids
+    are recorded here and refused when THAT stream is read; everything else that
+    is wrong is refused now.
 
     Args:
         set_dir: The .set companion directory.
         root: Parsed StreamSet.xml, or None when the recording has none.
 
     Returns:
-        dict: {stream index: StreamTransformer}. Empty when nothing is declared.
+        {stream index: transformers in application order}. Empty when nothing is
+        declared.
 
     Raises:
-        ValueError: If a transformer's binding is missing, spans several streams,
-            or a stream is given more than one transformer.
-        FileNotFoundError: If a declared dark image is not on disk.
+        ValueError: If a transformer's binding is missing or spans several
+            streams; its id is not one of the 13 DaVis ids (the whole recording
+            is refused: cameras are mapped to streams by output shape, and this
+            stream's is unknown); a stream declares one id twice or two
+            geometries (lvpyio silently keeps only the last of each, and this
+            reader drops nothing silently).
+        FileNotFoundError: If a declared correction image is not on disk.
     """
     if root is None:
         return {}
     stream_xml = set_dir / "StreamSet.xml"
 
-    transformers: dict = {}
+    declared: Dict[int, List[Tuple[StreamTransformer, str]]] = {}
     for node in root.iter("Transformer"):
         tid = (node.get("ID") or "").strip()
         label = (node.get("Label") or "").strip()
         prefix = (node.get("FilePrefix") or "").strip()
         stream_index = _bound_stream_index(node, f"Transformer '{prefix}'", stream_xml)
 
-        dark_path = None
-        if tid == "dark-image-subtraction":
-            dark_path = set_dir / f"{prefix}-dark.im7"
-            if not dark_path.exists():
-                raise FileNotFoundError(
-                    f"{stream_xml.name} declares dark-image subtraction for frame "
-                    f"stream {stream_index}, but {dark_path.name} is missing from "
-                    f"{set_dir}. Copy the complete companion folder -- the "
-                    f"correction is part of the recording, not an optional extra."
-                )
-
-        if stream_index in transformers:
-            # Which order DaVis applies two corrections in is not knowable from the
-            # file, and dark subtraction and rotation do not commute, so neither
-            # order is guessed.
-            other = transformers[stream_index]
+        if tid not in _APPLICATION_RANK:
             raise ValueError(
-                f"{stream_xml.name} declares two transformers for frame stream "
-                f"{stream_index}: '{other.id}' and '{tid}'. This reader applies at "
-                f"most one correction per stream and will not choose an order."
+                f"{stream_xml.name} declares the transformer '{tid}' (DaVis label "
+                f"'{label}', FilePrefix '{prefix}') for frame stream {stream_index}. "
+                f"It is not one of the 13 DaVis transformer ids PIVTOOLs knows, so "
+                f"its effect on the frame, and on the frame's shape, is unknown. "
+                f"Cameras are mapped to streams by shape, so no camera of this "
+                f"recording can be read. PIVTOOLs applies: "
+                f"{', '.join([*_CORRECTIONS, *_GEOMETRIES])}."
             )
 
-        transformers[stream_index] = StreamTransformer(
-            id=tid, label=label, dark_path=dark_path
+        on_stream = declared.setdefault(stream_index, [])
+        for other, other_prefix in on_stream:
+            if other.id == tid:
+                raise ValueError(
+                    f"{stream_xml.name} declares '{tid}' twice for frame stream "
+                    f"{stream_index} (FilePrefix '{other_prefix}' and '{prefix}'). "
+                    f"lvpyio applies only the later declaration and drops the other "
+                    f"without a message; PIVTOOLs refuses rather than drop one."
+                )
+            if tid in _GEOMETRIES and other.id in _GEOMETRIES:
+                raise ValueError(
+                    f"{stream_xml.name} declares two geometric transformers for "
+                    f"frame stream {stream_index}: '{other.id}' (FilePrefix "
+                    f"'{other_prefix}') and '{tid}' (FilePrefix '{prefix}'). lvpyio "
+                    f"applies only the one listed last and drops the other without "
+                    f"a message; PIVTOOLs refuses rather than drop one."
+                )
+
+        correction_path = None
+        correction = _CORRECTIONS.get(tid)
+        if correction is not None:
+            correction_path = set_dir / f"{prefix}-{correction.suffix}.im7"
+            if not correction_path.exists():
+                raise FileNotFoundError(
+                    f"{stream_xml.name} declares '{tid}' ({correction.label}) for "
+                    f"frame stream {stream_index}, but {correction_path.name} is "
+                    f"missing from {set_dir}. Copy the complete companion folder -- "
+                    f"the correction is part of the recording, not an optional extra."
+                )
+
+        on_stream.append(
+            (
+                StreamTransformer(id=tid, label=label, correction_path=correction_path),
+                prefix,
+            )
         )
 
-    return transformers
+    return {
+        index: tuple(
+            sorted(
+                (tf for tf, _prefix in found), key=lambda tf: _APPLICATION_RANK[tf.id]
+            )
+        )
+        for index, found in declared.items()
+    }
 
 
-def _load_dark(dark_path_str: str) -> np.ndarray:
-    """Load one Transformer{N}-dark.im7 as uint16, cached and revalidated by mtime.
+def _load_correction(path_str: str) -> np.ndarray:
+    """Load one correction image as uint16, cached and revalidated by mtime.
 
-    A dark image is the full sensor -- 37 MB as uint16 for a 5312x3528 camera --
-    so the cache trades memory for not re-reading it on every pair, which would
-    otherwise dominate read time. The cache is per process, which is what Dask
-    workers need.
+    The dark (``-dark.im7``), background (``-bgnd.im7``) and sCMOS
+    (``-scmos-1.im7``) maps are each the full sensor -- 37 MB as uint16 for a
+    5312x3528 camera -- so the cache trades memory for not re-reading one on
+    every pair, which would otherwise dominate read time. The cache is per
+    process, which is what Dask workers need.
 
     The mtime is part of the cache key, not decoration. Keying on the path alone
-    means re-exporting a recording leaves the previous dark image cached in a
+    means re-exporting a recording leaves the previous image cached in a
     long-lived process -- the Flask GUI outlives many recordings -- and every
     subsequent read then subtracts the wrong pixels with nothing to indicate it.
     Silently wrong data is the one outcome this reader refuses everywhere else, so
@@ -631,30 +818,30 @@ def _load_dark(dark_path_str: str) -> np.ndarray:
     of the LRU normally; it is never served again.
 
     Args:
-        dark_path_str: Path to the dark .im7, as a string so it is hashable.
+        path_str: Path to the correction .im7, as a string so it is hashable.
 
     Returns:
-        np.ndarray: (H, W) uint16 dark image.
+        np.ndarray: (H, W) uint16 correction image, in sensor coordinates.
 
     Raises:
-        ValueError: If the dark image is not 2D, or is not integer counts in
-            [0, 65535] -- the range the uint16 subtraction below assumes.
-        OSError: If the dark image is missing. _parse_stream_transformers already
+        ValueError: If the image is not 2D, or is not integer counts in
+            [0, 65535] -- the range the uint16 corrections assume.
+        OSError: If the image is missing. _parse_stream_transformers already
             checks existence at parse time, so reaching this means it was deleted
             mid-session.
     """
-    return _load_dark_cached(dark_path_str, Path(dark_path_str).stat().st_mtime)
+    return _load_correction_cached(path_str, Path(path_str).stat().st_mtime)
 
 
 @lru_cache(maxsize=4)
-def _load_dark_cached(dark_path_str: str, mtime: float) -> np.ndarray:
-    """Cached body of :func:`_load_dark`. Call that, not this.
+def _load_correction_cached(path_str: str, mtime: float) -> np.ndarray:
+    """Cached body of :func:`_load_correction`. Call that, not this.
 
     ``mtime`` is a cache key only and is deliberately unused in the body: a changed
-    dark image produces a different key and therefore a fresh read.
+    image produces a different key and therefore a fresh read.
 
     Size is a compromise, not a fit. Four entries hold two cameras' worth of
-    pre-paired streams (~150 MB). A rig with three or more dark-bearing cameras
+    pre-paired streams (~150 MB). A rig with three or more corrected cameras
     whose worker interleaves them will evict and re-read; the alk235 recordings
     have ten such streams, so sizing to hold them all would cost ~370 MB per
     worker. Raise this only with a measurement showing the re-reads matter more
@@ -662,28 +849,29 @@ def _load_dark_cached(dark_path_str: str, mtime: float) -> np.ndarray:
     """
     from .im7_reader import read_im7
 
-    _header, pixels, _scales = read_im7(dark_path_str)
-    dark = np.squeeze(np.asarray(pixels))
-    if dark.ndim != 2:
+    _header, pixels, _scales = read_im7(path_str)
+    image = np.squeeze(np.asarray(pixels))
+    if image.ndim != 2:
         raise ValueError(
-            f"Dark image {Path(dark_path_str).name} is {dark.ndim}-dimensional "
-            f"(shape {dark.shape}); expected a single 2D frame."
+            f"Correction image {Path(path_str).name} is {image.ndim}-dimensional "
+            f"(shape {image.shape}); expected a single 2D frame."
         )
 
     # read_im7 hands back float32 for a WORD buffer, so the integrality check is
-    # needed -- but only for a float dtype. Running `dark == np.floor(dark)` on an
-    # integer array promotes a 19 Mpx frame to float64 (~150 MB) to learn nothing.
-    lo, hi = dark.min(), dark.max()
-    integral = np.issubdtype(dark.dtype, np.integer) or bool(
-        np.all(dark == np.floor(dark))
+    # needed -- but only for a float dtype. Running `image == np.floor(image)` on
+    # an integer array promotes a 19 Mpx frame to float64 (~150 MB) to learn
+    # nothing.
+    lo, hi = image.min(), image.max()
+    integral = np.issubdtype(image.dtype, np.integer) or bool(
+        np.all(image == np.floor(image))
     )
-    if not integral or lo < 0 or hi > np.iinfo(np.uint16).max:
+    if not integral or lo < 0 or hi > _UINT16_MAX:
         raise ValueError(
-            f"Dark image {Path(dark_path_str).name} is not integer counts in "
-            f"[0, 65535] (min {lo}, max {hi}, dtype {dark.dtype}). The uint16 "
-            f"subtraction below would wrap and silently return wrong pixels."
+            f"Correction image {Path(path_str).name} is not integer counts in "
+            f"[0, 65535] (min {lo}, max {hi}, dtype {image.dtype}). The uint16 "
+            f"correction would wrap and silently return wrong pixels."
         )
-    return dark.astype(np.uint16)
+    return image.astype(np.uint16)
 
 
 # ---------------------------------------------------------------------------
@@ -1015,7 +1203,7 @@ def _parse_set(set_path: Union[str, Path]) -> SetInfo:
                     f"from {set_dir}. Copy the complete companion folder."
                 )
 
-        width, height, codec, entries = _parse_ims_index(
+        stored_width, stored_height, codec, entries = _parse_ims_index(
             index_path, src.prefix, src.frames_per_image
         )
         n_ent = len(entries)
@@ -1037,14 +1225,13 @@ def _parse_set(set_path: Union[str, Path]) -> SetInfo:
                 index_path=index_path,
                 decoder=decoder,
                 codec=codec,
-                width=width,
-                height=height,
+                stored_shape=(stored_height, stored_width),
                 n_entries=n_ent,
                 scale_slope=slope,
                 scale_offset=offset,
                 scale_unit=unit,
                 entries=entries,
-                transformer=transformers.get(src.index),
+                transformers=transformers.get(src.index, ()),
             )
         )
 
@@ -1154,18 +1341,19 @@ def _read_single_image(
         )
 
     # Refuse before the 37 MB read, not after it. Per stream: a container whose
-    # other streams carry only implemented corrections stays readable.
-    tf = frame_info.transformer
-    if tf is not None and tf.id not in _IMPLEMENTED_TRANSFORMERS:
-        container = frame_info.data_path.parent.name
-        raise ValueError(
-            f"Frame stream {frame_info.frame_idx} of {container} "
-            f"declares the stream transformer '{tf.id}' (DaVis label '{tf.label}'), "
-            f"which PIVTOOLs does not implement. Skipping it would return different "
-            f"pixels from DaVis for the same recording. PIVTOOLs implements: "
-            f"{', '.join(_IMPLEMENTED_TRANSFORMERS)}. Other streams of this "
-            f"recording are unaffected."
-        )
+    # other streams carry only implemented transformers stays readable.
+    for tf in frame_info.transformers:
+        if tf.id in _REFUSED_TRANSFORMERS:
+            raise ValueError(
+                f"Frame stream {frame_info.frame_idx} of "
+                f"{frame_info.data_path.parent.name} declares the stream transformer "
+                f"'{tf.id}' (DaVis label '{tf.label}'). It is a DaVis transformer "
+                f"whose effect PIVTOOLs has no measurement of (lvpyio opens no test "
+                f"recording carrying it), so it is not applied, and skipping it "
+                f"would return different pixels from DaVis for the same recording. "
+                f"PIVTOOLs applies: {', '.join([*_CORRECTIONS, *_GEOMETRIES])}. "
+                f"Other streams of this recording are unaffected."
+            )
 
     entry = frame_info.entries[entry_idx]
     with open(frame_info.data_path, "rb") as f:
@@ -1178,46 +1366,41 @@ def _read_single_image(
             f"got {len(raw)}. File may be truncated."
         )
 
-    img = _decode_pixels(raw, frame_info.decoder, frame_info.width, frame_info.height)
+    # Decoded in sensor coordinates: the index header's stored shape.
+    stored_h, stored_w = frame_info.stored_shape
+    img = _decode_pixels(raw, frame_info.decoder, stored_w, stored_h)
+    return _apply_transformers(img, frame_info)
 
-    if tf is None:
-        return img
 
-    if tf.id == "rotate-180":
-        # A negative-stride view, deliberately not materialised: every caller
-        # performs exactly one full-frame widening copy into float32 (result[i] =
-        # img / np.copyto / astype), which absorbs arbitrary source strides for
-        # free, and none of them mutates the returned array (the raw-16-bit path
-        # already returns a read-only frombuffer view on that same contract).
-        # Verified bit-exact against lvpyio 1.3.1 on real entries (2026-08-24).
-        return img[::-1, ::-1]
+def _apply_transformers(img: np.ndarray, frame_info: IMSFrameInfo) -> np.ndarray:
+    """Apply a stream's transformers to its decoded sensor frame.
 
-    # Dark-image subtraction, clamped at zero -- DaVis and lvpyio both floor the
-    # result, and on this data ~0.001% of pixels would otherwise go negative.
-    # Verified bit-exact against lvpyio 1.3.1 across three frame streams and two
-    # entries of E:\Softwarex\alk235\images\loop=0.set (2026-08-22).
-    dark = _load_dark(str(tf.dark_path))
-    if dark.shape != img.shape:
-        raise ValueError(
-            f"Dark image {tf.dark_path.name} is {dark.shape} but frame "
-            f"stream {frame_info.frame_idx} is {img.shape}. The dark image does "
-            f"not belong to this recording."
-        )
-    # The uint16 subtraction wraps where dark > img, so the wrapped elements are
-    # then zeroed in place -- they never reach the output. Writing into the
-    # subtraction's own result keeps this to one full-frame allocation plus the
-    # mask.
-    #
-    # Not done in place on `img`: _decode_raw16 returns a np.frombuffer VIEW of
-    # the packed bytes, which is read-only, so `np.subtract(img, dark, out=img)`
-    # raises "output array is read-only" for raw-16-bit while working fine for
-    # mono-12p (which builds a fresh array). Measured on a 5312x3528 frame:
-    # 23.0 ms here, against 42.9 ms for the equivalent
-    # `np.where(img > dark, img - dark, 0).astype(np.uint16)`, which allocates
-    # four full-frame temporaries. That was 35% of a frame read.
-    out = img - dark
-    np.copyto(out, 0, where=img <= dark)
-    return out
+    ``frame_info.transformers`` is already in LaVision's order (parse sorts it):
+    corrections in sensor coordinates, each clipped, then at most one geometry,
+    which may return a view (see :class:`_Geometry`).
+
+    Raises:
+        ValueError: If a correction image is not the stream's stored (sensor)
+            shape. lvpyio checks only the pixel count and reads a transposed
+            image in the sensor raster; DaVis stores corrections in sensor shape
+            (transformer-order REPORT Q1b), so any other shape is refused.
+    """
+    for tf in frame_info.transformers:
+        correction = _CORRECTIONS.get(tf.id)
+        if correction is None:
+            img = _GEOMETRIES[tf.id].apply(img)
+            continue
+        image = _load_correction(str(tf.correction_path))
+        if image.shape != frame_info.stored_shape:
+            raise ValueError(
+                f"Correction image {tf.correction_path.name} ('{tf.id}') is "
+                f"{image.shape} but frame stream {frame_info.frame_idx} stores "
+                f"{frame_info.stored_shape} (sensor rows, columns). DaVis stores "
+                f"corrections in sensor shape, so this image does not belong to "
+                f"this recording."
+            )
+        img = correction.apply(img, image)
+    return img
 
 
 # ---------------------------------------------------------------------------
@@ -1255,7 +1438,7 @@ def _apply_scale_inplace(arr: np.ndarray, fi: IMSFrameInfo) -> None:
 # IMSIndexEntry objects, and each Dask worker gets its own copy of this dict, so an
 # unbounded cache would let a long time-resolved run pin hundreds of MB per worker.
 # Four covers a multi-loop acquisition's working set. Same reasoning, and the same
-# "raise it only with a measurement" caveat, as _load_dark's lru_cache above.
+# "raise it only with a measurement" caveat, as _load_correction's lru_cache above.
 _SET_INFO_CACHE_SIZE = 4
 _set_info_cache: "OrderedDict[str, Tuple[Tuple[float, float], SetInfo]]" = OrderedDict()
 
@@ -1409,9 +1592,11 @@ def _size(width: int, height: int) -> str:
 
 
 def _stream_table(info: SetInfo) -> str:
-    """One-line stream listing for error messages."""
+    """One-line stream listing for error messages: output size, decoder, transformers."""
     return "; ".join(
-        f"{f.frame_idx}: {_size(f.width, f.height)} {f.decoder}" for f in info.frames
+        f"{f.frame_idx}: {_size(f.shape[1], f.shape[0])} {f.decoder}"
+        + "".join(f" {tf.id}" for tf in f.transformers)
+        for f in info.frames
     )
 
 
@@ -1442,7 +1627,9 @@ def set_camera_streams(
     if cached is not None:
         return list(cached)
 
-    shapes = [(f.height, f.width) for f in info.frames]
+    # Output shapes: an A/B pair must match as read, after the transformers, and
+    # a rotated stream must not pair with an unrotated one of equal stored shape.
+    shapes = [f.shape for f in info.frames]
     splits = valid_stream_splits(shapes, num_cameras)
     if len(splits) == 1:
         info.stream_splits[num_cameras] = splits[0]
@@ -1499,7 +1686,8 @@ def camera_streams(
         frame = info.frames[streams[0]]
         raise SetPairingError(
             f"Camera {camera} has one stream ({frame.frame_idx}: "
-            f"{_size(frame.width, frame.height)}) in {name}, but A/B pairing needs two. "
+            f"{_size(frame.shape[1], frame.shape[0])}) in {name}, but A/B pairing "
+            f"needs two. "
             f"Deselect camera {camera} in the PIV camera selection."
         )
     return streams
@@ -1574,19 +1762,19 @@ def read_set_pair(
     # Streams legitimately differ in shape across cameras (alk235's five span
     # 3472-3536 rows). The resolver only pairs equal shapes, so this guards a
     # caller handing in a hand-built tuple rather than a numpy broadcast error.
-    if (fi_a.height, fi_a.width) != (fi_b.height, fi_b.width):
+    if fi_a.shape != fi_b.shape:
         raise ValueError(
-            f"Frame streams {frame_idx_a} ({fi_a.height}x{fi_a.width}) and "
-            f"{frame_idx_b} ({fi_b.height}x{fi_b.width}) differ in shape, so they "
-            f"are not one camera's A/B pair."
+            f"Frame streams {frame_idx_a} ({fi_a.shape[0]}x{fi_a.shape[1]}) and "
+            f"{frame_idx_b} ({fi_b.shape[0]}x{fi_b.shape[1]}) differ in shape, so "
+            f"they are not one camera's A/B pair."
         )
 
     if out is None:
-        result = np.empty((2, fi_a.height, fi_a.width), dtype=np.float32)
+        result = np.empty((2, *fi_a.shape), dtype=np.float32)
     else:
         result = check_out(
             out,
-            (2, fi_a.height, fi_a.width),
+            (2, *fi_a.shape),
             f"read_set_pair streams {frame_idx_a}+{frame_idx_b} of {Path(set_path).name}",
         )
 
@@ -1658,10 +1846,10 @@ def read_set_frame(
     if out is None:
         result = None
     else:
-        if out.shape != (fi.height, fi.width):
+        if out.shape != fi.shape:
             raise ValueError(
                 f"out has shape {out.shape}, but frame stream {fi.frame_idx} of "
-                f"{Path(set_path).name} is {(fi.height, fi.width)}."
+                f"{Path(set_path).name} reads as {fi.shape}."
             )
         if out.dtype != np.float32:
             raise ValueError(

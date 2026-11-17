@@ -879,8 +879,9 @@ class Config:
                 stream_idx = camera_streams(
                     file_path, camera_num, self.camera_count, pair=False, set_info=info
                 )[0]
-                fi = info.frames[stream_idx]
-                shape = (fi.height, fi.width)
+                # Output shape, after the stream's transformers: a 90 degree
+                # rotation reads as (W, H) of the index header.
+                shape = info.frames[stream_idx].shape
                 logging.debug(f"Detected image shape: {shape}")
                 return shape
             elif img_type == "lavision_im7":

@@ -595,8 +595,8 @@ def set_stream_infos(set_path: Path, camera_count: int) -> List[StreamInfo]:
         StreamInfo(
             index=frame.frame_idx,
             prefix=frame.data_path.name[: -len(_STREAM_DATA_SUFFIX)],
-            width=frame.width,
-            height=frame.height,
+            width=frame.shape[1],
+            height=frame.shape[0],
             decoder=frame.decoder,
             camera=camera_of.get(frame.frame_idx),
         )
@@ -885,7 +885,7 @@ def _count_suggestions(
     default keeps every candidate (the configured count does not resolve).
     """
     ctx = inp.ctx
-    shapes = [(f.height, f.width) for f in info.frames]
+    shapes = [f.shape for f in info.frames]
     candidates = [
         (k, split)
         for k, split in _stream_candidates(shapes, ctx.pair_reader)
