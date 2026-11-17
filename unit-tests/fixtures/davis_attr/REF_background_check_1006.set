@@ -1,0 +1,13 @@
+// set file <recording.set> created by DaVis
+
+#GROUP Sets
+SetType = 4352;
+SetGroups = "";
+SetTime = "Tue Oct 06 08:34:35 2026";
+SetComments = "Recording rate statistics of 150 images: \n   Average: 0.5 Hz\n   Min: 0.5 Hz\n   Max: 0.5 Hz\n";
+SetStart = 1;
+SetInc = 1;
+SetSourceSet = "";
+SetViewCallback = "";
+SetLoadCallback = "";
+SetIdentifier = "StreamSet";
