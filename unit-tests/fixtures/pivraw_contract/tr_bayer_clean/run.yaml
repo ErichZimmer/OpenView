@@ -30,8 +30,8 @@ config:
 pattern:
   mode: time_resolved
   rate_hz: 25.0
-started_at: '2026-11-17T16:24:21.416430+00:00'
-stopped_at: '2026-11-17T16:24:21.545328+00:00'
+started_at: '2026-11-17T19:36:02.344156+00:00'
+stopped_at: '2026-11-17T19:36:02.474600+00:00'
 trigger: daq
 simulated: true
 dark: null
