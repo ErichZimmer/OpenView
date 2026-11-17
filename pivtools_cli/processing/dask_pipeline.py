@@ -25,6 +25,7 @@ from scipy.ndimage import median_filter as scipy_median
 from pivtools_cli.piv.piv_backend.factory import make_correlator_backend
 from pivtools_cli.processing.unique_scatter import scatter_unique
 from pivtools_core.config import Config
+from pivtools_core.image_handling.load_images import MaskError
 
 logger = logging.getLogger(__name__)
 
@@ -216,18 +217,23 @@ def apply_all_filters_slim(
 
     # 2. Apply pixel mask (zero masked regions) - now in-place
     if pixel_mask is not None:
-        if pixel_mask.shape == (H, W):
-            block[:, :, pixel_mask] = 0
-            logger.debug(f"Applied pixel mask: {np.sum(pixel_mask)} pixels zeroed")
-            if save_intermediate:
-                _save_intermediate_frame(
-                    block, save_dir, f"{filter_idx:02d}_after_pixel_mask"
-                )
-                filter_idx += 1
-        else:
-            logger.warning(
-                f"Pixel mask shape {pixel_mask.shape} != image shape ({H}, {W})"
+        if pixel_mask.shape != (H, W):
+            # load_mask_for_camera refuses a wrong-size mask by name, so this
+            # only fires when a caller passes a mask that did not come from it.
+            mask_text = " x ".join(str(n) for n in pixel_mask.shape)
+            raise MaskError(
+                f"The pixel mask is {mask_text} pixels (height x width) but the "
+                f"images it is applied to are {H} x {W}. A mask is never "
+                f"stretched to fit. Redraw the mask on this camera's images in "
+                f"the Masking tab."
             )
+        block[:, :, pixel_mask] = 0
+        logger.debug(f"Applied pixel mask: {np.sum(pixel_mask)} pixels zeroed")
+        if save_intermediate:
+            _save_intermediate_frame(
+                block, save_dir, f"{filter_idx:02d}_after_pixel_mask"
+            )
+            filter_idx += 1
 
     # 3. Apply filters in user-defined order (spatial and temporal interleaved)
     for spec in filter_specs:
