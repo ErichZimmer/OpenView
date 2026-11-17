@@ -23,7 +23,10 @@ The rules (:data:`RULES`, applied by :func:`_compare_camera`):
   must agree on ``view_rotation``, ``dark_subtracted``, ``pixel_rule`` and
   ``camera_serial``. ``dark_id`` is never compared: a calibration is taken at
   another exposure with its own dark.
-- ``.set`` calibration against ``.set`` PIV: each camera's geometry must agree.
+- ``.set`` calibration against ``.set`` PIV: each recording is split into
+  cameras by its own labels, camera k must be the same physical camera
+  (``Acq.Camera.ID``) on both, and its geometry must agree. When either has no
+  labels, camera k is taken as camera k, with a warning saying so.
 - DaVis against plain, either way: applied, nothing compared, with a warning
   returned for the apply result.
 - plain against plain: applied, nothing to compare.
@@ -59,7 +62,12 @@ from pivtools_core.image_handling.readers.pivraw_reader import (
     read_pivraw_header,
     read_pivraw_run_file,
 )
+from pivtools_core.image_handling.readers.davis_attr import (
+    LabelledCamera,
+    camera_list_text,
+)
 from pivtools_core.image_handling.readers.set_reader import (
+    SetConfigError,
     read_set_info,
     set_camera_streams,
     stream_geometry,
@@ -104,12 +112,17 @@ class _AppFrame:
 
 @dataclass(frozen=True)
 class _PivCamera:
-    """One PIV camera's frame facts. ``frame`` for app runs, ``geometry`` for DaVis."""
+    """One PIV camera's frame facts. ``frame`` for app runs, ``geometry`` for DaVis.
+
+    ``identity``: a DaVis camera as its recording's labels name it, None
+    without labels.
+    """
 
     kind: str
     where: str
     frame: Optional[_AppFrame] = None
     geometry: Optional[str] = None
+    identity: Optional[LabelledCamera] = None
 
 
 @dataclass(frozen=True)
@@ -117,12 +130,14 @@ class _CalibrationCamera:
     """One calibration camera's frame facts.
 
     ``images`` (noted): each image with its note's path, None when it has none.
-    ``geometry`` (davis). ``why_plain``: what the calibration is, for a refusal.
+    ``geometry`` and ``identity`` (davis), as on :class:`_PivCamera`.
+    ``why_plain``: what the calibration is, for a refusal.
     """
 
     kind: str
     images: Tuple[Tuple[Path, Optional[Path]], ...] = ()
     geometry: Optional[str] = None
+    identity: Optional[LabelledCamera] = None
     why_plain: str = ""
 
 
@@ -154,22 +169,52 @@ def _pivraw_camera(source: Path, image_format: str, camera: int) -> _PivCamera:
     )
 
 
-def _set_geometry(set_path: Path, camera: int, num_cameras: int) -> str:
-    """The geometry transformer of one camera of a .set, :data:`NO_GEOMETRY` when none.
+def _set_camera(
+    set_path: Path, camera: int, num_cameras: int, own_count: bool
+) -> Tuple[str, Optional[LabelledCamera]]:
+    """(geometry, identity) of one camera of a .set recording.
+
+    The geometry is the camera's geometry transformer, :data:`NO_GEOMETRY` when
+    none. The identity is the camera as the recording's own labels name it,
+    None for a recording without labels.
+
+    Args:
+        set_path: The .set file.
+        camera: 1-based camera number.
+        num_cameras: The camera count of the config the recording is read
+            with. It splits an unlabelled recording.
+        own_count: True for a calibration recording: a labelled one is split
+            by its own labels, whatever ``num_cameras`` says, so a calibration
+            of 2 cameras serves a PIV rig of 4. False for the PIV recording,
+            whose labels must agree with ``num_cameras``.
 
     Raises:
-        ValueError: The camera's streams carry different geometries, or a
-            transformer PIVTOOLs does not know.
+        ValueError: The recording holds no camera ``camera``, the camera count
+            does not fit it (``SetConfigError``), the camera's streams carry
+            different geometries, or a transformer PIVTOOLs does not know.
     """
     info = read_set_info(set_path)
-    streams = set_camera_streams(set_path, num_cameras, info)[camera - 1]
+    count = len(info.cameras) if own_count and info.cameras else num_cameras
+    split = set_camera_streams(set_path, count, info)
+    if not 1 <= camera <= len(split):
+        listing = (
+            f" by its own camera labels: {camera_list_text(info.cameras)}"
+            if info.cameras
+            else ""
+        )
+        raise SetConfigError(
+            f"{set_path.name} holds {len(split)} camera(s){listing}. It has no "
+            f"camera {camera}."
+        )
+    streams = split[camera - 1]
     found = {stream_geometry(info.frames[s]) or NO_GEOMETRY for s in streams}
     if len(found) != 1:
         raise ValueError(
             f"{set_path.name}: the streams of camera {camera} carry different "
             f"geometries ({', '.join(sorted(found))})."
         )
-    return found.pop()
+    identity = None if info.cameras is None else info.cameras[camera - 1]
+    return found.pop(), identity
 
 
 def _piv_camera(full_cfg, source: Path, camera: int) -> _PivCamera:
@@ -178,10 +223,11 @@ def _piv_camera(full_cfg, source: Path, camera: int) -> _PivCamera:
     if image_type == "pivraw":
         return _pivraw_camera(source, full_cfg.image_format[0], camera)
     if image_type == "lavision_set":
+        geometry, identity = _set_camera(
+            source, camera, full_cfg.camera_count, own_count=False
+        )
         return _PivCamera(
-            kind=DAVIS,
-            where=source.name,
-            geometry=_set_geometry(source, camera, full_cfg.camera_count),
+            kind=DAVIS, where=source.name, geometry=geometry, identity=identity
         )
     if image_type == "standard":
         folder = full_cfg.get_camera_folder(camera)
@@ -213,6 +259,9 @@ def _calibration_camera(
 
     ``image`` is the source's settings ``image`` block, None when it has no
     settings (an image-less model, or a source never opened in the GUI).
+    ``num_cameras`` is the PIV config's camera count: it places a camera's
+    folder, and splits a ``.set`` recording without camera labels, as the
+    calibration loader read it. A labelled recording is split by its own labels.
     """
     if image is None:
         return _CalibrationCamera(
@@ -221,9 +270,10 @@ def _calibration_camera(
     image_type = image["image_type"]
     camera_path = build_calibration_camera_path(source, image, camera, num_cameras)
     if image_type == "lavision_set":
-        return _CalibrationCamera(
-            kind=DAVIS, geometry=_set_geometry(camera_path, camera, num_cameras)
+        geometry, identity = _set_camera(
+            camera_path, camera, num_cameras, own_count=True
         )
+        return _CalibrationCamera(kind=DAVIS, geometry=geometry, identity=identity)
     if image_type != "standard":
         return _CalibrationCamera(
             kind=PLAIN,
@@ -315,6 +365,14 @@ _KIND_LABEL = {
 }
 
 
+# COMPARE_GEOMETRY when either recording has no camera labels.
+IDENTITY_NOT_COMPARED_WARNING = (
+    "The calibration recording or the PIV recording carries no camera labels, so "
+    "camera k of the calibration is taken to be camera k of the PIV recording "
+    "without checking that they are the same physical camera."
+)
+
+
 def frames_not_compared_warning(cal_kind: str, piv_kind: str) -> str:
     """The warning an applied-but-uncompared calibration carries in its result."""
     return (
@@ -322,6 +380,39 @@ def frames_not_compared_warning(cal_kind: str, piv_kind: str) -> str:
         f"({_KIND_LABEL[piv_kind]}) carry no shared record of rotation or dark, so "
         "their pixel frames could not be compared."
     )
+
+
+def _compare_davis(
+    camera: int, cal: _CalibrationCamera, piv: _PivCamera
+) -> Tuple[List[str], Optional[str]]:
+    """(problems, warning) for one camera of a .set calibration against .set PIV.
+
+    With labels on both recordings, camera ``camera`` of each must be the same
+    physical camera (``Acq.Camera.ID``, which carries the serial), and then its
+    geometry must agree. Without labels on either, camera k is taken as camera
+    k and the warning says so.
+    """
+    problems = []
+    warning = None
+    if cal.identity is not None and piv.identity is not None:
+        if cal.identity.camera_id != piv.identity.camera_id:
+            problems.append(
+                f"camera {camera}: the calibration recording's camera {camera} is "
+                f"{cal.identity.camera_id}, the PIV recording's camera {camera} is "
+                f"{piv.identity.camera_id} ({piv.where}). A model of one camera "
+                "cannot calibrate another: order the calibration's cameras as the "
+                "PIV recording's"
+            )
+            return problems, None
+    else:
+        warning = IDENTITY_NOT_COMPARED_WARNING
+    if cal.geometry != piv.geometry:
+        problems.append(
+            f"camera {camera}: geometry transformer {cal.geometry} in the "
+            f"calibration recording, {piv.geometry} in the PIV recording "
+            f"({piv.where})"
+        )
+    return problems, warning
 
 
 def _compare_camera(
@@ -332,13 +423,7 @@ def _compare_camera(
     if rule == COMPARE_NOTES:
         return _compare_notes(camera, cal, piv), None
     if rule == COMPARE_GEOMETRY:
-        if cal.geometry != piv.geometry:
-            return [
-                f"camera {camera}: geometry transformer {cal.geometry} in the "
-                f"calibration recording, {piv.geometry} in the PIV recording "
-                f"({piv.where})"
-            ], None
-        return [], None
+        return _compare_davis(camera, cal, piv)
     if rule == APPLY:
         return [], None
     if rule == WARN:

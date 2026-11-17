@@ -1035,8 +1035,10 @@ TRIGGER_TOL_FRAC = 0.25
 # REPORT C9). Prototype ``pivraw_align.PHASE_MARGIN``, acquisition
 # ``export.AB_PHASE_MARGIN``.
 AB_PHASE_MARGIN = 0.2
-# Why a run cannot be aligned. The same names as the acquisition app's
+# Why a run cannot be aligned. The first seven are the acquisition app's
 # ``export.REASONS`` and the fixtures' ``must_raise:<reason>``.
+# ``run_file_count`` is this reader's own: run.yaml requests fewer triggers
+# than the cameras recorded, so the run.yaml is stale or another run's.
 ALIGNMENT_REASONS = (
     "inconsistent_files",
     "cameras_disagree",
@@ -1045,6 +1047,7 @@ ALIGNMENT_REASONS = (
     "camera_offset",
     "tr_interval",
     "ab_phase",
+    "run_file_count",
 )
 # The one pairing of a double-frame run, in recorded frames: A and B of each
 # trigger (the skip_frames preset).
@@ -1356,6 +1359,8 @@ def align_pivraw_run(
        time-resolved, the two frames of a pair are their triggers apart in host
        time; (c) double-frame, each camera's A/B phase on its own clock.
     4. Triggers run.yaml requested that no camera accounts for become a note.
+       Fewer requested than the cameras account for is refused: the run.yaml
+       is stale or another run's.
 
     Args:
         run_dir: The run folder (``Camera<k>.pivraw`` files and ``run.yaml``).
@@ -1468,17 +1473,21 @@ def align_pivraw_run(
         else:
             _check_tr_spacing(run_dir, cam, pairs_t, period_ns, trigger_source)
     unaccounted = requested - (last + 1)
+    if unaccounted < 0:
+        raise PivrawAlignmentError(
+            "run_file_count",
+            f"{run_dir}: run.yaml requested {requested} trigger(s) but the "
+            f"cameras account for {last + 1}: a camera cannot record a trigger "
+            "that was never requested, so this run.yaml is stale or belongs to "
+            "another run. Put the run's own run.yaml back beside its "
+            "Camera<k>.pivraw files.",
+        )
     if unaccounted > 0:
         notes.append(
             f"run.yaml requested {requested} trigger(s) and the cameras account "
             f"for {last + 1}: {unaccounted} trigger(s) were lost before the "
             "first or after the last delivered frame (the files cannot say "
             "which end)."
-        )
-    elif unaccounted < 0:
-        notes.append(
-            f"run.yaml requested {requested} trigger(s) but the cameras account "
-            f"for {last + 1}."
         )
 
     alignment = PivrawAlignment(

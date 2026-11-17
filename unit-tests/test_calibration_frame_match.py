@@ -27,6 +27,7 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from fixtures.lavision import (  # noqa: E402
+    build_labelled_set,
     build_raw16_set,
     make_set_config,
     write_manifest,
@@ -515,7 +516,80 @@ def _davis_plan(tmp_path: Path, cal_geometry, piv_geometry):
 
 
 def test_davis_matching_geometry_applies(tmp_path):
-    assert len(_davis_plan(tmp_path, "rotate-cw-90", "rotate-cw-90")) == 1
+    (unit,) = _davis_plan(tmp_path, "rotate-cw-90", "rotate-cw-90")
+    assert unit["frame_warnings"] == (_IDENTITY_NOT_COMPARED,)
+
+
+# Neither recording carries camera labels, so camera k is taken as camera k.
+_IDENTITY_NOT_COMPARED = (
+    "The calibration recording or the PIV recording carries no camera labels, so "
+    "camera k of the calibration is taken to be camera k of the PIV recording "
+    "without checking that they are the same physical camera."
+)
+
+# A PIV + PLIF rig scaled down: two double-frame cameras (serials 11, 12) and
+# two single-frame cameras (31, 32), as test_set_camera_identity builds it.
+_PIV_RIG_KEYS = [
+    ("Camera 1", "Camera.X: 11", "1A: X"),
+    ("Camera 1", "Camera.X: 11", "1B: X"),
+    ("Camera 2", "Camera.X: 12", "2A: X"),
+    ("Camera 2", "Camera.X: 12", "2B: X"),
+    ("Camera 3", "Camera.S: 31", "3: S"),
+    ("Camera 4", "Camera.S: 32", "4: S"),
+]
+
+
+def _labelled_calibration(tmp_path: Path, keys) -> Path:
+    """A labelled DaVis calibration recording, one single-frame stream per
+    camera, with a scale-factor model saved for each."""
+    cal_set = build_labelled_set(tmp_path, keys, name="cal")
+    save_settings(
+        cal_set,
+        {"image": {"image_format": cal_set.name, "image_type": "lavision_set"}},
+    )
+    for cam in range(1, len(keys) + 1):
+        REC.save_mono(
+            build_scale_factor_record(
+                camera=cam, origin_px=(0.0, 0.0), px_per_mm=10.0, dt=1.0
+            ),
+            REC.mono_model_dir_for_source(cal_set, cam, BOARD),
+        )
+    return cal_set
+
+
+def test_a_labelled_calibration_is_split_by_its_own_cameras(tmp_path):
+    """The calibration holds 2 cameras, the PIV recording 4: the calibration is
+    split by its own labels, and cameras 1 and 2 are the same serials."""
+    piv_set = build_labelled_set(tmp_path, _PIV_RIG_KEYS, name="piv")
+    cal_set = _labelled_calibration(
+        tmp_path,
+        [("Camera 1", "Camera.X: 11", "1: X"), ("Camera 2", "Camera.X: 12", "2: X")],
+    )
+    cfg = make_set_config(tmp_path, piv_set, 4, [1, 2])
+    cfg.data["paths"]["base_paths"] = [str(tmp_path / "results")]
+    units = _plan(cfg, cal_set)
+    assert len(units) == 2
+    assert all(u["frame_warnings"] == () for u in units)
+
+
+def test_swapped_camera_serials_are_refused_by_name(tmp_path):
+    piv_set = build_labelled_set(tmp_path, _PIV_RIG_KEYS[:4], name="piv")
+    cal_set = _labelled_calibration(
+        tmp_path,
+        [("Camera 1", "Camera.X: 12", "1: X"), ("Camera 2", "Camera.X: 11", "2: X")],
+    )
+    cfg = make_set_config(tmp_path, piv_set, 2, [1, 2])
+    cfg.data["paths"]["base_paths"] = [str(tmp_path / "results")]
+    with pytest.raises(CalibrationFrameMismatch) as exc:
+        _plan(cfg, cal_set)
+    message = str(exc.value)
+    for words in [
+        "camera 1: the calibration recording's camera 1 is Camera.X: 12, the PIV "
+        "recording's camera 1 is Camera.X: 11",
+        "camera 2: the calibration recording's camera 2 is Camera.X: 11, the PIV "
+        "recording's camera 2 is Camera.X: 12",
+    ]:
+        assert words in message, message
 
 
 @pytest.mark.parametrize(

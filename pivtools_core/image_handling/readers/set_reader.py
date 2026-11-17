@@ -81,12 +81,15 @@ import numpy as np
 from lz4.block import LZ4BlockError
 
 from .davis_attr import (
+    DOUBLE_FRAME_ROLES,
     AttrBinding,
     AttrFormatError,
     LabelledCamera,
     RecordingAttributes,
+    camera_list_text,
     group_cameras,
     read_recording_attributes,
+    streams_text,
 )
 from .davis_tokens import TokenStreamError, decode_imx_words
 from .im7_reader import _lz4_block_decompress
@@ -1779,7 +1782,7 @@ def _parse_set(set_path: Union[str, Path]) -> SetInfo:
     cameras = None if rec is None else group_cameras(rec)
     for camera in cameras or ():
         for stream, role in zip(
-            camera.frames, ("A", "B") if camera.double_frame else ("",)
+            camera.frames, DOUBLE_FRAME_ROLES if camera.double_frame else ("",)
         ):
             frames[stream].camera_label = camera.label
             frames[stream].camera_id = camera.camera_id
@@ -2182,18 +2185,6 @@ def _stream_table(info: SetInfo) -> str:
     )
 
 
-def _streams_text(streams: Tuple[int, ...]) -> str:
-    """``stream 4`` / ``streams 0–1``."""
-    if len(streams) == 1:
-        return f"stream {streams[0]}"
-    return f"streams {streams[0]}–{streams[-1]}"
-
-
-def _camera_list(cameras: Sequence[LabelledCamera]) -> str:
-    """``Camera 1 (Imager MX 25M, ..., double frame (A/B)) on streams 0–1; ...``."""
-    return "; ".join(f"{c.describe()} on {_streams_text(c.frames)}" for c in cameras)
-
-
 def set_camera_streams(
     set_path: Union[str, Path],
     num_cameras: int,
@@ -2232,7 +2223,7 @@ def set_camera_streams(
             raise SetConfigError(
                 f"{Path(set_path).name} holds {n} {'camera' if n == 1 else 'cameras'} "
                 f"by its own camera labels, not {num_cameras}: "
-                f"{_camera_list(info.cameras)}. Set the camera count to {n}."
+                f"{camera_list_text(info.cameras)}. Set the camera count to {n}."
             )
         split = tuple(c.frames for c in info.cameras)
         info.stream_splits[num_cameras] = split
@@ -2296,7 +2287,7 @@ def camera_streams(
     if pair and len(streams) == 1 and info.cameras is not None:
         raise SetPairingError(
             f"Camera {camera} of {name}, {info.cameras[camera - 1].describe()} on "
-            f"{_streams_text(streams)}, is a single-frame camera, so it has no A/B "
+            f"{streams_text(streams)}, is a single-frame camera, so it has no A/B "
             f"pairs. Deselect camera {camera} in the PIV camera selection, or "
             f"process it time-resolved."
         )

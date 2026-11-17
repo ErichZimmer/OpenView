@@ -351,6 +351,46 @@ def build_raw16_set(
     return set_file
 
 
+def build_labelled_set(
+    tmp_path,
+    keys,
+    shapes=None,
+    n_images=1,
+    name="lab",
+    labelled=None,
+    transformers=(),
+):
+    """A raw-16-bit recording with one ``MetaData{k}.attr`` per frame stream.
+
+    Args:
+        keys: per frame stream, the (label, camera_id, CameraName) its images
+            carry, or None for a stream whose images carry no camera keys.
+        labelled: 0-based images that carry the keys; default every image.
+            The others carry only a timing key, as DaVis 11.4 writes them.
+        transformers: (id, prefix, stream) per transformer.
+    """
+    shapes = shapes or [(4, 6)] * len(keys)
+    s = build_raw16_set(
+        tmp_path, shapes, name=name, n_entries=n_images, fill_with_index=True
+    )
+    folder = tmp_path / name
+    for k, triple in enumerate(keys):
+        images = []
+        for e in range(n_images):
+            values = {"Acq.Time": np.array([[float(e)]], "<f8")}
+            if triple is not None and (labelled is None or e in labelled):
+                values.update(camera_keys(*triple))
+            images.append(values)
+        write_attr(folder / f"MetaData{k}.attr", images)
+    write_manifest(
+        folder,
+        [(f"Frame{k}", k) for k in range(len(shapes))],
+        transformers=transformers,
+        attribute_readers=[(f"MetaData{k}", k) for k in range(len(keys))],
+    )
+    return s
+
+
 def make_set_config(tmp_path, set_file, camera_count, camera_numbers, frame_stride=1):
     """Write a minimal lavision_set config.yaml and load it as a Config."""
     cfg = {

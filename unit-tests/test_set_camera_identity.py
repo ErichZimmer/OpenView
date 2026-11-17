@@ -22,6 +22,7 @@ import numpy as np
 import pytest
 from fixtures.diagnosis import _inp, make_ctx, piv_route_response, write_config
 from fixtures.lavision import (  # noqa: F401
+    build_labelled_set,
     build_raw16_set,
     camera_keys,
     clean_set_cache,
@@ -104,46 +105,6 @@ PIV_PLIF_KEYS = [
     ("Camera 3", "Camera.S: 31", "3: S"),
     ("Camera 4", "Camera.S: 32", "4: S"),
 ]
-
-
-def _labelled_set(
-    tmp_path,
-    keys,
-    shapes=None,
-    n_images=1,
-    name="lab",
-    labelled=None,
-    transformers=(),
-):
-    """A raw-16-bit recording with one ``MetaData{k}.attr`` per frame stream.
-
-    Args:
-        keys: per frame stream, the (label, camera_id, CameraName) its images
-            carry, or None for a stream whose images carry no camera keys.
-        labelled: 0-based images that carry the keys; default every image.
-            The others carry only a timing key, as DaVis 11.4 writes them.
-        transformers: (id, prefix, stream) per transformer.
-    """
-    shapes = shapes or [(4, 6)] * len(keys)
-    s = build_raw16_set(
-        tmp_path, shapes, name=name, n_entries=n_images, fill_with_index=True
-    )
-    folder = tmp_path / name
-    for k, triple in enumerate(keys):
-        images = []
-        for e in range(n_images):
-            values = {"Acq.Time": np.array([[float(e)]], "<f8")}
-            if triple is not None and (labelled is None or e in labelled):
-                values.update(camera_keys(*triple))
-            images.append(values)
-        write_attr(folder / f"MetaData{k}.attr", images)
-    write_manifest(
-        folder,
-        [(f"Frame{k}", k) for k in range(len(shapes))],
-        transformers=transformers,
-        attribute_readers=[(f"MetaData{k}", k) for k in range(len(keys))],
-    )
-    return s
 
 
 # ---------------------------------------------------------------------------
@@ -322,14 +283,14 @@ def test_declared_attr_file_that_is_missing_is_refused_by_name(
     tmp_path, clean_set_cache
 ):
     """§6 item 8. lvpyio returns empty attributes here without a message."""
-    s = _labelled_set(tmp_path, PIV_PLIF_KEYS, PIV_PLIF_SHAPES)
+    s = build_labelled_set(tmp_path, PIV_PLIF_KEYS, PIV_PLIF_SHAPES)
     (s.with_suffix("") / "MetaData4.attr").unlink()
     with pytest.raises(FileNotFoundError, match=r"MetaData4\.attr, which is missing"):
         read_set_info(s)
 
 
 def test_attr_file_with_another_image_count_is_refused(tmp_path, clean_set_cache):
-    s = _labelled_set(tmp_path, [("Camera 1", "Camera.X: 1", "1: X")], n_images=2)
+    s = build_labelled_set(tmp_path, [("Camera 1", "Camera.X: 1", "1: X")], n_images=2)
     write_attr(s.with_suffix("") / "MetaData0.attr", [{"k": "v"}])
     with pytest.raises(AttrFormatError, match=r"describes 1 images.*hold 2"):
         read_set_info(s)
@@ -383,13 +344,13 @@ def test_attribute_reader_of_another_name_is_refused(tmp_path, clean_set_cache):
 
 
 def test_labelled_piv_plus_plif_rig_splits_by_label(tmp_path, clean_set_cache):
-    s = _labelled_set(tmp_path, PIV_PLIF_KEYS, PIV_PLIF_SHAPES)
+    s = build_labelled_set(tmp_path, PIV_PLIF_KEYS, PIV_PLIF_SHAPES)
     assert set_camera_streams(s, 4) == [(0, 1), (2, 3), (4,), (5,)]
 
 
 def test_partial_labels_group_from_the_labelled_images(tmp_path, clean_set_cache):
     """§6 item 9: images 2..n without camera keys group from image 1."""
-    s = _labelled_set(
+    s = build_labelled_set(
         tmp_path, PIV_PLIF_KEYS, PIV_PLIF_SHAPES, n_images=3, labelled={0}
     )
     info = read_set_info(s)
@@ -401,7 +362,7 @@ def test_a_label_that_changes_between_images_is_refused_naming_both(
     tmp_path, clean_set_cache
 ):
     """§6 item 9: image 2 with a different label raises, naming both images."""
-    s = _labelled_set(tmp_path, [("Camera 1", "Camera.X: 1", "1: X")], n_images=2)
+    s = build_labelled_set(tmp_path, [("Camera 1", "Camera.X: 1", "1: X")], n_images=2)
     write_attr(
         s.with_suffix("") / "MetaData0.attr",
         [
@@ -416,7 +377,7 @@ def test_a_label_that_changes_between_images_is_refused_naming_both(
 def test_an_image_with_some_camera_keys_but_not_all_is_refused(
     tmp_path, clean_set_cache
 ):
-    s = _labelled_set(tmp_path, [("Camera 1", "Camera.X: 1", "1: X")], n_images=2)
+    s = build_labelled_set(tmp_path, [("Camera 1", "Camera.X: 1", "1: X")], n_images=2)
     partial = camera_keys("Camera 1", "Camera.X: 1", "1: X")
     del partial["Acq.Camera.ID"]
     write_attr(
@@ -432,7 +393,7 @@ def test_attr_files_without_any_camera_keys_mean_the_shape_rule(
 ):
     """Decision 2: an .attr with no camera keys on any image is treated as no
     .attr. The shape rule resolves a unique split and refuses an ambiguous one."""
-    s = _labelled_set(tmp_path, [None] * 5, [(6, 8)] + [(4, 6)] * 4)
+    s = build_labelled_set(tmp_path, [None] * 5, [(6, 8)] + [(4, 6)] * 4)
     info = read_set_info(s)
     assert info.cameras is None and len(info.attribute_files) == 5
     assert [f.camera_label for f in info.frames] == [None] * 5
@@ -442,14 +403,14 @@ def test_attr_files_without_any_camera_keys_mean_the_shape_rule(
 
 
 def test_some_streams_labelled_and_others_never_is_refused(tmp_path, clean_set_cache):
-    s = _labelled_set(tmp_path, [("Camera 1", "Camera.X: 1", "1: X"), None])
+    s = build_labelled_set(tmp_path, [("Camera 1", "Camera.X: 1", "1: X"), None])
     with pytest.raises(CameraIdentityError, match=r"frame streams \[1\] carry none"):
         read_set_info(s)
 
 
 def test_camera_numbers_out_of_stream_order_are_refused(tmp_path, clean_set_cache):
     """Decision 3: numbered by first frame stream, CameraName must say 1..n."""
-    s = _labelled_set(
+    s = build_labelled_set(
         tmp_path,
         [("Camera 2", "Camera.X: 2", "2: X"), ("Camera 1", "Camera.X: 1", "1: X")],
     )
@@ -473,7 +434,7 @@ def test_camera_numbers_out_of_stream_order_are_refused(tmp_path, clean_set_cach
     ids=["B before A", "A alone", "mixed roles", "A and B apart", "bad CameraName"],
 )
 def test_impossible_camera_layouts_are_refused(tmp_path, clean_set_cache, keys):
-    s = _labelled_set(tmp_path, keys)
+    s = build_labelled_set(tmp_path, keys)
     with pytest.raises(CameraIdentityError):
         read_set_info(s)
 
@@ -492,7 +453,7 @@ def test_no_attribute_reader_keeps_the_shape_rule(tmp_path, clean_set_cache):
 
 
 def test_unknown_transformer_blocks_only_its_labelled_camera(tmp_path, clean_set_cache):
-    s = _labelled_set(
+    s = build_labelled_set(
         tmp_path,
         PIV_PLIF_KEYS,
         PIV_PLIF_SHAPES,
@@ -561,7 +522,7 @@ def test_stream_table_without_labels_has_no_label_fields(tmp_path, clean_set_cac
 def test_stream_table_says_size_unknown_for_an_unknown_transformer(
     tmp_path, clean_set_cache
 ):
-    s = _labelled_set(
+    s = build_labelled_set(
         tmp_path, PIV_PLIF_KEYS, PIV_PLIF_SHAPES, transformers=[("rotate-45", "T0", 3)]
     )
     infos = set_stream_infos(s, 4)
@@ -617,7 +578,7 @@ def test_labelled_time_resolved_allows_single_frame_cameras(clean_set_cache):
 def test_labelled_single_frame_only_rig_offers_no_pair_selection(
     tmp_path, clean_set_cache
 ):
-    s = _labelled_set(
+    s = build_labelled_set(
         tmp_path,
         [("Camera 1", "Camera.S: 1", "1: S"), ("Camera 2", "Camera.S: 2", "2: S")],
     )
@@ -734,7 +695,7 @@ def test_found_line_says_when_cameras_come_from_shapes(tmp_path, clean_set_cache
         "No camera labels: the recording has no .attr files, so cameras are "
         "matched to streams by shape."
     )
-    blank = _labelled_set(tmp_path, [None] * 2, name="blank")
+    blank = build_labelled_set(tmp_path, [None] * 2, name="blank")
     assert _found(blank, camera_count=2).endswith(
         "No camera labels: its .attr files carry no camera keys, so cameras are "
         "matched to streams by shape."

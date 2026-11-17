@@ -191,6 +191,19 @@ def test_unaccounted_triggers_become_a_note(tmp_path):
     )
 
 
+def test_fewer_triggers_requested_than_recorded_is_refused(tmp_path):
+    """run.yaml asks for 1 trigger, the cameras hold 2: the run.yaml is stale
+    or belongs to another run, so the run is refused by name."""
+    run = copy_case(tmp_path, "df_2cam_clean")
+    edit_run_yaml(run, record_n=1)
+    with pytest.raises(PivrawAlignmentError) as info:
+        align_pivraw_run(run, 1, 2)
+    assert info.value.reason == "run_file_count"
+    message = str(info.value)
+    for word in [str(run), "requested 1 trigger(s)", "account for 2", "run.yaml"]:
+        assert word in message, message
+
+
 def test_missing_run_yaml_is_refused(tmp_path):
     run = copy_case(tmp_path, "df_2cam_clean")
     (run / "run.yaml").unlink()
@@ -290,6 +303,35 @@ def test_validate_config_says_when_num_images_caps_the_pairs(tmp_path):
         "Processing 1 of 2 aligned pairs: images.num_images (2) caps them." in w
         for w in warnings
     ), warnings
+
+
+def test_validate_config_reports_every_runs_findings(tmp_path):
+    """Two runs of 2 aligned pairs each: the first skips a pair and cannot prove
+    Camera2's phase, the second cannot prove Camera1's phase. Both runs'
+    findings reach the warnings, each named by its run."""
+    first = _cam2_dropped_pair_2(tmp_path)
+    second = copy_case(tmp_path, "df_2cam_clean", "second_run")
+    cam = read_pivraw_header(second / "Camera1.pivraw").index["camera_ns"].copy()
+    cam[1] = cam[0] + 20_000_000
+    cam[2] = cam[1] + 20_000_000
+    cam[3] = cam[2] + 20_000_000
+    edit_index(second, 1, camera_ns=cam)
+    cfg = _config_with_base(tmp_path, first, num_images=4)
+    cfg.data["paths"]["source_paths"] = [str(first), str(second)]
+    cfg.data["paths"]["base_paths"] = [str(tmp_path / "o1"), str(tmp_path / "o2")]
+    ok, error, warnings = validate_config(cfg)
+    assert ok, error
+    assert any(
+        w.startswith(f"{first}: 2 pair(s) aligned") and "Camera2 lacks a frame of 1" in w
+        for w in warnings
+    ), warnings
+    assert any(
+        w.startswith(f"{first}: Camera2: A/B phase not provable") for w in warnings
+    ), warnings
+    assert any(
+        w.startswith(f"{second}: Camera1: A/B phase not provable") for w in warnings
+    ), warnings
+    assert not any(w.startswith(f"{second}: 2 pair(s) aligned") for w in warnings)
 
 
 def test_validate_config_refuses_a_run_that_cannot_align(tmp_path):

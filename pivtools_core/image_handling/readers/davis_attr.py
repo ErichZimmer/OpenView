@@ -480,7 +480,8 @@ CAMERA_KEYS = (KEY_LABEL, KEY_ID, KEY_NAME)
 # frames of a double-frame camera and empty for a single-frame camera. Seen:
 # "1A: Imager MX 25M", "3: Imager sCMOS CLHS", "1: Imager CX-25".
 _CAMERA_NAME = re.compile(r"(?P<number>[1-9][0-9]*)(?P<role>[AB]?): (?P<model>.+)")
-_DOUBLE_FRAME_ROLES = ("A", "B")
+# Frame roles of a double-frame camera, in stream order (CameraName "1A", "1B").
+DOUBLE_FRAME_ROLES = ("A", "B")
 
 
 @dataclass(frozen=True)
@@ -516,13 +517,25 @@ class LabelledCamera:
     @property
     def double_frame(self) -> bool:
         """True for an A/B camera (two frames per image)."""
-        return len(self.frames) == len(_DOUBLE_FRAME_ROLES)
+        return len(self.frames) == len(DOUBLE_FRAME_ROLES)
 
     def describe(self) -> str:
         """``Camera 3 (Imager sCMOS CLHS, Camera.ImagerSCMOS5MCLHS: 61008639,
         single frame)``: what the user sees in DaVis, word for word."""
         kind = "double frame (A/B)" if self.double_frame else "single frame"
         return f"{self.label} ({self.model}, {self.camera_id}, {kind})"
+
+
+def streams_text(streams: Sequence[int]) -> str:
+    """``stream 4`` / ``streams 0–1``: a camera's frame streams in a message."""
+    if len(streams) == 1:
+        return f"stream {streams[0]}"
+    return f"streams {streams[0]}–{streams[-1]}"
+
+
+def camera_list_text(cameras: Sequence[LabelledCamera]) -> str:
+    """``Camera 1 (Imager MX 25M, ..., double frame (A/B)) on streams 0–1; ...``."""
+    return "; ".join(f"{c.describe()} on {streams_text(c.frames)}" for c in cameras)
 
 
 def frame_identities(rec: RecordingAttributes) -> List[Optional[FrameIdentity]]:
@@ -636,7 +649,7 @@ def group_cameras(rec: RecordingAttributes) -> Optional[Tuple[LabelledCamera, ..
         roles = tuple(m.role for m in members)
         frames = tuple(m.frame for m in members)
         what = f"{name}: camera '{label}' ({camera_id}) on frame streams {frames}"
-        if roles not in (("",), _DOUBLE_FRAME_ROLES):
+        if roles not in (("",), DOUBLE_FRAME_ROLES):
             raise CameraIdentityError(
                 f"{what} has frame roles {list(roles)}. A camera is single frame "
                 f"(no role) or double frame (A then B)."
