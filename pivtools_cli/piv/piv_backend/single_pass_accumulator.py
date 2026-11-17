@@ -37,6 +37,7 @@ from pivtools_cli.piv.piv_backend.base import CrossCorrelator
 from pivtools_cli.piv.piv_backend.infilling import apply_infilling
 from pivtools_cli.piv.piv_backend.outlier_detection import apply_outlier_detection
 from pivtools_cli.piv.piv_result import PIVEnsemblePassResult, PIVEnsembleResult
+from pivtools_cli.processing.unique_scatter import scatter_unique
 from pivtools_core.config import Config
 
 # Three float32 correlation-plane sums (AA, BB, AB) are held for the whole pass,
@@ -944,25 +945,29 @@ class SinglePassAccumulator:
                 )
 
                 R_AA_futures.append(
-                    client.scatter(
+                    scatter_unique(
+                        client,
                         R_AA_ensemble[start_idx:end_idx],
                         broadcast=False,
                     )
                 )
                 R_BB_futures.append(
-                    client.scatter(
+                    scatter_unique(
+                        client,
                         R_BB_ensemble[start_idx:end_idx],
                         broadcast=False,
                     )
                 )
                 R_AB_futures.append(
-                    client.scatter(
+                    scatter_unique(
+                        client,
                         R_AB_ensemble[start_idx:end_idx],
                         broadcast=False,
                     )
                 )
                 mask_flat_futures.append(
-                    client.scatter(
+                    scatter_unique(
+                        client,
                         mask_flat[start_idx_win:end_idx_win],
                         broadcast=False,
                     )
@@ -971,7 +976,8 @@ class SinglePassAccumulator:
                     # per-window coloured-floor shape: same plane-element
                     # slicing as the correlation arrays (one plane's size)
                     P_win_futures.append(
-                        client.scatter(
+                        scatter_unique(
+                            client,
                             P_win_flat[start_idx:end_idx],
                             broadcast=False,
                         )

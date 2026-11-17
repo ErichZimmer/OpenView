@@ -51,6 +51,7 @@ from pivtools_cli.processing.dask_pipeline import (
     reduce_warp_sums,
     scatter_immutable_data,
 )
+from pivtools_cli.processing.unique_scatter import scatter_unique
 from pivtools_core.image_handling.load_images import (
     compute_vector_mask,
     load_images,
@@ -198,7 +199,7 @@ def process_pass_worker_accumulate(
         n_phase_a = image_bg_sums["n_images"]
         A_mean = (image_bg_sums["warp_A_sum"] / n_phase_a).astype(np.float32)
         B_mean = (image_bg_sums["warp_B_sum"] / n_phase_a).astype(np.float32)
-        scattered_mean_images = client.scatter((A_mean, B_mean), broadcast=True)
+        scattered_mean_images = scatter_unique(client, (A_mean, B_mean), broadcast=True)
         logger.info(f"  Phase A complete: mean images from {n_phase_a} pairs")
 
     # Create per-worker progress variables
@@ -614,17 +615,17 @@ def run_ensemble_piv(
         )
 
     # Scatter config once to avoid repeated serialization
-    scattered_config = client.scatter(config, broadcast=True)
+    scattered_config = scatter_unique(client, config, broadcast=True)
 
     # Scatter pixel_mask for worker-accumulation mode
     scattered_pixel_mask = None
     if pixel_mask is not None:
-        scattered_pixel_mask = client.scatter(pixel_mask, broadcast=True)
+        scattered_pixel_mask = scatter_unique(client, pixel_mask, broadcast=True)
 
     # Scatter per-frame gains for the worker-side pipeline reconstruction
     scattered_frame_gains = None
     if frame_gains is not None:
-        scattered_frame_gains = client.scatter(frame_gains, broadcast=True)
+        scattered_frame_gains = scatter_unique(client, frame_gains, broadcast=True)
 
     images_are_persisted = (num_chunks == 1) or config.ensemble_persist_images
 
@@ -676,7 +677,7 @@ def run_ensemble_piv(
                         f"  Filled {int(prev_mask.sum())} masked windows in the "
                         f"predictor ({config.masking_predictor_fill})"
                     )
-            scattered_predictor = client.scatter(warp_predictor, broadcast=True)
+            scattered_predictor = scatter_unique(client, warp_predictor, broadcast=True)
             logger.info("  Broadcast predictor field from previous pass")
 
         workers = list(client.ncores().keys())
