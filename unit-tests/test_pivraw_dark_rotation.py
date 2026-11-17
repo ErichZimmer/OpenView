@@ -233,6 +233,7 @@ def _validate(run: Path) -> dict:
         zero_based_indexing=False,
         read_frame_fn=lambda idx: read_pivraw_single(run / "Camera1.pivraw", idx),
         diagnosis=make_ctx(run, image_type="pivraw", image_format=("Camera%d.pivraw",)),
+        pair_strides=(1, 2),  # skip_frames: both cases used here are double-frame
     )
 
 

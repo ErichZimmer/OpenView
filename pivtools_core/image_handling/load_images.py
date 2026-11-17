@@ -292,7 +292,11 @@ def read_pair(
     """
     format_str = config.image_format[0]
     image_type = config.image_type
-    frame_a_idx, frame_b_idx = config.get_frame_pair_indices(idx)
+    # A .pivraw run is paired by trigger, per camera, and camera_path is its run
+    # folder; every other type pairs by the stride formula alone.
+    frame_a_idx, frame_b_idx = config.get_frame_pair_indices(
+        idx, camera=camera, source=camera_path
+    )
 
     # Handle container formats (single file contains multiple frames/cameras)
     if image_type == "lavision_set":
@@ -317,13 +321,13 @@ def read_pair(
             # read_single_frame would allocate each frame via astype and then copy
             # both again in np.stack -- two full-frame passes where one does. Same
             # pattern read_set_pair already uses for the pre-paired case.
-            fi = info.frames[stream_idx]
+            shape = info.frames[stream_idx].shape  # after the transformers
             if out is None:
-                result = np.empty((2, fi.height, fi.width), dtype=np.float32)
+                result = np.empty((2, *shape), dtype=np.float32)
             else:
                 result = check_out(
                     out,
-                    (2, fi.height, fi.width),
+                    (2, *shape),
                     f"read_pair camera {camera} of {Path(set_file_path).name}",
                 )
             read_set_frame(
@@ -404,9 +408,10 @@ def read_pair(
     elif image_type == "pivraw":
         from .readers.pivraw_reader import read_pivraw_pair
 
-        # .pivraw: one run container per camera. Both pairing indices are passed:
-        # the reader honours frame B rather than assuming A + 1, and refuses a
-        # double-frame run read with anything but its recorded (A, B) pairs.
+        # .pivraw: one run container per camera. The pair's file frames on this
+        # camera come from the run's trigger alignment (above), so with unequal
+        # drops pair n is the same trigger on every camera. Both are passed: the
+        # reader honours frame B rather than assuming A + 1.
         pivraw_path = camera_path / (format_str % camera)
         return _written(
             read_pivraw_pair(

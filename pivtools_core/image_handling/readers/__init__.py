@@ -1,10 +1,15 @@
 from pathlib import Path
 from typing import Callable, Dict, List
 
-from .generic_readers import read_png_jpeg, read_raw, read_tiff
+from .generic_readers import read_png_jpeg, read_tiff
 
 # Registry for image readers
 _READERS: Dict[str, Callable] = {}
+
+# Camera RAW support (rawpy) was removed. rawpy's bare
+# ``postprocess()`` applied a gamma curve and returned 8 bits, so sensor
+# counts were not linear, and it could not parse a headerless ``.raw`` dump.
+_REMOVED_RAW_EXTENSIONS = frozenset({".raw", ".cr2", ".nef", ".arw"})
 
 
 def register_reader(extensions: List[str], reader_func: Callable):
@@ -28,9 +33,17 @@ def get_reader(file_path: str) -> Callable:
         Reader function for the file type
 
     Raises:
-        ValueError: If no reader is registered for the file type
+        ValueError: If no reader is registered for the file type, or the
+            file type is camera RAW, whose support was removed
     """
     ext = Path(file_path).suffix.lower()
+    if ext in _REMOVED_RAW_EXTENSIONS:
+        raise ValueError(
+            f"{Path(file_path).name} is a camera RAW image ({ext}). Camera "
+            "RAW support was removed from PIVTOOLs because it did not return "
+            "linear sensor counts. Convert the images to 16-bit TIFF and point "
+            "image_format at those."
+        )
     if ext not in _READERS:
         raise ValueError(f"No reader registered for file type: {ext}")
     return _READERS[ext]
@@ -54,7 +67,6 @@ from .pivraw_reader import read_pivraw_pair  # noqa: E402
 register_reader([".tiff", ".tif"], read_tiff)
 register_reader([".png"], read_png_jpeg)
 register_reader([".jpg", ".jpeg"], read_png_jpeg)
-register_reader([".raw", ".cr2", ".nef", ".arw"], read_raw)
 register_reader([".im7"], read_lavision_pair)
 register_reader([".set"], read_lavision_ims_pair)
 register_reader([".cine"], read_cine_pair)

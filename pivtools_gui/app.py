@@ -1051,6 +1051,7 @@ def validate_files():
                 read_frame_fn=read_frame,
                 diagnosis=diagnosis,
                 scan_cache=scan_cache,
+                pair_strides=(cfg.frame_stride, cfg.pair_stride),
             )
 
             # PIV-specific: Test first and last pairs
@@ -1209,6 +1210,7 @@ def validate_files():
                 "suggestions": validation["suggestions"],
                 "streams": validation["streams"],
                 "notes": validation["notes"],
+                "pivraw_alignment": validation["pivraw_alignment"],
                 "sample_files": (
                     []
                     if file_found_but_unreadable
@@ -1370,7 +1372,11 @@ def preview_frame_pairs():
                 "local_pair": local_pair,
             }
         else:
-            idx_a, idx_b = cfg.get_frame_pair_indices(p)
+            # A .pivraw run is paired by trigger and its file frames differ per
+            # camera: list the frames of the camera the container is named by.
+            idx_a, idx_b = cfg.get_frame_pair_indices(
+                p, camera=cfg.camera_numbers[0] if cfg.is_container_format else None
+            )
             if cfg.is_container_format:
                 # Container files (.cine, .pivraw, .set): frames come from within
                 # a single file, not separate files. Format string uses
