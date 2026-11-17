@@ -67,7 +67,7 @@ import numbers
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional, Tuple, Union
+from typing import Any, Dict, Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import yaml
@@ -1111,7 +1111,7 @@ class PivrawAlignment:
         run_dir: The run folder.
         mode: ``double_frame`` or ``time_resolved``.
         period_s: Trigger period, ``1 / rate_hz``.
-        cameras: Camera slots of the run, ascending.
+        cameras: Camera slots aligned (the selected cameras), ascending.
         pairs: The complete pairs in trigger order; pair number n is
             ``pairs[n - 1]``.
         skipped_incomplete: Pairs that should exist but lack a frame on at
@@ -1196,9 +1196,9 @@ class _CameraTriggers:
     camera_ns: np.ndarray  # per file frame
 
 
-# {(run_dir, frame_stride, pair_stride): (stamp, alignment)}
+# {(run_dir, frame_stride, pair_stride, camera slots): (stamp, alignment)}
 _alignment_cache: Dict[
-    Tuple[str, int, int], Tuple[Tuple[Any, ...], PivrawAlignment]
+    Tuple[str, int, int, Tuple[int, ...]], Tuple[Tuple[Any, ...], PivrawAlignment]
 ] = {}
 
 
@@ -1360,9 +1360,18 @@ def _run_stamp(run_dir: Path, slots: Tuple[int, ...]) -> Tuple[Any, ...]:
 
 
 def align_pivraw_run(
-    run_dir: PathLike, frame_stride: int, pair_stride: int
+    run_dir: PathLike,
+    frame_stride: int,
+    pair_stride: int,
+    cameras: Optional[Sequence[int]] = None,
 ) -> PivrawAlignment:
-    """Pair every camera of a run by trigger, cached by the files' stamps.
+    """Pair the cameras of a run by trigger, cached by the cameras and the files' stamps.
+
+    ``cameras`` are the cameras selected for processing; the alignment covers
+    them only, so a deselected dead or offset camera neither refuses the run
+    nor skips pairs only it lacks. Pair n is one trigger on every selected
+    camera. None aligns every ``Camera<k>.pivraw`` in the folder (the run
+    import, which selects them all).
 
     Steps (the decided alignment, section comment above):
 
@@ -1388,15 +1397,26 @@ def align_pivraw_run(
         frame_stride: Recorded frames from A to B of a pair. Double-frame
             accepts only the skip_frames preset (1, with ``pair_stride`` 2).
         pair_stride: Recorded frames from one pair's A to the next pair's A.
+        cameras: The camera slots to align, None for every one in the folder.
 
     Raises:
-        PivrawError: A camera's files are refused (strict header), run.yaml is
-            missing or malformed, or the strides do not suit the mode.
+        PivrawError: A selected camera is not in the run, a camera's files are
+            refused (strict header), run.yaml is missing or malformed, or the
+            strides do not suit the mode.
         PivrawAlignmentError: The run cannot be aligned; ``reason`` says why.
     """
     run_dir = Path(run_dir)
     slots = run_cameras(run_dir)
-    key = (str(run_dir), int(frame_stride), int(pair_stride))
+    if cameras is not None:
+        absent = sorted(set(cameras) - set(slots))
+        if absent:
+            raise PivrawError(
+                f"{run_dir}: camera {', '.join(map(str, absent))} is selected for "
+                f"processing, but the run holds cameras {list(slots)}. Select "
+                "cameras the run recorded."
+            )
+        slots = tuple(sorted(set(cameras)))
+    key = (str(run_dir), int(frame_stride), int(pair_stride), slots)
     stamp = _run_stamp(run_dir, slots)
     cached = _alignment_cache.get(key)
     if cached is not None and cached[0] == stamp:
