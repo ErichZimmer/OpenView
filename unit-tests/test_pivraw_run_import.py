@@ -111,7 +111,7 @@ def test_a_run_with_a_drop_is_refused_and_nothing_is_written(tmp_path):
     with pytest.raises(PivrawAlignmentError) as info:
         import_run(run, config_path)
     assert info.value.reason == "dropped"
-    assert "Camera2 lacks run trigger(s) [1]" in str(info.value)
+    assert "Camera2 lost 1 pair (run trigger 1)" in str(info.value)
     assert str(info.value).endswith("Re-record the run.")
     assert not config_path.exists()
     assert not (project / "calibration").exists()

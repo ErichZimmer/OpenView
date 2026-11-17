@@ -1,5 +1,5 @@
 {
- "writer_commit": "d9a72ef",
+ "writer_commit": "de867d0",
  "format_version": 2,
  "period_s": 0.04,
  "camera_clock_offset_ns": {
@@ -106,8 +106,7 @@
       ]
      }
     }
-   ],
-   "skipped_incomplete": 0
+   ]
   },
   "tr_bayer_clean": {
    "mode": "time_resolved",
@@ -168,13 +167,12 @@
       ]
      }
     }
-   ],
-   "skipped_incomplete": 0
+   ]
   },
   "df_2cam_unequal_drops": {
    "mode": "double_frame",
    "n_triggers_fired": 3,
-   "outcome": "pairs",
+   "outcome": "must_raise:dropped",
    "cameras": {
     "1": {
      "n_frames": 4,
@@ -240,32 +238,12 @@
       "B"
      ]
     }
-   },
-   "pairs": [
-    {
-     "pair": 1,
-     "run_triggers": [
-      0,
-      0
-     ],
-     "file_frames": {
-      "1": [
-       1,
-       2
-      ],
-      "2": [
-       1,
-       2
-      ]
-     }
-    }
-   ],
-   "skipped_incomplete": 2
+   }
   },
   "tr_lost_frame": {
    "mode": "time_resolved",
    "n_triggers_fired": 4,
-   "outcome": "pairs",
+   "outcome": "must_raise:dropped",
    "cameras": {
     "1": {
      "n_frames": 3,
@@ -295,23 +273,7 @@
       null
      ]
     }
-   },
-   "pairs": [
-    {
-     "pair": 1,
-     "run_triggers": [
-      2,
-      3
-     ],
-     "file_frames": {
-      "1": [
-       2,
-       3
-      ]
-     }
-    }
-   ],
-   "skipped_incomplete": 2
+   }
   },
   "df_lost_first_frame": {
    "mode": "double_frame",
@@ -582,7 +544,6 @@
      }
     }
    ],
-   "skipped_incomplete": 0,
    "dark": {
     "run_yaml": {
      "id": "dark_20261117_120000",
@@ -664,7 +625,6 @@
      }
     }
    ],
-   "skipped_incomplete": 0,
    "dark": {
     "run_yaml": {
      "id": "dark_20261117_120000",
