@@ -60,6 +60,33 @@ CONTAINER_SUFFIXES = frozenset({".set", ".cine"})
 
 CALIBRATION_DIRNAME = "calibration"
 
+# PIV image types that are never a calibration source. A .pivraw file is a PIV
+# run: the acquisition app saves calibration images as TIFFs, each with an image
+# note (its CONTRACTS §3.2). The source diagnosis never suggests these on a
+# calibration tab.
+NON_CALIBRATION_IMAGE_TYPES = frozenset({"pivraw"})
+
+
+def refuse_non_calibration_type(image_type: Optional[str], where: str) -> None:
+    """Raise when ``image_type`` cannot be a calibration image type.
+
+    Called wherever a calibration image type is decided: the settings sidecar,
+    a live form override and every frame read, so no path reads a ``.pivraw``
+    run as calibration images.
+
+    Raises:
+        ValueError: ``image_type`` is in :data:`NON_CALIBRATION_IMAGE_TYPES`;
+            the message names ``where``.
+    """
+    if image_type in NON_CALIBRATION_IMAGE_TYPES:
+        raise ValueError(
+            f"{where}: '{image_type}' is not a calibration image type. A "
+            ".pivraw file is a PIV run; PIVTOOLS Acquisition saves calibration "
+            "images as TIFFs (<project>/calibration/Cam<k>/%05d.tif, each with "
+            "its .tif.json image note). Point the calibration source at that "
+            "folder with image format %05d.tif and image type standard."
+        )
+
 
 def _is_container(source: Path) -> bool:
     """True when ``source`` names a single-file container (by suffix, no disk access)."""
@@ -96,9 +123,9 @@ _DEFAULTS: Dict[str, Any] = {
     "schema_version": SCHEMA_VERSION,
     "image": {
         "image_format": None,  # REQUIRED — no default, missing => raise
-        "image_type": None,  # REQUIRED — standard | cine | pivraw | lavision_set | lavision_im7
+        "image_type": None,  # REQUIRED — standard | cine | lavision_set | lavision_im7
         "n_views": None,  # optional; frame-count auto-detect is the fallback
-        # Refused for container types (.set/.cine/.pivraw): the reader numbers entries.
+        # Refused for container types (.set/.cine): the reader numbers entries.
         "zero_based_indexing": False,
         # IM7 ONLY: True = one single-camera .im7 per Cam{N} folder. Standard
         # formats always use Cam{N} (or camera_subfolders) at camera_count > 1
@@ -257,6 +284,9 @@ def _validate_loaded(data: Dict[str, Any], path: Path) -> None:
                 f"'image.{key}'. Set it in the GUI Calibration tab or edit "
                 "the file directly."
             )
+    refuse_non_calibration_type(
+        image["image_type"], f"Calibration settings {path}, image.image_type"
+    )
 
 
 def try_load_settings(source: PathLike) -> Optional[Dict[str, Any]]:

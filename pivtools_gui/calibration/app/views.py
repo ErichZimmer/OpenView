@@ -53,6 +53,7 @@ from pivtools_core.image_handling.calibration_loader import (
     validate_calibration_images,
 )
 from pivtools_core.image_handling.path_utils import infer_image_type
+from pivtools_core.image_handling.readers.pivraw_reader import PivrawError
 from pivtools_core.paths import get_data_paths, vector_glob_from_format
 from pivtools_gui.calibration import global_coords as gc2
 from pivtools_gui.calibration import record as rec
@@ -67,6 +68,7 @@ from pivtools_gui.calibration.camera_model import (
     ScaleFactorModel,
 )
 from pivtools_gui.calibration.detection.charuco import CharucoBoardDetector
+from pivtools_gui.calibration.frame_match import CalibrationFrameMismatch
 from pivtools_gui.calibration.global_grid import (
     first_view_orientation_candidates,
     resolve_global_grid_partial,
@@ -489,8 +491,8 @@ def _frame_total(
     else the auto-count from the images.
 
     ``source`` is ``"request"``, ``"n_views setting"`` or the auto-count's
-    ``FrameCount.source`` (``"files"``, ``".set index"``, ``".cine header"``,
-    ``".pivraw header"``), so the GUI can say where the number came from.
+    ``FrameCount.source`` (``"files"``, ``".set index"``, ``".cine header"``), so
+    the GUI can say where the number came from.
 
     Raises ``ValueError`` for a non-positive request value, and naming the camera and
     source when the auto-count fails: a zero or guessed view count would silently
@@ -2809,6 +2811,10 @@ def apply_model():
         units = _apply_units(data, full_cfg, source, board, stereo, type_name)
     except _ApplyRequestError as exc:
         return jsonify({"success": False, "error": str(exc)}), 400
+    except (PivrawError, CalibrationFrameMismatch) as exc:
+        # The run the reader refuses, or a calibration not in the PIV images' pixel
+        # frame: the inputs are refused, with the reader's or the check's own text.
+        return jsonify({"success": False, "error": str(exc)}), 400
     except (FileNotFoundError, ValueError, IndexError) as exc:
         # The planner's messages already name the camera / model / dataset; only a
         # missing file gets the "generate it first" hint, and only once.
@@ -2869,6 +2875,9 @@ def apply_model():
 
     n_units = len(units)
     out_dirs = [str(u["out"]) for u in units]
+    # Pairings applied without a frame comparison (frame_match.WARN): shown with the
+    # result from the start, in the start response and in every status poll.
+    frame_warnings = list(units[0]["frame_warnings"])
     # Which cameras this run covers (mono applies every configured camera), so the GUI
     # can label it "Apply to all N cameras".
     cameras = sorted({int(c) for u in units for c in u["cameras"]})
@@ -2900,9 +2909,10 @@ def apply_model():
             dt_source=[dt_source] * n_units,
             cameras=cameras,
             n_cameras=len(cameras),
-            # Non-fatal problems (a provenance stamp that failed after the vectors were
-            # written), one line each, for the GUI to show beside the result.
-            warnings=[],
+            # Non-fatal problems (frames not compared; a provenance stamp that failed
+            # after the vectors were written), one line each, for the GUI to show
+            # beside the result.
+            warnings=list(frame_warnings),
         )
         cancel_event = threading.Event()
         _apply_cancel_events[job_id] = cancel_event
@@ -2910,7 +2920,7 @@ def apply_model():
     def _run():
         total_written = 0
         total_skipped = 0
-        warnings: List[str] = []
+        warnings: List[str] = list(frame_warnings)
         try:
             job_manager.update_job(
                 job_id, status="running", progress=0, processed=0, total=n_units
@@ -3043,6 +3053,7 @@ def apply_model():
             "job_id": job_id,
             "cameras": cameras,
             "n_cameras": len(cameras),
+            "warnings": frame_warnings,
         }
     )
 
@@ -4032,7 +4043,7 @@ def self_cal_run():
     data = request.get_json() or {}
     full_cfg = get_config()
     try:
-        _, req1, req2, board, model_dir, figdir = _stereo_locators(data.get)
+        source, req1, req2, board, model_dir, figdir = _stereo_locators(data.get)
         record = rec.load_stereo(
             model_dir, model_type=_model_type_arg(data.get, board, stereo=True)
         )
@@ -4082,8 +4093,20 @@ def self_cal_run():
         return jsonify({"success": False, "error": str(exc)}), 200
     overlap = float(data.get("overlap", 50.0))
     apply_filters = bool(data.get("apply_filters", True))
+    # The particle images must be in the model's pixel frame (ticket K1), and a run
+    # the reader refuses is refused here, before any job, with the reader's text.
+    try:
+        frame_warnings = list(
+            c2sc.check_self_cal_frames(full_cfg, source, base_idx, cam1, cam2)
+        )
+    except (PivrawError, CalibrationFrameMismatch) as exc:
+        return jsonify({"success": False, "error": str(exc)}), 400
+    except ValueError as exc:
+        return jsonify({"success": False, "error": str(exc)}), 200
 
-    job_id = job_manager.create_job("calibration_self_cal", out_dir=str(figdir))
+    job_id = job_manager.create_job(
+        "calibration_self_cal", out_dir=str(figdir), warnings=frame_warnings
+    )
 
     def _run():
         import math as _m
@@ -4149,7 +4172,7 @@ def self_cal_run():
             job_manager.fail_job(job_id, str(exc))
 
     threading.Thread(target=_run, daemon=True).start()
-    return jsonify({"success": True, "job_id": job_id})
+    return jsonify({"success": True, "job_id": job_id, "warnings": frame_warnings})
 
 
 @calibration_bp.route("/calibration/self_cal/status/<job_id>", methods=["GET"])

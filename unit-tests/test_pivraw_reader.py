@@ -19,8 +19,9 @@ Locks in:
     slot against the file name, a foreign ``.idx``, blanked missing_indices).
   * Pairs honour ``frame_b_idx`` and ``out=``; a double-frame run refuses any
     pair but its recorded ``(2k-1, 2k)``.
-  * read_pair / _read_batch through a Config, count validation, calibration
-    counting and source diagnosis know the type.
+  * read_pair / _read_batch through a Config, count validation and source
+    diagnosis know the type. Calibration refuses it
+    (``test_calibration_frame_match.py``, T9).
 
 The cases with drops, offsets or a lost first frame are read frame by frame
 only here: pairing them by trigger is ticket P2.
@@ -51,12 +52,7 @@ from fixtures.pivraw import (  # noqa: E402
     write_piv_config,
 )
 
-from pivtools_core.calibration_settings import save_settings  # noqa: E402
 from pivtools_core.config import Config  # noqa: E402
-from pivtools_core.image_handling.calibration_loader import (  # noqa: E402
-    FrameCount,
-    get_calibration_frame_count,
-)
 from pivtools_core.image_handling.load_images import (  # noqa: E402
     _read_batch,
     read_pair,
@@ -659,21 +655,6 @@ def test_count_validation_names_extension_mismatch(tmp_path):
     assert result["error"] == (
         f"Image type is PIVRAW but the pattern names a .png file: {tmp_path / 'Camera1.png'}"
     )
-
-
-def test_calibration_frame_count_reads_the_header(tmp_path):
-    run = copy_case(tmp_path, DF_CLEAN)
-    save_settings(
-        run, {"image": {"image_format": "Camera%d.pivraw", "image_type": "pivraw"}}
-    )
-
-    class _Cfg:
-        camera_count = 2
-
-        def get_calibration_source(self, idx):
-            return run
-
-    assert get_calibration_frame_count(2, _Cfg(), 0) == FrameCount(4, ".pivraw header")
 
 
 # ---------------------------------------------------------------------------
