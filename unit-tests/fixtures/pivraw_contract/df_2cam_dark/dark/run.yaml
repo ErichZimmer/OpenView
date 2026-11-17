@@ -33,8 +33,8 @@ config:
 pattern:
   mode: double_frame
   rate_hz: 25.0
-started_at: '2026-11-17T15:43:12.280519+00:00'
-stopped_at: '2026-11-17T15:43:12.295129+00:00'
+started_at: '2026-11-17T16:24:25.471516+00:00'
+stopped_at: '2026-11-17T16:24:25.487108+00:00'
 trigger: software
 simulated: true
 dark: null
