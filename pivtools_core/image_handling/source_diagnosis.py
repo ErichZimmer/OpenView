@@ -34,6 +34,7 @@ from typing import (
     Union,
 )
 
+from ..calibration_settings import NON_CALIBRATION_IMAGE_TYPES
 from .path_utils import (
     RASTER_EXTENSIONS,
     _detect_ab_pair_pattern,
@@ -1729,6 +1730,8 @@ def diagnose(
     one runs every rule in ``RULES`` order and drops later suggestions whose ``apply``
     equals an earlier one. Merging across cameras is the caller's job.
     ``detected_start_index`` is the core result's ``detected_start_index``.
+    On calibration, a fix that switches to a type calibration refuses
+    (``NON_CALIBRATION_IMAGE_TYPES``) is never offered.
     """
     inp = RuleInput(
         scan, ctx, camera, camera_path, expected_count, detected_start_index, scan_cache
@@ -1740,6 +1743,11 @@ def diagnose(
             continue
         for suggestion in rule(inp):
             if suggestion["apply"] in seen:
+                continue
+            if (
+                ctx.calibration
+                and suggestion["apply"].get("image_type") in NON_CALIBRATION_IMAGE_TYPES
+            ):
                 continue
             seen.append(suggestion["apply"])
             out.append(suggestion)

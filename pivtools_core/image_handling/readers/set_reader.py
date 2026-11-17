@@ -579,6 +579,22 @@ _REFUSED_TRANSFORMERS: Dict[str, str] = {
     "image-intensity-correction-2": "Intensity correction 2",
 }
 
+
+def stream_geometry(frame: "IMSFrameInfo") -> Optional[str]:
+    """The id of the geometry transformer a stream carries, None when it has none.
+
+    A stream carries at most one (parse refuses two). Used to prove that two
+    recordings were turned the same way, e.g. a calibration and its PIV source.
+
+    Raises:
+        ValueError: The stream carries a transformer id PIVTOOLs does not know,
+            so its geometry is unknown (the message is :attr:`IMSFrameInfo.blocked`).
+    """
+    if frame.has_unknown_transformer:
+        raise ValueError(frame.blocked)
+    return next((tf.id for tf in frame.transformers if tf.id in _GEOMETRIES), None)
+
+
 # Position of each id in a stream's transformer tuple. A refused id never runs
 # (its stream is refused first), so where it sits among the others is moot.
 _APPLICATION_RANK: Dict[str, int] = {

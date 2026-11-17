@@ -3,7 +3,8 @@
 This module provides functions for loading and validating calibration images
 using the centralized image handling system. It supports all image formats
 including standard formats (TIFF, PNG, JPEG) and container formats
-(.set, .im7, .cine, .pivraw).
+(.set, .im7, .cine). A ``.pivraw`` run is never a calibration source
+(``calibration_settings.refuse_non_calibration_type``).
 
 Key Functions:
 - read_calibration_image: Read a single calibration image
@@ -25,7 +26,11 @@ from typing import Any, Dict, NamedTuple, Optional, Tuple
 
 import numpy as np
 
-from ..calibration_settings import default_settings, try_load_settings
+from ..calibration_settings import (
+    default_settings,
+    refuse_non_calibration_type,
+    try_load_settings,
+)
 from ..config import Config
 from .load_images import read_single_frame
 from .path_utils import (
@@ -34,12 +39,10 @@ from .path_utils import (
     cine_extension_mismatch,
     format_to_glob,
     infer_image_type,
-    pivraw_extension_mismatch,
     resolve_file_path,
     validate_images_generic,
 )
 from .readers.cine_reader import get_cine_frame_count
-from .readers.pivraw_reader import get_pivraw_frame_count
 
 # Import from the concrete submodule: get_set_entry_count is NOT re-exported from
 # the .readers package (see path_utils' .set validation branch).
@@ -101,7 +104,7 @@ from .source_diagnosis import DiagnosisContext
 _FRAME_CACHE_MAX_ENTRIES = 64
 
 # Single-file containers: entries are numbered by the reader, never by filename.
-_CONTAINER_TYPES = ("lavision_set", "cine", "pivraw")
+_CONTAINER_TYPES = ("lavision_set", "cine")
 
 
 def _frame_cache_budget_bytes() -> int:
@@ -316,6 +319,9 @@ def _resolve_image_settings(
         image["image_type"] = image_type
     if num_images is not None:
         image["n_views"] = num_images
+    refuse_non_calibration_type(
+        image["image_type"], f"Calibration source {source}, image type"
+    )
     return source, image
 
 
@@ -436,8 +442,7 @@ def read_calibration_frame_at(
     through ``read_calibration_image`` (resolves ``camera_path`` from ``config`` +
     ``source_path_idx``); the calibration CLI calls this directly with its
     ``--source``-derived directory, so both read the same formats (standard tif/png,
-    LaVision ``.im7``/``.set``, Phantom ``.cine``, PIVTOOLS Acquisition ``.pivraw``)
-    through one code path.
+    LaVision ``.im7``/``.set``, Phantom ``.cine``) through one code path.
 
     Parameters mirror :func:`read_calibration_image` except ``camera_path`` is supplied
     directly (a directory for per-file formats, or the container file for ``.set``), and
@@ -455,11 +460,13 @@ def read_calibration_frame_at(
     Raises
     ------
     ValueError
-        ``zero_based_indexing`` is True for a container (``.set`` / ``.cine`` /
-        ``.pivraw``). Container entries are numbered by the reader (``.set`` and
-        ``.pivraw`` from 1, ``.cine`` through its ``FirstImageNo``), not by filenames, so the flag has nothing
+        ``image_type`` is ``pivraw``, which is never a calibration image type.
+        ``zero_based_indexing`` is True for a container (``.set`` / ``.cine``).
+        Container entries are numbered by the reader (``.set`` from 1, ``.cine``
+        through its ``FirstImageNo``), not by filenames, so the flag has nothing
         to shift; refusing it keeps a 0/1 setting from being silently ignored.
     """
+    refuse_non_calibration_type(image_type, f"Calibration frame read in {camera_path}")
     if zero_based_indexing and image_type in _CONTAINER_TYPES:
         raise ValueError(
             f"image.zero_based_indexing is set, but {image_type} calibration "
@@ -705,8 +712,7 @@ class FrameCount(NamedTuple):
     """A calibration view count and where it was read from.
 
     ``source`` is ``"files"`` (glob over standard/IM7 images), ``".set index"``
-    (LaVision ``.set`` entry count), ``".cine header"`` (Phantom ``ImageCount``) or
-    ``".pivraw header"`` (the PIVTOOLS Acquisition sidecar's ``n_frames``).
+    (LaVision ``.set`` entry count) or ``".cine header"`` (Phantom ``ImageCount``).
     Carried to the GUI so the user sees whether the number came from the images
     or from a setting.
     """
@@ -743,7 +749,7 @@ def get_calibration_frame_count(
     FileNotFoundError
         The camera path (directory, or the ``.set`` file itself) does not exist.
     ValueError
-        No images match the format, the ``.cine``/``.pivraw`` file is missing, a container
+        No images match the format, the ``.cine`` file is missing, a container
         reader fails (chained), or a container reports zero frames.
     """
     # Image sourcing comes from the source's settings sidecar.
@@ -787,24 +793,6 @@ def get_calibration_frame_count(
             ) from exc
         found = FrameCount(int(n), ".cine header")
         where = str(cine_path)
-
-    elif image_type == "pivraw":
-        pivraw_path = camera_path / (fmt % camera if "%" in fmt else fmt)
-        if not pivraw_path.is_file():
-            raise ValueError(
-                f"pivraw file for camera {camera} not found: {pivraw_path}"
-            )
-        mismatch = pivraw_extension_mismatch(pivraw_path)
-        if mismatch is not None:
-            raise ValueError(mismatch)
-        try:
-            n = get_pivraw_frame_count(pivraw_path)
-        except Exception as exc:
-            raise ValueError(
-                f"could not read the frame count of {pivraw_path}: {exc}"
-            ) from exc
-        found = FrameCount(int(n), ".pivraw header")
-        where = str(pivraw_path)
 
     else:
         # Standard formats and IM7 both count matching files.

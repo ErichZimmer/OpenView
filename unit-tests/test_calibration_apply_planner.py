@@ -10,6 +10,7 @@ explicit single-unit override.
 from __future__ import annotations
 
 import pytest
+from fixtures.vector_sets import plain_piv_source_fields
 
 from pivtools_core.paths import get_data_paths
 from pivtools_gui.calibration import record as REC
@@ -24,6 +25,7 @@ class _FakeCfg:
         self.base_paths = base_paths
         self.camera_numbers = camera_numbers
         self.num_frame_pairs = num_frame_pairs
+        self.__dict__.update(plain_piv_source_fields(camera_numbers, base_paths))
 
 
 def _make_source(tmp_path, cams=(1, 2)):

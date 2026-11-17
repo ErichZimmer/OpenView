@@ -41,6 +41,7 @@ from .apply import (
     calibrate_stress_tensor,
 )
 from .camera_model import CameraModel
+from .frame_match import check_calibration_frames
 from .record import MonoRecord, StereoRecord
 
 logger = logging.getLogger(__name__)
@@ -167,6 +168,12 @@ def plan_apply_units(
     Every unit also carries ``cameras``: ``(cam,)`` for mono, ``(cam1, cam2)`` in record
     order for stereo, so a caller can say which cameras the run covers.
 
+    Before returning, the calibration's pixel frame is checked against the PIV images
+    of every unit (``frame_match.check_calibration_frames``): the PIV source paired
+    with each planned base path, or every configured source for an ``explicit`` unit,
+    whose vectors name no base path. A mismatch raises ``CalibrationFrameMismatch``
+    (a ``ValueError``) before any job starts.
+
     Stereo ``uncal1`` / ``uncal2`` follow the RECORD's camera order (``rec.record_pair``),
     not ``camera_pair``'s: the pair dir is shared by ``(1, 2)`` and ``(2, 1)``, and
     ``reconstruct_stereo_run`` pairs ``uncal1`` with ``record.model1``, which is
@@ -206,7 +213,7 @@ def plan_apply_units(
         # model1/model2 belong to record.cam1/cam2: read each camera's vectors in that order.
         cam1, cam2 = rec.record_pair(record, out_pair)
         if explicit:
-            return [
+            units = [
                 dict(
                     stereo=True,
                     record=record,
@@ -218,6 +225,8 @@ def plan_apply_units(
                     cameras=(cam1, cam2),
                 )
             ]
+            _check_frames(full_cfg, source, units, None)
+            return units
         for bi in base_indices:
             base = base_paths[bi]
             uncal1 = get_data_paths(base, nfp, cam1, type_name, use_uncalibrated=True)[
@@ -254,7 +263,7 @@ def plan_apply_units(
                 cam,
                 model_type=model_type,
             )
-            return [
+            units = [
                 dict(
                     stereo=False,
                     record=record,
@@ -265,6 +274,8 @@ def plan_apply_units(
                     cameras=(cam,),
                 )
             ]
+            _check_frames(full_cfg, source, units, None)
+            return units
         for bi in base_indices:
             base = base_paths[bi]
             for cam in full_cfg.camera_numbers:
@@ -293,7 +304,36 @@ def plan_apply_units(
                         cameras=(int(cam),),
                     )
                 )
+    _check_frames(full_cfg, source, units, base_indices)
     return units
+
+
+def _check_frames(full_cfg, source, units, base_indices: Optional[List[int]]) -> None:
+    """Refuse the plan unless the calibration's pixel frame is the PIV images'.
+
+    ``base_indices`` are the planned base paths; each is paired with the PIV source
+    at the same index of ``paths.source_paths``. None (an explicit unit, which names
+    no base path) checks every configured source.
+
+    Raises:
+        ValueError: A planned base path has no source path at its index.
+        CalibrationFrameMismatch: ``frame_match.check_calibration_frames`` refuses.
+    """
+    sources = full_cfg.source_paths
+    if base_indices is None:
+        piv_sources = list(sources)
+    else:
+        unpaired = [i for i in base_indices if i >= len(sources)]
+        if unpaired:
+            raise ValueError(
+                f"base path(s) {unpaired} have no source path at the same index "
+                f"({len(sources)} source path(s) configured), so the PIV images "
+                "behind their vectors are unknown and the calibration cannot be "
+                "checked against them"
+            )
+        piv_sources = [sources[i] for i in base_indices]
+    cameras = sorted({int(c) for u in units for c in u["cameras"]})
+    check_calibration_frames(full_cfg, source, cameras, piv_sources)
 
 
 # Config.save_timestamped_copy names snapshots "config_<YYYY-MM-DD_HH-MM-SS>.yaml".

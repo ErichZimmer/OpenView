@@ -489,8 +489,8 @@ def _frame_total(
     else the auto-count from the images.
 
     ``source`` is ``"request"``, ``"n_views setting"`` or the auto-count's
-    ``FrameCount.source`` (``"files"``, ``".set index"``, ``".cine header"``,
-    ``".pivraw header"``), so the GUI can say where the number came from.
+    ``FrameCount.source`` (``"files"``, ``".set index"``, ``".cine header"``), so
+    the GUI can say where the number came from.
 
     Raises ``ValueError`` for a non-positive request value, and naming the camera and
     source when the auto-count fails: a zero or guessed view count would silently
