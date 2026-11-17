@@ -943,12 +943,9 @@ def main():
                 # Clean up (local only — gc.collect on workers historically caused SIGSEGV (attributed to FFTW plan teardown; FFTW is gone and this is unverified against the codelet engine — guard retained))
                 gc.collect()
 
-    except Exception as e:
-        import traceback
-
-        logger.error(f"Error: {e}")
-        traceback.print_exc()
-
+    # No except clause: a failure stops the remaining cameras and propagates
+    # after the cluster is shut down, so the process exits non-zero with the
+    # message (the CLI wrapper prints it; a direct script run shows the traceback).
     finally:
         # Clean shutdown - suppress noisy distributed logs during teardown
         import io as _io
