@@ -1,0 +1,34 @@
+{
+  "camera_model": "simulated-jai_go",
+  "camera_serial": "SIM1",
+  "slot": 1,
+  "width": 8,
+  "height": 8,
+  "pixel_format": "BayerRG8",
+  "bytes_per_frame": 64,
+  "frame_stride": 4096,
+  "mode": "time_resolved",
+  "exposure_us": 800.0,
+  "exposure_effective_us": 800.0,
+  "max_rate_hz": 159.3,
+  "rate_hz": 25.0,
+  "dt_s": 0.04,
+  "camera_settings": {
+    "requested": {
+      "exposure_us": 800,
+      "mode": "time_resolved"
+    },
+    "read_back": {
+      "ExposureTime": "800",
+      "simulated": "true"
+    }
+  },
+  "created_at": "2026-11-17T15:05:58.885599+00:00",
+  "n_frames": 3,
+  "finalised": true,
+  "dropped_pairs": 0,
+  "missing_indices": [],
+  "first_frame_id": 1000,
+  "format": "pivraw",
+  "format_version": 2
+}

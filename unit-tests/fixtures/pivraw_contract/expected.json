@@ -1,0 +1,536 @@
+{
+ "writer_commit": "80be335",
+ "format_version": 2,
+ "period_s": 0.04,
+ "camera_clock_offset_ns": {
+  "1": 3600000000000,
+  "2": 7300000000000
+ },
+ "cases": {
+  "df_2cam_clean": {
+   "mode": "double_frame",
+   "n_triggers_fired": 2,
+   "outcome": "pairs",
+   "cameras": {
+    "1": {
+     "n_frames": 4,
+     "first_frame_id": 1000,
+     "missing_indices": [],
+     "dropped_pairs": 0,
+     "pixel_format": "Mono12p",
+     "decoded_shape": [
+      8,
+      16
+     ],
+     "idx_frame_ids": [
+      1000,
+      1001,
+      1002,
+      1003
+     ],
+     "true_trigger": [
+      1,
+      1,
+      2,
+      2
+     ],
+     "true_ab": [
+      "A",
+      "B",
+      "A",
+      "B"
+     ]
+    },
+    "2": {
+     "n_frames": 4,
+     "first_frame_id": 5000,
+     "missing_indices": [],
+     "dropped_pairs": 0,
+     "pixel_format": "Mono12p",
+     "decoded_shape": [
+      8,
+      16
+     ],
+     "idx_frame_ids": [
+      5000,
+      5001,
+      5002,
+      5003
+     ],
+     "true_trigger": [
+      1,
+      1,
+      2,
+      2
+     ],
+     "true_ab": [
+      "A",
+      "B",
+      "A",
+      "B"
+     ]
+    }
+   },
+   "pairs": [
+    {
+     "pair": 1,
+     "run_triggers": [
+      0,
+      0
+     ],
+     "file_frames": {
+      "1": [
+       1,
+       2
+      ],
+      "2": [
+       1,
+       2
+      ]
+     }
+    },
+    {
+     "pair": 2,
+     "run_triggers": [
+      1,
+      1
+     ],
+     "file_frames": {
+      "1": [
+       3,
+       4
+      ],
+      "2": [
+       3,
+       4
+      ]
+     }
+    }
+   ],
+   "skipped_incomplete": 0
+  },
+  "tr_bayer_clean": {
+   "mode": "time_resolved",
+   "n_triggers_fired": 3,
+   "outcome": "pairs",
+   "cameras": {
+    "1": {
+     "n_frames": 3,
+     "first_frame_id": 1000,
+     "missing_indices": [],
+     "dropped_pairs": 0,
+     "pixel_format": "BayerRG8",
+     "decoded_shape": [
+      4,
+      4
+     ],
+     "idx_frame_ids": [
+      1000,
+      1001,
+      1002
+     ],
+     "true_trigger": [
+      1,
+      2,
+      3
+     ],
+     "true_ab": [
+      null,
+      null,
+      null
+     ]
+    }
+   },
+   "pairs": [
+    {
+     "pair": 1,
+     "run_triggers": [
+      0,
+      1
+     ],
+     "file_frames": {
+      "1": [
+       1,
+       2
+      ]
+     }
+    },
+    {
+     "pair": 2,
+     "run_triggers": [
+      1,
+      2
+     ],
+     "file_frames": {
+      "1": [
+       2,
+       3
+      ]
+     }
+    }
+   ],
+   "skipped_incomplete": 0
+  },
+  "df_2cam_unequal_drops": {
+   "mode": "double_frame",
+   "n_triggers_fired": 3,
+   "outcome": "pairs",
+   "cameras": {
+    "1": {
+     "n_frames": 4,
+     "first_frame_id": 1000,
+     "missing_indices": [
+      2,
+      3
+     ],
+     "dropped_pairs": 1,
+     "pixel_format": "Mono12p",
+     "decoded_shape": [
+      8,
+      16
+     ],
+     "idx_frame_ids": [
+      1000,
+      1001,
+      1004,
+      1005
+     ],
+     "true_trigger": [
+      1,
+      1,
+      3,
+      3
+     ],
+     "true_ab": [
+      "A",
+      "B",
+      "A",
+      "B"
+     ]
+    },
+    "2": {
+     "n_frames": 4,
+     "first_frame_id": 5000,
+     "missing_indices": [
+      4,
+      5
+     ],
+     "dropped_pairs": 1,
+     "pixel_format": "Mono12p",
+     "decoded_shape": [
+      8,
+      16
+     ],
+     "idx_frame_ids": [
+      5000,
+      5001,
+      5002,
+      5003
+     ],
+     "true_trigger": [
+      1,
+      1,
+      2,
+      2
+     ],
+     "true_ab": [
+      "A",
+      "B",
+      "A",
+      "B"
+     ]
+    }
+   },
+   "pairs": [
+    {
+     "pair": 1,
+     "run_triggers": [
+      0,
+      0
+     ],
+     "file_frames": {
+      "1": [
+       1,
+       2
+      ],
+      "2": [
+       1,
+       2
+      ]
+     }
+    }
+   ],
+   "skipped_incomplete": 2
+  },
+  "tr_lost_frame": {
+   "mode": "time_resolved",
+   "n_triggers_fired": 4,
+   "outcome": "pairs",
+   "cameras": {
+    "1": {
+     "n_frames": 3,
+     "first_frame_id": 1000,
+     "missing_indices": [
+      1
+     ],
+     "dropped_pairs": 0,
+     "pixel_format": "BayerRG8",
+     "decoded_shape": [
+      4,
+      4
+     ],
+     "idx_frame_ids": [
+      1000,
+      1002,
+      1003
+     ],
+     "true_trigger": [
+      1,
+      3,
+      4
+     ],
+     "true_ab": [
+      null,
+      null,
+      null
+     ]
+    }
+   },
+   "pairs": [
+    {
+     "pair": 1,
+     "run_triggers": [
+      2,
+      3
+     ],
+     "file_frames": {
+      "1": [
+       2,
+       3
+      ]
+     }
+    }
+   ],
+   "skipped_incomplete": 2
+  },
+  "df_lost_first_frame": {
+   "mode": "double_frame",
+   "n_triggers_fired": 3,
+   "outcome": "must_raise:ab_phase",
+   "cameras": {
+    "1": {
+     "n_frames": 4,
+     "first_frame_id": 1001,
+     "missing_indices": [
+      4,
+      5
+     ],
+     "dropped_pairs": 1,
+     "pixel_format": "Mono12p",
+     "decoded_shape": [
+      8,
+      16
+     ],
+     "idx_frame_ids": [
+      1001,
+      1002,
+      1003,
+      1004
+     ],
+     "true_trigger": [
+      1,
+      2,
+      2,
+      3
+     ],
+     "true_ab": [
+      "B",
+      "A",
+      "B",
+      "A"
+     ]
+    }
+   }
+  },
+  "df_2cam_lost_first_pair_cam1": {
+   "mode": "double_frame",
+   "n_triggers_fired": 2,
+   "outcome": "must_raise:camera_offset",
+   "cameras": {
+    "1": {
+     "n_frames": 2,
+     "first_frame_id": 1002,
+     "missing_indices": [],
+     "dropped_pairs": 0,
+     "pixel_format": "Mono12p",
+     "decoded_shape": [
+      8,
+      16
+     ],
+     "idx_frame_ids": [
+      1002,
+      1003
+     ],
+     "true_trigger": [
+      2,
+      2
+     ],
+     "true_ab": [
+      "A",
+      "B"
+     ]
+    },
+    "2": {
+     "n_frames": 4,
+     "first_frame_id": 5000,
+     "missing_indices": [],
+     "dropped_pairs": 0,
+     "pixel_format": "Mono12p",
+     "decoded_shape": [
+      8,
+      16
+     ],
+     "idx_frame_ids": [
+      5000,
+      5001,
+      5002,
+      5003
+     ],
+     "true_trigger": [
+      1,
+      1,
+      2,
+      2
+     ],
+     "true_ab": [
+      "A",
+      "B",
+      "A",
+      "B"
+     ]
+    }
+   }
+  },
+  "df_2cam_missed_trigger_cam2": {
+   "mode": "double_frame",
+   "n_triggers_fired": 3,
+   "outcome": "must_raise:camera_offset",
+   "cameras": {
+    "1": {
+     "n_frames": 6,
+     "first_frame_id": 1000,
+     "missing_indices": [],
+     "dropped_pairs": 0,
+     "pixel_format": "Mono12p",
+     "decoded_shape": [
+      8,
+      16
+     ],
+     "idx_frame_ids": [
+      1000,
+      1001,
+      1002,
+      1003,
+      1004,
+      1005
+     ],
+     "true_trigger": [
+      1,
+      1,
+      2,
+      2,
+      3,
+      3
+     ],
+     "true_ab": [
+      "A",
+      "B",
+      "A",
+      "B",
+      "A",
+      "B"
+     ]
+    },
+    "2": {
+     "n_frames": 4,
+     "first_frame_id": 5000,
+     "missing_indices": [],
+     "dropped_pairs": 0,
+     "pixel_format": "Mono12p",
+     "decoded_shape": [
+      8,
+      16
+     ],
+     "idx_frame_ids": [
+      5000,
+      5001,
+      5002,
+      5003
+     ],
+     "true_trigger": [
+      1,
+      1,
+      3,
+      3
+     ],
+     "true_ab": [
+      "A",
+      "B",
+      "A",
+      "B"
+     ]
+    }
+   }
+  },
+  "df_2cam_cam2_empty": {
+   "mode": "double_frame",
+   "n_triggers_fired": 2,
+   "outcome": "must_raise:no_frames",
+   "cameras": {
+    "1": {
+     "n_frames": 4,
+     "first_frame_id": 1000,
+     "missing_indices": [],
+     "dropped_pairs": 0,
+     "pixel_format": "Mono12p",
+     "decoded_shape": [
+      8,
+      16
+     ],
+     "idx_frame_ids": [
+      1000,
+      1001,
+      1002,
+      1003
+     ],
+     "true_trigger": [
+      1,
+      1,
+      2,
+      2
+     ],
+     "true_ab": [
+      "A",
+      "B",
+      "A",
+      "B"
+     ]
+    },
+    "2": {
+     "n_frames": 0,
+     "first_frame_id": null,
+     "missing_indices": [],
+     "dropped_pairs": 0,
+     "pixel_format": "Mono12p",
+     "decoded_shape": [
+      8,
+      16
+     ],
+     "idx_frame_ids": [],
+     "true_trigger": [],
+     "true_ab": []
+    }
+   }
+  }
+ }
+}

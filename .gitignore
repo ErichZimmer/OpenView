@@ -37,6 +37,8 @@ pypiv.log
 unit-tests/**/*.tif
 unit-tests/**/*.png
 unit-tests/**/*.npz
+# The .pivraw contract fixtures' decoded frames, copied from pivtools-acquisition (read bit-identical by the tests).
+!unit-tests/fixtures/pivraw_contract/expected_arrays.npz
 unit-tests/**/*.mat
 # IDE
 .vscode/
