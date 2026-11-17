@@ -39,7 +39,6 @@ from fixtures.lavision import (  # noqa: E402
     write_dark_im7_float,
     write_manifest,
     write_scales,
-    write_stream_set,
 )
 
 from pivtools_core.image_handling.readers import set_reader  # noqa: E402
@@ -307,7 +306,11 @@ def test_declared_dark_is_subtracted_and_clamped(tmp_path):
     )
     set_dir = tmp_path / "synthetic"
     write_dark_im7(set_dir / "Transformer0-dark.im7", dark)
-    write_stream_set(set_dir, [("dark-image-subtraction", "Transformer0", 0)])
+    write_manifest(
+        set_dir,
+        [("Frame0", 0)],
+        transformers=[("dark-image-subtraction", "Transformer0", 0)],
+    )
 
     img = read_set_frame(set_file, entry_no=1, frame_idx=0)
 
@@ -338,8 +341,10 @@ def test_unimplemented_transformer_is_refused(tmp_path):
     set_file = build_set(
         tmp_path, "raw-16-bit", [[raw.astype("<u2").tobytes()]], width=3, height=2
     )
-    write_stream_set(
-        tmp_path / "synthetic", [("flat-field-correction", "Transformer0", 0)]
+    write_manifest(
+        tmp_path / "synthetic",
+        [("Frame0", 0)],
+        transformers=[("flat-field-correction", "Transformer0", 0)],
     )
 
     with pytest.raises(ValueError) as exc:
@@ -355,8 +360,10 @@ def test_declared_dark_file_missing_raises(tmp_path):
     set_file = build_set(
         tmp_path, "raw-16-bit", [[raw.astype("<u2").tobytes()]], width=3, height=2
     )
-    write_stream_set(
-        tmp_path / "synthetic", [("dark-image-subtraction", "Transformer0", 0)]
+    write_manifest(
+        tmp_path / "synthetic",
+        [("Frame0", 0)],
+        transformers=[("dark-image-subtraction", "Transformer0", 0)],
     )
 
     with pytest.raises(FileNotFoundError, match="Transformer0-dark.im7"):
@@ -377,7 +384,11 @@ def test_out_of_range_dark_is_refused(tmp_path):
     set_dir = tmp_path / "synthetic"
     big = np.full((2, 3), 70000, dtype=np.int32)
     write_dark_im7_float(set_dir / "Transformer0-dark.im7", big)
-    write_stream_set(set_dir, [("dark-image-subtraction", "Transformer0", 0)])
+    write_manifest(
+        set_dir,
+        [("Frame0", 0)],
+        transformers=[("dark-image-subtraction", "Transformer0", 0)],
+    )
 
     with pytest.raises(ValueError, match=r"not integer counts in \[0, 65535\]"):
         read_set_frame(set_file, entry_no=1, frame_idx=0)
@@ -391,7 +402,11 @@ def test_dark_shape_mismatch_raises(tmp_path):
     )
     set_dir = tmp_path / "synthetic"
     write_dark_im7(set_dir / "Transformer0-dark.im7", np.zeros((4, 5), np.uint16))
-    write_stream_set(set_dir, [("dark-image-subtraction", "Transformer0", 0)])
+    write_manifest(
+        set_dir,
+        [("Frame0", 0)],
+        transformers=[("dark-image-subtraction", "Transformer0", 0)],
+    )
 
     with pytest.raises(ValueError, match="does not belong to this recording"):
         read_set_frame(set_file, entry_no=1, frame_idx=0)
@@ -668,7 +683,11 @@ def test_dark_image_cache_revalidates_on_mtime(tmp_path, _clean_set_cache):
     set_file, set_dir = _dark_set(tmp_path, "darkcache", value=100)
     dark_path = set_dir / "Transformer0-dark.im7"
     write_dark_im7(dark_path, np.full((2, 3), 10, np.uint16))
-    write_stream_set(set_dir, [("dark-image-subtraction", "Transformer0", 0)])
+    write_manifest(
+        set_dir,
+        [("Frame0", 0)],
+        transformers=[("dark-image-subtraction", "Transformer0", 0)],
+    )
 
     np.testing.assert_array_equal(
         read_set_frame(set_file, entry_no=1, frame_idx=0),
@@ -695,7 +714,11 @@ def test_dark_image_is_cached_within_one_mtime(tmp_path, _clean_set_cache):
     """
     set_file, set_dir = _dark_set(tmp_path, "darkhit", value=100)
     write_dark_im7(set_dir / "Transformer0-dark.im7", np.full((2, 3), 10, np.uint16))
-    write_stream_set(set_dir, [("dark-image-subtraction", "Transformer0", 0)])
+    write_manifest(
+        set_dir,
+        [("Frame0", 0)],
+        transformers=[("dark-image-subtraction", "Transformer0", 0)],
+    )
 
     set_reader._load_dark_cached.cache_clear()
     for _ in range(3):
@@ -716,9 +739,10 @@ def test_two_transformers_for_one_stream_raises(tmp_path, _clean_set_cache):
     set_file, set_dir = _dark_set(tmp_path, "dupe")
     for prefix in ("Transformer0", "Transformer1"):
         write_dark_im7(set_dir / f"{prefix}-dark.im7", np.zeros((2, 3), np.uint16))
-    write_stream_set(
+    write_manifest(
         set_dir,
-        [
+        [("Frame0", 0)],
+        transformers=[
             ("dark-image-subtraction", "Transformer0", 0),
             ("dark-image-subtraction", "Transformer1", 0),
         ],
@@ -732,7 +756,11 @@ def test_non_numeric_start_frame_names_the_problem(tmp_path, _clean_set_cache):
     """A bare "invalid literal for int()" would be the only unnamed failure here."""
     set_file, set_dir = _dark_set(tmp_path, "badframe")
     write_dark_im7(set_dir / "Transformer0-dark.im7", np.zeros((2, 3), np.uint16))
-    write_stream_set(set_dir, [("dark-image-subtraction", "Transformer0", "first")])
+    write_manifest(
+        set_dir,
+        [("Frame0", 0)],
+        transformers=[("dark-image-subtraction", "Transformer0", "first")],
+    )
 
     with pytest.raises(ValueError, match="not a frame-stream number"):
         read_set_frame(set_file, entry_no=1, frame_idx=0)
@@ -833,8 +861,7 @@ def test_mono10p_is_now_decoded_end_to_end(tmp_path, _clean_set_cache):
 # A real five-camera PLIF+STB recording (E:\cavityim7data\set trial, 2026-08-24)
 # names its streams Camera1..Camera5 and its scales CameraScale1..5. The alk235
 # recording names them Frame0..9 / FrameScales0..9 -- through the SAME manifest
-# mechanism. The Frame{N} glob is only the fallback for a manifest that declares
-# no streams.
+# mechanism. The manifest is the only source: a recording without one is refused.
 
 
 def _camera_layout(tmp_path, name="cams", transformers=(), scale_readers=()):
@@ -943,16 +970,30 @@ def test_manifest_non_numeric_start_frame_raises(tmp_path, _clean_set_cache):
         read_set_info(set_file)
 
 
-def test_transformer_only_manifest_still_uses_frame_glob(tmp_path, _clean_set_cache):
-    """A manifest that declares no FrameReader (our fixtures, older exports)
-    falls back to the Frame{N} convention -- the existing dark-image tests
-    depend on this, and so does every recording the glob served before."""
+def test_transformer_only_manifest_is_refused(tmp_path, _clean_set_cache):
+    """A manifest that declares no FrameReader names no stream. lvpyio opens no
+    image for it, and the Frame{N} file-name guess that used to read it is gone."""
     raw = np.array([[7, 8, 9]], dtype=np.uint16)
     set_file = build_set(tmp_path, "raw-16-bit", [[raw.tobytes()]], width=3, height=1)
-    write_manifest(tmp_path / "synthetic", frame_readers=[])
-    np.testing.assert_array_equal(
-        read_set_frame(set_file, 1, 0), raw.astype(np.float32)
+    write_manifest(
+        tmp_path / "synthetic",
+        frame_readers=[],
+        transformers=[("rotate-180", "Transformer0", 0)],
     )
+    with pytest.raises(ValueError, match="declares no FrameReader") as exc:
+        read_set_frame(set_file, 1, 0)
+    assert "Frame0" in str(exc.value)
+
+
+def test_frame_named_streams_without_manifest_are_refused(tmp_path, _clean_set_cache):
+    """Frame{N} file names are not read as streams when StreamSet.xml is absent."""
+    raw = np.array([[7, 8, 9]], dtype=np.uint16)
+    set_file = build_set(
+        tmp_path, "raw-16-bit", [[raw.tobytes()]], width=3, height=1, manifest=False
+    )
+    with pytest.raises(FileNotFoundError, match="StreamSet.xml is missing") as exc:
+        read_set_info(set_file)
+    assert "Frame0" in str(exc.value)
 
 
 def test_camera_prefix_without_manifest_is_named_not_misdiagnosed(
