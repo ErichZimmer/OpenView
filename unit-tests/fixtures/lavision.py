@@ -13,10 +13,49 @@ import yaml
 from pivtools_core.config import Config
 from pivtools_core.image_handling.readers.set_reader import clear_set_info_cache
 
-# Index layout, mirroring _parse_ims_index: 256-byte header (width at offset 12,
-# height at 16) then 768 bytes of padding, then 20-byte entries.
-TABLE_OFFSET = 256 + 768
-ENTRY_STRUCT = "<iqq"  # flag int32, offset int64, size int64
+# Index layout as DaVis writes it (container-unknowns REPORT §1, measured on 20
+# real stream files): a 1024-byte header, then 20-byte entries.
+TABLE_OFFSET = 1024
+ENTRY_STRUCT = "<Iqq"  # file number uint32, offset int64, size int64
+
+# The header words every real stream file carries, by int32 word index: version 1,
+# image count 0 (derive), 1 frame per image, 16 bits per decoded pixel, planes 0,
+# sample type 0 (uint16). Words 3 and 4 (width, height) are per stream.
+MEASURED_HEADER_WORDS = {0: 1, 1: 0, 2: 1, 5: 16, 14: 0, 15: 0}
+CODEC_OFFSET = 24  # bytes 24..55, NUL-terminated codec name; empty = uncompressed
+CODEC_FIELD_BYTES = 32
+
+
+def ims_index(width, height, sizes, words=None, codec=b"", file_numbers=None):
+    """Bytes of a {prefix}-0.ims index in DaVis's measured layout.
+
+    Args:
+        width: stored width, header word 3.
+        height: stored height, header word 4.
+        sizes: per-entry stored size; entries are laid end to end from offset 0.
+        words: optional {word index: int32} overriding MEASURED_HEADER_WORDS, to
+            build a header DaVis was not seen to write.
+        codec: raw bytes written at CODEC_OFFSET (at most CODEC_FIELD_BYTES).
+        file_numbers: optional per-entry data-file number; default 1 for all.
+
+    Returns:
+        bytes: the whole index file.
+    """
+    header = bytearray(TABLE_OFFSET)
+    for word, value in {**MEASURED_HEADER_WORDS, 3: width, 4: height}.items():
+        struct.pack_into("<i", header, 4 * word, value)
+    for word, value in (words or {}).items():
+        struct.pack_into("<i", header, 4 * word, value)
+    assert len(codec) <= CODEC_FIELD_BYTES
+    header[CODEC_OFFSET : CODEC_OFFSET + len(codec)] = codec
+
+    offset = 0
+    for k, size in enumerate(sizes):
+        file_no = 1 if file_numbers is None else file_numbers[k]
+        header += struct.pack(ENTRY_STRUCT, file_no, offset, size)
+        offset += size
+    return bytes(header)
+
 
 # Stream 0 differs, streams 1-4 are equal (2160x2560 + 4 x 2048x2048, scaled down).
 # (height, width) per stream.
@@ -42,6 +81,7 @@ def build_set(
     declared_sizes=None,
     prefixes=None,
     shapes=None,
+    manifest=True,
 ):
     """Write a minimal .set container and return the path to the .set file.
 
@@ -57,11 +97,11 @@ def build_set(
         declared_sizes: optional per-stream list of per-entry sizes to declare in
             the index, overriding the true payload length. Used to build a
             container whose declared geometry disagrees with its payload.
-        prefixes: optional per-stream file prefix. Default ``Frame{N}``, which
-            the reader finds by glob; anything else needs a StreamSet.xml
-            manifest (see ``write_manifest``) to be found at all.
+        prefixes: optional per-stream file prefix. Default ``Frame{N}``.
         shapes: optional per-stream (height, width), overriding width/height.
             Real recordings carry a different shape per camera.
+        manifest: when True, write a StreamSet.xml declaring stream k under its
+            prefix at StartFrame k. The reader finds streams only through it.
 
     Returns:
         Path: the .set file (its companion directory sits alongside).
@@ -71,24 +111,20 @@ def build_set(
     set_dir = tmp_path / name
     set_dir.mkdir()
 
+    all_prefixes = [
+        f"Frame{k}" if prefixes is None else prefixes[k] for k in range(len(streams))
+    ]
     for stream_idx, entries in enumerate(streams):
-        prefix = f"Frame{stream_idx}" if prefixes is None else prefixes[stream_idx]
+        prefix = all_prefixes[stream_idx]
         h, w = (height, width) if shapes is None else shapes[stream_idx]
         dec = decoder if isinstance(decoder, str) else decoder[stream_idx]
 
-        index = bytearray(TABLE_OFFSET)
-        struct.pack_into("<i", index, 12, w)
-        struct.pack_into("<i", index, 16, h)
-
-        offset = 0
-        for entry_idx, payload in enumerate(entries):
-            size = len(payload)
-            if declared_sizes is not None:
-                size = declared_sizes[stream_idx][entry_idx]
-            index += struct.pack(ENTRY_STRUCT, 0, offset, size)
-            offset += len(payload)
-
-        (set_dir / f"{prefix}-0.ims").write_bytes(bytes(index))
+        sizes = (
+            [len(p) for p in entries]
+            if declared_sizes is None
+            else declared_sizes[stream_idx]
+        )
+        (set_dir / f"{prefix}-0.ims").write_bytes(ims_index(w, h, sizes))
         (set_dir / f"{prefix}-1.ims").write_bytes(b"".join(entries))
 
         if write_decoder_xml:
@@ -97,10 +133,21 @@ def build_set(
                 f"<FrameDecoder>\n<id>{dec}</id>\n</FrameDecoder>\n"
             )
 
+    if manifest:
+        write_manifest(
+            set_dir, frame_readers=[(p, k) for k, p in enumerate(all_prefixes)]
+        )
     return set_file
 
 
-def write_manifest(set_dir, frame_readers, scale_readers=(), transformers=()):
+def write_manifest(
+    set_dir,
+    frame_readers,
+    scale_readers=(),
+    transformers=(),
+    reader_name="Images_16bit_8Bit",
+    associated_to_frames="true",
+):
     """Write a StreamSet.xml in DaVis's real shape (``<StreamCfg>`` root).
 
     Args:
@@ -108,19 +155,22 @@ def write_manifest(set_dir, frame_readers, scale_readers=(), transformers=()):
         frame_readers: (prefix, stream_index) per image stream.
         scale_readers: (prefix, stream_index) per .scales file.
         transformers: (id, prefix, stream_index) per correction.
+        reader_name: the FrameReader ``Name``. Every real recording carries
+            ``Images_16bit_8Bit``; anything else builds a foreign reader.
+        associated_to_frames: the FrameReader's ``IsAssociatedToFrames``.
     """
 
-    def purpose(frame):
+    def purpose(frame, associated="true"):
         return (
-            f'<ContentPurpose IsAssociatedToFrames="true" '
+            f'<ContentPurpose IsAssociatedToFrames="{associated}" '
             f'IsAssociatedToEntireImage="false" IsAssociatedToAllImages="false" '
             f'StartFrame="{frame}" EndFrame="{frame}"/>'
         )
 
     body = "".join(
-        f'<ReaderInfo Name="Images_16bit_8Bit" Type="Core.Set.Recording.FrameReader" '
+        f'<ReaderInfo Name="{reader_name}" Type="Core.Set.Recording.FrameReader" '
         f'FilePrefix="{prefix}" FormatDescription="LaVision image stream format">'
-        f"{purpose(frame)}</ReaderInfo>"
+        f"{purpose(frame, associated_to_frames)}</ReaderInfo>"
         for prefix, frame in frame_readers
     )
     body += "".join(
@@ -147,20 +197,6 @@ def write_scales(path, factor, offset=0.0):
         '<ScaleX Factor="1" Offset="0" Unit="pixel" Description=""/>'
         f'<ScaleI Factor="{factor}" Offset="{offset}" Unit="counts" Description=""/>'
         "</Scales></ScalesList>"
-    )
-
-
-def write_stream_set(set_dir, entries):
-    """Write a StreamSet.xml declaring one Transformer per (id, prefix, frame)."""
-    body = "".join(
-        f'<Transformer ID="{tid}" Label="L" FilePrefix="{prefix}" '
-        f'MinDaVisVersion="10.2.0">'
-        f'<ContentPurpose IsAssociatedToFrames="true" StartFrame="{frame}" '
-        f'EndFrame="{frame}"/></Transformer>'
-        for tid, prefix, frame in entries
-    )
-    (set_dir / "StreamSet.xml").write_text(
-        f'<?xml version="1.0" encoding="UTF-8"?><StreamSet>{body}</StreamSet>'
     )
 
 
@@ -233,19 +269,16 @@ def build_raw16_set(
             ).tobytes()
             for e in range(n_entries)
         ]
-        index = bytearray(TABLE_OFFSET)
-        struct.pack_into("<i", index, 12, w)
-        struct.pack_into("<i", index, 16, h)
-        offset = 0
-        for payload in payloads:
-            index += struct.pack(ENTRY_STRUCT, 0, offset, len(payload))
-            offset += len(payload)
-        (set_dir / f"Frame{idx}-0.ims").write_bytes(bytes(index))
+        index = ims_index(w, h, [len(p) for p in payloads])
+        (set_dir / f"Frame{idx}-0.ims").write_bytes(index)
         (set_dir / f"Frame{idx}-1.ims").write_bytes(b"".join(payloads))
         (set_dir / f"Frame{idx}-decoder.xml").write_text(
             '<?xml version="1.0" encoding="UTF-8"?>\n'
             "<FrameDecoder>\n<id>raw-16-bit</id>\n</FrameDecoder>\n"
         )
+    write_manifest(
+        set_dir, frame_readers=[(f"Frame{k}", k) for k in range(len(shapes))]
+    )
     return set_file
 
 

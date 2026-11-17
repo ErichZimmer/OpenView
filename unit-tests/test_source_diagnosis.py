@@ -26,6 +26,7 @@ from fixtures.lavision import (  # noqa: E402,F401
     PLIF,
     build_raw16_set,
     clean_set_cache,
+    write_manifest,
 )
 
 import pivtools_core.image_handling.source_diagnosis as SD  # noqa: E402
@@ -1660,6 +1661,7 @@ def test_validate_files_unreadable_set_index_reports_reason(
     touch(folder / "run", [])
     (folder / "run" / "Frame0-0.ims").write_bytes(b"xx")  # index too small
     (folder / "run" / "Frame0-1.ims").write_bytes(b"yy")
+    write_manifest(folder / "run", frame_readers=[("Frame0", 0)])
     set_file = folder / "run.set"
     set_file.write_bytes(b"stub")
     cam = piv_route_response(
@@ -1673,7 +1675,10 @@ def test_validate_files_unreadable_set_index_reports_reason(
             "frame_stride": 0,
         },
     ).get_json()["details"]["camera_1"]
-    reason = f"Index file too small: {folder / 'run' / 'Frame0-0.ims'}"
+    reason = (
+        f"Frame0-0.ims in {folder / 'run'} is 2 bytes, shorter than the 1024-byte "
+        f".ims index header. The index is truncated."
+    )
     assert cam["status"] == "error"
     assert cam["error"] == f"Could not read the image count of {set_file}: {reason}"
     assert cam["found"] == f"run.set: streams could not be read ({reason})."

@@ -21,6 +21,7 @@ from fixtures.lavision import (  # noqa: E402,F401
     build_raw16_set,
     clean_set_cache,
     make_set_config,
+    write_manifest,
 )
 
 from pivtools_core.image_handling.calibration_loader import (  # noqa: E402
@@ -132,14 +133,15 @@ def test_split_cache_follows_set_info_invalidation(tmp_path, clean_set_cache):
     s = build_raw16_set(tmp_path, [(4, 6)] * 4, name="shrink")
     assert set_camera_streams(s, 2) == [(0, 1), (2, 3)]
 
-    # Shrink the container to 2 streams and bump the mtimes that
-    # _set_info_cache_key stats (the .set file and its companion folder). The
+    # Shrink the container to 2 streams (files and manifest) and bump the mtimes
+    # that _set_info_cache_key stats (the .set file and its companion folder). The
     # camera count stays 2, so a stale stream_splits entry would return the old
     # split instead of [(0,), (1,)].
     folder = tmp_path / "shrink"
     for stream in (2, 3):
         for f in folder.glob(f"Frame{stream}-*"):
             f.unlink()
+    write_manifest(folder, frame_readers=[("Frame0", 0), ("Frame1", 1)])
     for path in (s, folder):
         st = path.stat()
         os.utime(path, (st.st_atime, st.st_mtime + 10))
