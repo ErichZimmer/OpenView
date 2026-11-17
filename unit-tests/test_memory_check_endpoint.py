@@ -64,7 +64,8 @@ def _make_config(tmp_path, batch_size, memory_limit, cameras=(1,)):
 def client(tmp_path, monkeypatch):
     """The real api_bp route; image_shape_for is stubbed so no image is read.
 
-    ``shapes`` maps camera number to (H, W), or is None when no image can be read.
+    ``shapes`` maps camera number to (H, W), or is None for a source folder
+    that does not exist yet.
     """
 
     def _build(batch_size, memory_limit, shapes):
@@ -77,6 +78,8 @@ def client(tmp_path, monkeypatch):
 
             monkeypatch.setattr(Config, "image_shape_for", _raise)
         else:
+            # The stub stands for images in a source folder that exists.
+            (tmp_path / "src").mkdir()
             monkeypatch.setattr(
                 Config, "image_shape_for", lambda self, camera: shapes[camera]
             )
@@ -119,12 +122,38 @@ def test_largest_camera_sets_the_estimate(client):
     assert "17.8 MP" in warning
 
 
-def test_silent_when_no_image_can_be_read(client):
-    """No image yet means nothing to estimate — not an error."""
+def test_silent_when_nothing_is_configured_yet(client):
+    """The source folder does not exist yet: nothing to estimate, not an error."""
     response = client(50, "12GB", None).get("/backend/memory_check")
 
     assert response.status_code == 200
     assert response.get_json()["warning"] is None
+
+
+def test_a_camera_whose_size_cannot_be_read_is_named(tmp_path, monkeypatch):
+    """A configured source whose camera 2 the reader refuses: the estimate is
+    not silently skipped, the warning names the camera and the reader's text."""
+    from pivtools_core.image_handling.readers.pivraw_reader import PivrawError
+
+    config = _make_config(tmp_path, 50, "12GB", cameras=(1, 2))
+    (tmp_path / "src").mkdir()
+
+    def shape(self, camera):
+        if camera == 2:
+            raise PivrawError("Camera2.pivraw: the sidecar is refused.")
+        return _SMALL_SHAPE
+
+    monkeypatch.setattr(Config, "image_shape_for", shape)
+    monkeypatch.setattr(gui_app, "get_config", lambda: config)
+    app = Flask(__name__)
+    app.register_blueprint(gui_app.api_bp)
+    response = app.test_client().get("/backend/memory_check")
+
+    assert response.status_code == 200
+    warning = response.get_json()["warning"]
+    assert warning is not None
+    assert "camera 2" in warning
+    assert "Camera2.pivraw: the sidecar is refused." in warning
 
 
 def test_validate_files_no_longer_carries_the_memory_gate(client):

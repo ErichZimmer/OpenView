@@ -412,6 +412,19 @@ def test_config_and_read_pair_follow_the_alignment_per_camera(tmp_path):
     np.testing.assert_array_equal(batch[1], cam2[2:4])
 
 
+def test_a_reader_refusal_reaches_shape_detection_unchanged(tmp_path):
+    """The reader's PivrawError is what the caller sees, not a ValueError
+    wrapping it in 'could not read image file' advice."""
+    run = copy_case(tmp_path, "df_2cam_unequal_drops")
+    edit_sidecar(run, 1, dropped_pairs=0)
+    cfg = Config(path=str(write_piv_config(tmp_path, run, 2, 4)))
+    with pytest.raises(PivrawError) as info:
+        cfg.image_shape_for(1)
+    message = str(info.value)
+    assert "dropped_pairs" in message and "missing_indices" in message
+    assert "Could not read" not in message
+
+
 def test_pivraw_pair_indices_need_the_camera(tmp_path):
     run = copy_case(tmp_path, "df_2cam_clean")
     cfg = Config(path=str(write_piv_config(tmp_path, run, 2, 4)))

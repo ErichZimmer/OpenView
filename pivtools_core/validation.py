@@ -550,13 +550,25 @@ def validate_memory_for_images(config: Config) -> str:
     largest selected camera sets the requirement.
 
     Returns:
-        Warning message string, or empty string if memory is sufficient.
+        Warning message string, or empty string if memory is sufficient or
+        nothing is configured yet (no source path, no camera, or a source path
+        that does not exist). A camera whose image size cannot be read gives a
+        warning naming the camera and the reader's error.
     """
-    try:
-        # (H, W) per camera -- reads an actual image or container metadata
-        shapes = [config.image_shape_for(cam) for cam in config.camera_numbers]
-    except Exception:
-        return ""  # Can't check if we can't read images
+    sources = config.source_paths
+    cameras = config.camera_numbers
+    if not sources or not cameras or not sources[0].exists():
+        return ""
+    shapes = []
+    for cam in cameras:
+        try:
+            # (H, W) -- reads an actual image or container metadata
+            shapes.append(config.image_shape_for(cam))
+        except (ValueError, OSError) as e:
+            return (
+                f"Memory per worker not checked: the image size of camera {cam} "
+                f"cannot be read ({e})."
+            )
 
     h, w = max(shapes, key=lambda hw: hw[0] * hw[1])
     batch_size = config.batch_size

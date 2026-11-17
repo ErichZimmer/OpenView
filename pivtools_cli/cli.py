@@ -1217,6 +1217,8 @@ def main():
     register_calibration_subparsers(subparsers)
 
     args = parser.parse_args()
+    if args.command == "init" and args.base_path is not None and args.from_run is None:
+        init_parser.error("--base-path needs --from-run (it sets an imported run's output)")
 
     if not args.command:
         parser.print_help()

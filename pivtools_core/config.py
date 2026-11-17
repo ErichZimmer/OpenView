@@ -132,6 +132,13 @@ class CalibrationSourceError(ValueError):
     """
 
 
+# Image types read by PIVTOOLs' own readers. Every refusal they make is a
+# ValueError (PivrawError, SetConfigError and SetPairingError,
+# CameraIdentityError, AttrFormatError, a blocked camera, the strict-header
+# checks) or an OSError (TokenStreamError, a missing file), and names the file
+# and the fix, so shape detection passes those through unchanged.
+_OWN_READER_IMAGE_TYPES = frozenset({"lavision_set", "lavision_im7", "pivraw", "cine"})
+
 _CONFIG = None  # singleton cache
 _LOGGING_INITIALIZED = False  # Track if logging has been set up
 
@@ -1060,11 +1067,20 @@ class Config:
             return shape
 
         except Exception as e:
-            logging.error("Failed to read image: %s", e)
+            own_reader = img_type in _OWN_READER_IMAGE_TYPES
+            if own_reader and isinstance(e, (ValueError, OSError)):
+                raise
+            if own_reader:
+                advice = (
+                    "PIVTOOLs' reader does not handle what it found in this file: "
+                    "report it, with the file."
+                )
+            else:
+                advice = "Check that the file is a valid image of its format."
             raise ValueError(
-                f"Could not read image file {file_path}. Error: {e}. "
-                "Check that the file exists and is a valid image format."
-            )
+                f"Could not read the image shape from {file_path} "
+                f"({type(e).__name__}: {e}). {advice}"
+            ) from e
 
     @property
     def batch_size(self):
