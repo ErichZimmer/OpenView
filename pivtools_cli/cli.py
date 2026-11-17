@@ -560,11 +560,27 @@ def video_command(args):
 
 
 def init_command(args):
-    """Initialize a new PIVTOOLs workspace with default config.yaml"""
+    """Initialize a new PIVTOOLs workspace with default config.yaml.
+
+    With ``--from-run``, the config is written for a ``.pivraw`` run recorded by
+    the acquisition app (:func:`pivtools_cli.run_import.import_run`).
+    """
     cwd = Path.cwd()
+    config_path = cwd / "config.yaml"
+
+    if args.from_run is not None:
+        from pivtools_cli.run_import import import_run
+
+        result = import_run(
+            Path(args.from_run),
+            config_path,
+            base_path=Path(args.base_path) if args.base_path else None,
+            force=args.force,
+        )
+        print(result.summary())
+        return
 
     # Check if config.yaml already exists
-    config_path = cwd / "config.yaml"
     if config_path.exists():
         if not args.force:
             print(f"config.yaml already exists at {config_path}")
@@ -579,9 +595,9 @@ def init_command(args):
     print(f"Edit {config_path} to configure your PIV analysis")
 
 
-def create_default_config(config_path):
-    """Create a default config.yaml file"""
-    default_config = """
+# The CLI layer of the three-layer config defaults (CLAUDE.md gotcha 1): it must
+# agree with the Config properties and the frontend fallbacks.
+DEFAULT_CONFIG_YAML = """
 paths:
   base_paths:
   - /setme
@@ -840,9 +856,12 @@ transforms:
 
 """
 
+
+def create_default_config(config_path):
+    """Create a default config.yaml file"""
     # Explicit UTF-8 so the template never depends on Windows' cp1252 default.
     with open(config_path, "w", encoding="utf-8") as f:
-        f.write(default_config.strip())
+        f.write(DEFAULT_CONFIG_YAML.strip())
     print(f"Created default config.yaml at {config_path}")
 
 
@@ -941,7 +960,24 @@ def main():
         "init", help="Initialize a new PIVTOOLs workspace with default config.yaml"
     )
     init_parser.add_argument(
-        "--force", "-f", action="store_true", help="Overwrite existing config.yaml"
+        "--force",
+        "-f",
+        action="store_true",
+        help="Overwrite existing config.yaml (with --from-run, also replace a "
+        "different rig.dt in the calibration settings)",
+    )
+    init_parser.add_argument(
+        "--from-run",
+        default=None,
+        metavar="RUN_FOLDER",
+        help="Write the config for a .pivraw run folder recorded by the "
+        "acquisition app (its Camera<k>.pivraw files and run.yaml)",
+    )
+    init_parser.add_argument(
+        "--base-path",
+        default=None,
+        help="With --from-run: where PIV results go (default "
+        "<project>/results/<run name>)",
     )
     init_parser.set_defaults(func=init_command)
 
@@ -1190,7 +1226,13 @@ def main():
 
     try:
         args.func(args)
-    except (ValueError, FileNotFoundError, InputsCorrupt, InputsReadError) as exc:
+    except (
+        ValueError,
+        FileNotFoundError,
+        FileExistsError,
+        InputsCorrupt,
+        InputsReadError,
+    ) as exc:
         # Expected user-facing failures (a missing key, a missing file, a damaged
         # sidecar) carry their own actionable message; a traceback only buries it.
         if args.debug or os.environ.get(DEBUG_ENV_VAR) == "1":

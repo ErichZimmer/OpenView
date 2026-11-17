@@ -34,6 +34,7 @@ from pivtools_core.image_handling.path_utils import (
     build_piv_camera_path,
     validate_images_generic,
 )
+from pivtools_core.image_handling.readers.pivraw_reader import PivrawError
 from pivtools_core.paths import count_vector_files_by_name, get_data_paths
 from pivtools_core.validation import validate_memory_for_images
 
@@ -453,6 +454,9 @@ def get_frame_pair():
             ),
             404,
         )
+    except PivrawError as e:
+        # A .pivraw run the reader refuses: the message names camera and reason.
+        return jsonify({"error": str(e), "source_path": str(source_path)}), 400
     except Exception as e:
         return (
             jsonify(
@@ -867,6 +871,9 @@ def filter_single_frame():
 
         return jsonify(response)
 
+    except PivrawError as e:
+        # A .pivraw run the reader refuses: the message names camera and reason.
+        return jsonify({"error": str(e)}), 400
     except Exception as e:
         logger.error(f"Error processing single frame: {e}")
         return jsonify({"error": str(e)}), 500
@@ -1275,14 +1282,35 @@ def _normalize_dict_keys(obj):
     return obj
 
 
+def _frame_pair_counts(cfg) -> dict:
+    """``num_frame_pairs`` and ``per_loop_frame_pairs`` for a config response.
+
+    A ``.pivraw`` run the reader refuses has no pair count. The two config
+    routes must still answer (the GUI loads the config on mount, and the user
+    changes the source through it), so the counts are null and
+    ``pairing_error`` carries the reader's message for the GUI to show. Every
+    route that reads pairs answers 400 with the same message instead.
+    """
+    try:
+        return {
+            "num_frame_pairs": cfg.num_frame_pairs,
+            "per_loop_frame_pairs": cfg.per_loop_frame_pairs,
+        }
+    except PivrawError as e:
+        return {
+            "num_frame_pairs": None,
+            "per_loop_frame_pairs": None,
+            "pairing_error": str(e),
+        }
+
+
 @api_bp.route("/config", methods=["GET"])
 def config_endpoint():
     cfg = get_config()
     # Return full nested config as JSON, including computed properties
     # Use deep copy to avoid mutating cfg.data (shallow copy shares nested dicts)
     config_data = copy.deepcopy(cfg.data)
-    config_data["images"]["num_frame_pairs"] = cfg.num_frame_pairs
-    config_data["images"]["per_loop_frame_pairs"] = cfg.per_loop_frame_pairs
+    config_data["images"].update(_frame_pair_counts(cfg))
     config_data["images"]["start_index"] = cfg.start_index
     config_data["images"]["frame_stride"] = cfg.frame_stride
     config_data["images"]["pair_stride"] = cfg.pair_stride
@@ -1608,8 +1636,7 @@ def update_config():
     # Inject computed image properties into response so frontend stays in sync
     cfg = get_config()
     if "images" in data:
-        data["images"]["num_frame_pairs"] = cfg.num_frame_pairs
-        data["images"]["per_loop_frame_pairs"] = cfg.per_loop_frame_pairs
+        data["images"].update(_frame_pair_counts(cfg))
 
     # Echo server-reconciled camera state so the frontend context tracks the
     # persisted config (camera_numbers/camera_subfolders may differ from what
