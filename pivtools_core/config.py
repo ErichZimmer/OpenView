@@ -53,6 +53,9 @@ CALIBRATION_ACTIVE_METHODS = (
 # of truth: pivtools_cli/piv/piv_backend/infilling.py imports it.
 PREDICTOR_FILL_METHODS = ("harmonic", "nearest", "none")
 
+# Environment variable the GUI's PIV runner sets to choose a job's datasets.
+ACTIVE_PATHS_ENV = "PIV_ACTIVE_PATHS"
+
 _PREDICTOR_BC_KEYS = frozenset({"y_position", "ux", "uy", "edge"})
 _PREDICTOR_BC_EDGES = ("bottom", "top")
 
@@ -3036,8 +3039,28 @@ class Config:
         list[int]
             List of 0-indexed path indices to process
         """
-        # Check environment variable override (from GUI)
-        env_paths = os.environ.get("PIV_ACTIVE_PATHS")
+        return self.resolve_active_paths(os.environ.get(ACTIVE_PATHS_ENV))
+
+    def resolve_active_paths(self, override: Optional[str]) -> list:
+        """Active path indices given the ``PIV_ACTIVE_PATHS`` value ``override``.
+
+        The one resolution a PIV job's datasets come from. ``active_paths``
+        passes the job's environment; the GUI's Run PIV preflight passes the
+        value the runner is about to set, so it checks the datasets the job
+        will process.
+
+        Parameters
+        ----------
+        override : str or None
+            Comma-separated indices, or None/empty for the config file's
+            ``paths.active_paths`` (all paths when that is unset).
+
+        Returns
+        -------
+        list[int]
+            0-indexed path indices.
+        """
+        env_paths = override
         if env_paths:
             try:
                 indices = [int(i) for i in env_paths.split(",") if i.strip()]

@@ -6,6 +6,7 @@ from flask import Blueprint, jsonify, request
 from pivtools_core.config import get_config
 from pivtools_core.image_handling.load_images import (
     MaskError,
+    load_mask_for_camera,
     require_mask_fits_camera,
 )
 from pivtools_core.vector_loading import read_mask_from_mat, save_mask_to_mat
@@ -86,6 +87,57 @@ def upload_mask():
             "true_count": true_count,
             "fraction_true": true_count / (width * height),
             "meta": meta,
+        }
+    )
+
+
+@masking_bp.route("/mask_status", methods=["GET"])
+def mask_status():
+    """Whether PIV can use this camera's mask on this dataset, without running it.
+
+    Query params (both required):
+      - basepath_idx: dataset index into ``paths.source_paths``
+      - camera: camera number, ``2`` or ``Cam2``
+
+    Returns 200 with ``{masking_enabled, mode, ok, message}``. ``ok`` is the
+    outcome of ``load_mask_for_camera``, the check PIV and Run PIV make, and
+    ``message`` is its MaskError text when refused, else null. With masking
+    off nothing is needed, so ``ok`` is true. A bad index or camera is a 400.
+    """
+    cfg = _cfg()
+    missing = [k for k in ("basepath_idx", "camera") if request.args.get(k) is None]
+    if missing:
+        return jsonify({"error": f"mask_status needs {' and '.join(missing)}"}), 400
+    try:
+        basepath_idx = int(request.args["basepath_idx"])
+        camera = camera_number(request.args["camera"])
+    except ValueError as e:
+        return (
+            jsonify({"error": f"basepath_idx and camera must be integers ({e})"}),
+            400,
+        )
+    if not 0 <= basepath_idx < len(cfg.source_paths):
+        return (
+            jsonify(
+                {
+                    "error": f"basepath_idx {basepath_idx} is out of range: "
+                    f"{len(cfg.source_paths)} source paths configured"
+                }
+            ),
+            400,
+        )
+
+    try:
+        load_mask_for_camera(camera, cfg, source_path_idx=basepath_idx)
+        ok, message = True, None
+    except MaskError as e:
+        ok, message = False, str(e)
+    return jsonify(
+        {
+            "masking_enabled": bool(cfg.masking_enabled),
+            "mode": cfg.mask_mode,
+            "ok": ok,
+            "message": message,
         }
     )
 
