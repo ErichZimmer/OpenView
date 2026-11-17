@@ -1,0 +1,3 @@
+# The .pivraw contract fixtures are byte-exact recorder output copied from pivtools-acquisition, and the reader
+# tests check their file sizes against MANIFEST.json: never convert their line endings.
+unit-tests/fixtures/pivraw_contract/** -text
