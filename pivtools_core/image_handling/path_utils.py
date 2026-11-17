@@ -808,6 +808,9 @@ def validate_images_generic(
           report into an HTTP 500 with no message.
         - detected_start_index: int or None - First frame index among the files
           matching the pattern (full listing, standard/im7 only)
+        - notes: list - Plain-words facts about how the images are read that do
+          not fail validation (``.pivraw``: the run has no dark, so the images
+          are raw counts)
         - found: str - What is on disk (or what loaded), one plain sentence
         - suggestions: list - Ranked one-click fixes (``Suggestion`` dicts)
         - streams: list or None - Per-stream table of a ``.set`` recording
@@ -872,6 +875,7 @@ def _validate_core(
         "format_detected": None,
         "error": None,
         "detected_start_index": None,  # first frame index among matching files
+        "notes": [],  # plain-words facts about how the images are read
     }
 
     if expected_count is None and image_type not in ("lavision_set", "cine", "pivraw"):
@@ -1066,6 +1070,13 @@ def _validate_core(
             )
             result["read_error"] = str(e)
             return result
+        # The frame read, so the run file and its dark are valid: say when the
+        # images are raw because the run was recorded without a dark.
+        from .readers.pivraw_reader import pivraw_dark_note
+
+        note = pivraw_dark_note(pivraw_file)
+        if note is not None:
+            result["notes"].append(note)
         try:
             result["image_size"] = (img.shape[1], img.shape[0])
             result["first_image_preview"] = _image_to_base64(img)

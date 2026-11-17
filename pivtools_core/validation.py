@@ -108,6 +108,7 @@ def validate_config(config: Config) -> Tuple[bool, str, List[str]]:
             diagnosis=diagnosis,
         )
 
+        warnings.extend(f"Camera {camera_num}: {note}" for note in result["notes"])
         if result["error"]:
             errors.append(f"Camera {camera_num}: {result['error']}")
         elif result["valid"]:

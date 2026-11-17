@@ -1208,6 +1208,7 @@ def validate_files():
                 "found": validation["found"],
                 "suggestions": validation["suggestions"],
                 "streams": validation["streams"],
+                "notes": validation["notes"],
                 "sample_files": (
                     []
                     if file_found_but_unreadable
