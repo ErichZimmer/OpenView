@@ -28,7 +28,12 @@ The rules (:data:`RULES`, applied by :func:`_compare_camera`):
   (``Acq.Camera.ID``) on both, and its geometry must agree. When either has no
   labels, camera k is taken as camera k, with a warning saying so.
 - DaVis against plain, either way: applied, nothing compared, with a warning
-  returned for the apply result.
+  returned for the apply result. A ``.set`` calibration without camera labels
+  adds a warning that it was split with the PIV config's camera count.
+- a model made without calibration images (no ``settings.yaml``) against an app
+  run, an exported run or a DaVis recording: applied with the same warning;
+  against plain images: applied. Plain calibration images against an app run
+  stay refused.
 - plain against plain: applied, nothing to compare.
 - every other pairing: refused, because the frames cannot be proven to match.
 
@@ -65,8 +70,7 @@ from pivtools_core.image_handling.readers.image_note import (
 )
 from pivtools_core.image_handling.readers.pivraw_reader import (
     PivrawError,
-    read_pivraw_header,
-    read_pivraw_run_file,
+    read_pivraw_camera,
 )
 from pivtools_core.image_handling.readers.set_reader import (
     SetConfigError,
@@ -83,7 +87,11 @@ PIVRAW = "pivraw"  # PIV only: a PIVTOOLS Acquisition run
 EXPORTED = "exported"  # PIV only: TIFFs exported by the app, one folder note
 NOTED = "noted"  # calibration only: app calibration TIFFs, one note per image
 DAVIS = "davis"  # a LaVision .set recording
-PLAIN = "plain"  # nothing recorded about the frame
+PLAIN = "plain"  # images that record nothing about their frame
+# calibration only: a model made without calibration images (a scale factor
+# typed in with the image toggle off), told apart by its source having no
+# settings.yaml: every source that holds calibration images has one.
+IMAGELESS = "imageless"
 
 # Geometry of a .set camera whose streams carry no geometry transformer.
 NO_GEOMETRY = "none"
@@ -143,6 +151,8 @@ class _CalibrationCamera:
 
     ``images`` (noted): each image with its note's path, None when it has none.
     ``geometry`` and ``identity`` (davis), as on :class:`_PivCamera`.
+    ``split_note`` (davis): the warning that an unlabelled recording was split
+    with the PIV config's camera count, None for a labelled one.
     ``why_plain``: what the calibration is, for a refusal.
     """
 
@@ -150,6 +160,7 @@ class _CalibrationCamera:
     images: Tuple[Tuple[Path, Optional[Path]], ...] = ()
     geometry: Optional[str] = None
     identity: Optional[LabelledCamera] = None
+    split_note: Optional[str] = None
     why_plain: str = ""
 
 
@@ -159,24 +170,25 @@ class _CalibrationCamera:
 
 
 def _pivraw_camera(source: Path, image_format: str, camera: int) -> _PivCamera:
-    """Camera ``camera`` of the .pivraw run ``source``: run.yaml slot and dark, sidecar."""
+    """Camera ``camera`` of the .pivraw run ``source``, as the reader decodes it.
+
+    :func:`read_pivraw_camera` gives the view rotation from run.yaml's slot and
+    the in-run dark, validated against the camera; the pixel rule and serial
+    come from the camera's sidecar.
+
+    Raises:
+        PivrawError: The reader refuses the camera, its run.yaml or its dark.
+    """
     path = source / (image_format % camera if "%" in image_format else image_format)
-    header = read_pivraw_header(path)
-    run = read_pivraw_run_file(path.parent)
-    rotation = run.view_rotations.get(header.slot)
-    if rotation is None:
-        raise PivrawError(
-            f"{run.path}: records no view_rotation for Camera{header.slot}, so the "
-            "run's pixel frame is unknown."
-        )
+    read = read_pivraw_camera(path)
     return _PivCamera(
         kind=PIVRAW,
         where=f"{path.name}, run.yaml",
         frame=_AppFrame(
-            view_rotation=rotation,
-            dark_subtracted=run.dark_id is not None,
-            pixel_rule=PIXEL_RULES[header.pixel_format],
-            camera_serial=header.camera_serial,
+            view_rotation=read.view_rotation,
+            dark_subtracted=read.dark is not None,
+            pixel_rule=PIXEL_RULES[read.header.pixel_format],
+            camera_serial=read.header.camera_serial,
         ),
     )
 
@@ -265,22 +277,31 @@ def _calibration_camera(
     """What the calibration source records about camera ``camera``'s pixel frame.
 
     ``image`` is the source's settings ``image`` block, None when it has no
-    settings (an image-less model, or a source never opened in the GUI).
+    settings: a model made without calibration images (:data:`IMAGELESS`).
     ``num_cameras`` is the PIV config's camera count: it places a camera's
     folder, and splits a ``.set`` recording without camera labels, as the
     calibration loader read it. A labelled recording is split by its own labels.
     """
     if image is None:
-        return _CalibrationCamera(
-            kind=PLAIN, why_plain="has no settings.yaml, so no calibration images"
-        )
+        return _CalibrationCamera(kind=IMAGELESS)
     image_type = image["image_type"]
     camera_path = build_calibration_camera_path(source, image, camera, num_cameras)
     if image_type == "lavision_set":
         geometry, identity = _set_camera(
             camera_path, camera, num_cameras, own_count=True
         )
-        return _CalibrationCamera(kind=DAVIS, geometry=geometry, identity=identity)
+        split_note = (
+            None
+            if identity is not None
+            else (
+                f"The calibration recording {camera_path.name} carries no camera "
+                "labels, so it was split into cameras with the PIV config's "
+                f"camera count ({num_cameras})."
+            )
+        )
+        return _CalibrationCamera(
+            kind=DAVIS, geometry=geometry, identity=identity, split_note=split_note
+        )
     if image_type != "standard":
         return _CalibrationCamera(
             kind=PLAIN,
@@ -313,6 +334,7 @@ _KIND_WORDS = {
     NOTED: "images saved by PIVTOOLS Acquisition (with image notes)",
     DAVIS: "a DaVis .set recording",
     PLAIN: "images that record nothing about their frame",
+    IMAGELESS: "a model made without calibration images",
 }
 
 
@@ -358,12 +380,22 @@ RULES: Dict[Tuple[str, str], str] = {
     # option of refusing is put to Morgan).
     (DAVIS, PLAIN): WARN,
     (PLAIN, DAVIS): WARN,
+    # A model made without images has no frame to compare (lead decision,
+    # 17 Nov): it applies, with the warning, to every PIV source that records
+    # a frame. Plain calibration IMAGES against an app run stay refused.
+    (IMAGELESS, PIVRAW): WARN,
+    (IMAGELESS, EXPORTED): WARN,
+    (IMAGELESS, DAVIS): WARN,
+    (IMAGELESS, PLAIN): APPLY,
 }
 
 # Short names for the warning sentence.
 _KIND_LABEL = {
     DAVIS: "DaVis .set recording",
     PLAIN: "images with no frame record",
+    IMAGELESS: "a model made without calibration images",
+    PIVRAW: "a PIVTOOLS Acquisition .pivraw run",
+    EXPORTED: "TIFFs exported by PIVTOOLS Acquisition",
 }
 
 
@@ -503,8 +535,9 @@ def check_calibration_frames(
                 continue
             found, warning = _compare_camera(cam, calibration[cam], piv)
             problems.extend(found)
-            if warning is not None and warning not in warnings:
-                warnings.append(warning)
+            for note in (warning, None if found else calibration[cam].split_note):
+                if note is not None and note not in warnings:
+                    warnings.append(note)
         if problems:
             failures.append(f"against the PIV source {source}: " + "; ".join(problems))
     if failures:

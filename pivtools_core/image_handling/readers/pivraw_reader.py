@@ -598,10 +598,15 @@ def read_pivraw_header(file_path: PathLike) -> PivrawHeader:
 
 
 def clear_header_cache() -> None:
-    """Drop every cached header, run file and dark. Mirrors ``cine_reader.clear_metadata_cache``."""
+    """Drop every cached header, run file, dark and alignment.
+
+    Mirrors ``cine_reader.clear_metadata_cache``. The alignments are built
+    from the headers and run files, so they go too.
+    """
     _header_cache.clear()
     _run_file_cache.clear()
     _dark_pixel_cache.clear()
+    _alignment_cache.clear()
 
 
 def get_pivraw_frame_count(file_path: PathLike) -> int:

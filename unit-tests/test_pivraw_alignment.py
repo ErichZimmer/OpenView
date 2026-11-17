@@ -216,6 +216,18 @@ def test_a_missing_camera_file_is_refused_by_name(tmp_path, suffix):
     assert str(missing) in str(info.value)
 
 
+def test_clearing_the_header_cache_drops_the_alignments_too(tmp_path):
+    """clear_header_cache drops every cached view of the run's files, so the
+    alignment is computed again (a new object, not the cached one)."""
+    from pivtools_core.image_handling.readers.pivraw_reader import clear_header_cache
+
+    run = copy_case(tmp_path, "df_2cam_clean")
+    first = align_pivraw_run(run, 1, 2)
+    assert align_pivraw_run(run, 1, 2) is first
+    clear_header_cache()
+    assert align_pivraw_run(run, 1, 2) is not first
+
+
 def test_missing_run_yaml_is_refused(tmp_path):
     run = copy_case(tmp_path, "df_2cam_clean")
     (run / "run.yaml").unlink()
