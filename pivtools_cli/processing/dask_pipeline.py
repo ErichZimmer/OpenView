@@ -23,6 +23,7 @@ from scipy.io import savemat
 from scipy.ndimage import median_filter as scipy_median
 
 from pivtools_cli.piv.piv_backend.factory import make_correlator_backend
+from pivtools_cli.processing.unique_scatter import scatter_unique
 from pivtools_core.config import Config
 
 logger = logging.getLogger(__name__)
@@ -657,7 +658,7 @@ def scatter_immutable_data(
     # Create and scatter correlator cache
     temp_correlator = make_correlator_backend(config, camera=camera, ensemble=ensemble)
     correlator_cache = temp_correlator.get_cache_data()
-    scattered_cache = client.scatter(correlator_cache, broadcast=True)
+    scattered_cache = scatter_unique(client, correlator_cache, broadcast=True)
 
     cache_size = sum(
         v.nbytes if hasattr(v, "nbytes") else 0
@@ -669,7 +670,7 @@ def scatter_immutable_data(
     # Scatter vector masks if present
     scattered_masks = None
     if vector_masks:
-        scattered_masks = client.scatter(vector_masks, broadcast=True)
+        scattered_masks = scatter_unique(client, vector_masks, broadcast=True)
         mask_size = sum(m.nbytes for m in vector_masks) / 1024
         logger.info(f"  Scattered vector masks ({mask_size:.1f} KB)")
 
