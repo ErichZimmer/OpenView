@@ -46,8 +46,8 @@ from pivtools_core.image_handling.readers import set_reader  # noqa: E402
 from pivtools_core.image_handling.readers.set_reader import (  # noqa: E402
     _IMPLEMENTED_DECODERS,
     _decode_mono10p,
-    decode_mono12p,
     clear_set_info_cache,
+    decode_mono12p,
     read_set_frame,
     read_set_info,
     read_set_pair,

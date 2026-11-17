@@ -90,7 +90,10 @@ INDEX_RECORD_BYTES = INDEX_DTYPE.itemsize
 # Frames start on 4096-byte boundaries so the recorder can write with direct I/O.
 STRIDE_ALIGNMENT = 4096
 # The recorder names camera k's files Camera<k>.pivraw; the sidecar's slot must be k.
+# PIVRAW_IMAGE_FORMAT is also the config's images.image_format for a run.
+PIVRAW_IMAGE_FORMAT = "Camera%d.pivraw"
 _DATA_NAME = re.compile(r"^Camera(\d+)\.pivraw$")
+
 # The run description beside the camera files (CONTRACTS section 4).
 RUN_FILE = "run.yaml"
 # run.yaml ``trigger``: what fired the cameras.
@@ -142,6 +145,11 @@ REQUIRED_FIELDS = (
     "format",
     "format_version",
 )
+
+
+def pivraw_file_name(slot: int) -> str:
+    """``Camera<slot>.pivraw``: the recorder's data file of camera ``slot``."""
+    return PIVRAW_IMAGE_FORMAT % slot
 
 
 class PivrawError(ValueError):
@@ -280,7 +288,10 @@ def _listed(values: np.ndarray) -> str:
 
 
 def _frames_per_trigger(mode: str) -> int:
-    """Frames one trigger fires: A and B for double-frame, one for time-resolved."""
+    """Frames one trigger fires: A and B for double-frame, one for time-resolved.
+
+    Also the frame count of an in-run dark, which is one trigger.
+    """
     return 2 if mode == DOUBLE_FRAME else 1
 
 
@@ -414,7 +425,7 @@ def _parse_sidecar(raw_path: Path, sidecar: Any) -> PivrawHeader:
         raise PivrawError(
             f"{where}: sidecar slot {slot} does not match the file name "
             f"{raw_path.name}; the recorder names camera {slot}'s file "
-            f"Camera{slot}.pivraw."
+            f"{pivraw_file_name(slot)}."
         )
     width = _int_field(sidecar, "width", where, 1)
     height = _int_field(sidecar, "height", where, 1)
@@ -780,11 +791,6 @@ def read_pivraw_run_file(run_dir: PathLike) -> PivrawRunFile:
     return parsed
 
 
-def _frames_per_dark(mode: str) -> int:
-    """A dark is one trigger: frames A and B (double-frame) or one frame."""
-    return 2 if mode == DOUBLE_FRAME else 1
-
-
 def _check_dark(header: PivrawHeader, run: PivrawRunFile) -> PivrawHeader:
     """The validated header of ``header``'s in-run dark.
 
@@ -812,11 +818,11 @@ def _check_dark(header: PivrawHeader, run: PivrawRunFile) -> PivrawHeader:
             "subtracted only from frames of the camera it was taken with, in its "
             "own slot, geometry and pixel format."
         )
-    if dark.n_frames != _frames_per_dark(dark.mode):
+    if dark.n_frames != _frames_per_trigger(dark.mode):
         raise PivrawError(
             f"{dark_raw}: the in-run dark {run.dark_id} holds {dark.n_frames} "
             f"frames; a {dark.mode} dark is one trigger, "
-            f"{_frames_per_dark(dark.mode)} frame(s)."
+            f"{_frames_per_trigger(dark.mode)} frame(s)."
         )
     return dark
 
@@ -1337,7 +1343,7 @@ def _run_stamp(run_dir: Path, slots: Tuple[int, ...]) -> Tuple[Any, ...]:
     except FileNotFoundError:
         run_stamp = (-1, -1)
     return (slots, run_stamp) + tuple(
-        _stamp(run_dir / f"Camera{s}.pivraw") for s in slots
+        _stamp(run_dir / pivraw_file_name(s)) for s in slots
     )
 
 
@@ -1384,7 +1390,7 @@ def align_pivraw_run(
     if cached is not None and cached[0] == stamp:
         return cached[1]
 
-    headers = {s: read_pivraw_header(run_dir / f"Camera{s}.pivraw") for s in slots}
+    headers = {s: read_pivraw_header(run_dir / pivraw_file_name(s)) for s in slots}
     run_file = read_pivraw_run_file(run_dir)
     requested, trigger_source = run_file.requested_triggers, run_file.trigger
     modes = {h.mode for h in headers.values()}

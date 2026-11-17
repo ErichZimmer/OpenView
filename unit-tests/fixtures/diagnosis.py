@@ -9,10 +9,10 @@ from flask.testing import FlaskClient
 
 from pivtools_core.config import Config
 from pivtools_core.image_handling.path_utils import (
-    glob_images,
     camera_subfolder_name,
     detect_start_index,
     format_to_glob,
+    glob_images,
 )
 from pivtools_core.image_handling.source_diagnosis import (
     DiagnosisContext,

@@ -345,7 +345,8 @@ def test_validate_config_reports_every_runs_findings(tmp_path):
     ok, error, warnings = validate_config(cfg)
     assert ok, error
     assert any(
-        w.startswith(f"{first}: 2 pair(s) aligned") and "Camera2 lacks a frame of 1" in w
+        w.startswith(f"{first}: 2 pair(s) aligned")
+        and "Camera2 lacks a frame of 1" in w
         for w in warnings
     ), warnings
     assert any(

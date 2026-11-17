@@ -1662,15 +1662,24 @@ def _decompress_imx(stored: bytes, expected: int, where: str) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 
+# DaVis's own correction files in a companion folder: the data of the
+# <Transformer> nodes StreamSet.xml declares, named <FilePrefix>-<suffix>.im7
+# with FilePrefix "Transformer<n>" (Transformer0-dark.im7,
+# Transformer1-scmos-1.im7). They are .im7 but hold corrections, not images.
+_TRANSFORMER_FILE_PREFIX = "Transformer"
+
+
 def _im7_image_files(set_dir: Path) -> List[Path]:
     """The .im7 files in a companion folder that hold images, sorted.
 
-    Transformer data files (Transformer1-scmos-1.im7, Transformer0-dark.im7) are
-    .im7 too, and are NOT evidence of .im7 layout: advising lavision_im7 on their
-    account would read a correction map as image data.
+    The correction files (:data:`_TRANSFORMER_FILE_PREFIX`) are .im7 too, and
+    are NOT evidence of .im7 layout: advising lavision_im7 on their account
+    would read a correction map as image data.
     """
     return sorted(
-        p for p in set_dir.glob("*.im7") if not p.name.startswith("Transformer")
+        p
+        for p in set_dir.glob("*.im7")
+        if not p.name.startswith(_TRANSFORMER_FILE_PREFIX)
     )
 
 

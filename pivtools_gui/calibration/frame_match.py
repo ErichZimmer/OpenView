@@ -45,13 +45,19 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from pivtools_core.calibration_settings import try_load_settings
+from pivtools_core.config import Config
 from pivtools_core.image_handling.path_utils import (
-    glob_images,
     build_calibration_camera_path,
     format_to_glob,
+    glob_images,
+)
+from pivtools_core.image_handling.readers.davis_attr import (
+    LabelledCamera,
+    camera_list_text,
 )
 from pivtools_core.image_handling.readers.image_note import (
     PIXEL_RULES,
+    ImageNote,
     ImageNoteError,
     calibration_note_path,
     folder_note_path,
@@ -61,10 +67,6 @@ from pivtools_core.image_handling.readers.pivraw_reader import (
     PivrawError,
     read_pivraw_header,
     read_pivraw_run_file,
-)
-from pivtools_core.image_handling.readers.davis_attr import (
-    LabelledCamera,
-    camera_list_text,
 )
 from pivtools_core.image_handling.readers.set_reader import (
     SetConfigError,
@@ -103,6 +105,16 @@ class _AppFrame:
     dark_subtracted: bool
     pixel_rule: str
     camera_serial: str
+
+    @classmethod
+    def from_note(cls, note: ImageNote) -> "_AppFrame":
+        """The compared fields of an image note (calibration or exported folder)."""
+        return cls(
+            view_rotation=note.view_rotation,
+            dark_subtracted=note.dark_subtracted,
+            pixel_rule=note.pixel_rule,
+            camera_serial=note.camera_serial,
+        )
 
     def text(self, field: str) -> str:
         """A field's value as the note writes it (booleans as ``true``/``false``)."""
@@ -217,7 +229,7 @@ def _set_camera(
     return found.pop(), identity
 
 
-def _piv_camera(full_cfg, source: Path, camera: int) -> _PivCamera:
+def _piv_camera(full_cfg: Config, source: Path, camera: int) -> _PivCamera:
     """What the PIV source ``source`` records about camera ``camera``'s pixel frame."""
     image_type = full_cfg.image_type
     if image_type == "pivraw":
@@ -237,12 +249,7 @@ def _piv_camera(full_cfg, source: Path, camera: int) -> _PivCamera:
             return _PivCamera(
                 kind=EXPORTED,
                 where=str(note_path),
-                frame=_AppFrame(
-                    view_rotation=note.view_rotation,
-                    dark_subtracted=note.dark_subtracted,
-                    pixel_rule=note.pixel_rule,
-                    camera_serial=note.camera_serial,
-                ),
+                frame=_AppFrame.from_note(note),
             )
     return _PivCamera(kind=PLAIN, where=str(source))
 
@@ -325,12 +332,7 @@ def _compare_notes(camera: int, cal: _CalibrationCamera, piv: _PivCamera) -> Lis
         except ImageNoteError as exc:
             problems.append(f"{prefix}: {exc}")
             continue
-        noted = _AppFrame(
-            view_rotation=note.view_rotation,
-            dark_subtracted=note.dark_subtracted,
-            pixel_rule=note.pixel_rule,
-            camera_serial=note.camera_serial,
-        )
+        noted = _AppFrame.from_note(note)
         for field in COMPARED_FIELDS:
             if getattr(noted, field) != getattr(piv.frame, field):
                 problems.append(
@@ -443,7 +445,7 @@ def _compare_camera(
 
 
 def check_calibration_frames(
-    full_cfg,
+    full_cfg: Config,
     calibration_source: Path,
     cameras: Sequence[int],
     piv_sources: Sequence[Path],

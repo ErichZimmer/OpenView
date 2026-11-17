@@ -31,16 +31,15 @@ from pivtools_core.config import Config
 from pivtools_core.image_handling.readers.pivraw_reader import (
     DOUBLE_FRAME,
     DOUBLE_FRAME_STRIDES,
+    PIVRAW_IMAGE_FORMAT,
     PivrawError,
     align_pivraw_run,
+    pivraw_file_name,
     read_pivraw_header,
     run_cameras,
 )
 from pivtools_core.validation import validate_config
 
-# The recorder's data file per camera slot (CONTRACTS section 1); the reader
-# takes the slot from the name.
-PIVRAW_IMAGE_FORMAT = "Camera%d.pivraw"
 # Pairing preset per recorded mode, as (preset, frame_stride, pair_stride) in
 # recorded frames. A double-frame run pairs A with B of each trigger (the only
 # pairing the reader accepts for it); a time-resolved run pairs each trigger
@@ -298,7 +297,7 @@ def import_run(
     project = run_dir.parent
 
     cameras = run_cameras(run_dir)
-    headers = {s: read_pivraw_header(run_dir / f"Camera{s}.pivraw") for s in cameras}
+    headers = {s: read_pivraw_header(run_dir / pivraw_file_name(s)) for s in cameras}
     first_mode = headers[cameras[0]].mode
     _preset, frame_stride, pair_stride = PAIRING[first_mode]
     alignment = align_pivraw_run(run_dir, frame_stride, pair_stride)

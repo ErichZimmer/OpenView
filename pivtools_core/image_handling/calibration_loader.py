@@ -34,10 +34,10 @@ from ..calibration_settings import (
 from ..config import Config
 from .load_images import read_single_frame
 from .path_utils import (
-    glob_images,
     build_calibration_camera_path,
     cine_extension_mismatch,
     format_to_glob,
+    glob_images,
     infer_image_type,
     resolve_file_path,
     validate_images_generic,

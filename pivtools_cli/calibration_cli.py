@@ -42,7 +42,7 @@ import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
@@ -1344,7 +1344,7 @@ def apply_calibration_command(args):
     return total
 
 
-def _print_frame_warnings(warnings) -> None:
+def _print_frame_warnings(warnings: Sequence[str]) -> None:
     """Print the calibration frame check's warnings where the user reads the result."""
     for warning in warnings:
         print(f"[calibration] WARNING: {warning}")

@@ -155,6 +155,13 @@ class AttrStream:
 
 
 def _fail(source: str, offset: int, what: str) -> AttrFormatError:
+    """The refusal of a ``.attr`` file at one byte, for the caller to raise.
+
+    Args:
+        source: The file, as the message names it.
+        offset: The byte the problem starts at.
+        what: What is wrong there, in plain words.
+    """
     return AttrFormatError(f"{source}: byte {offset}: {what}")
 
 
@@ -324,6 +331,15 @@ def parse_attr_bytes(data: bytes, source: str = "<bytes>") -> AttrStream:
 
 
 def _encode_block(entry: AttrEntry, closer: int) -> bytes:
+    """The bytes of one entry's records, ended by a ``closer`` record.
+
+    The inverse of ``_parse_block``. ``closer`` is :data:`TYPE_END_ENTRY` for
+    an image's entry, :data:`TYPE_END_STREAM` for the trailing block.
+
+    Raises:
+        TypeError: A string record holds no ``str``, or an array record no
+            ``np.ndarray``.
+    """
     out = bytearray()
     for r in entry.records:
         if r.type_code == TYPE_EMPTY:

@@ -10,13 +10,21 @@ import threading
 import time
 import webbrowser
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 import dask
 import dask.array as da
 import numpy as np
 from dask import config as dask_config
-from flask import Blueprint, Flask, abort, jsonify, request, send_from_directory
+from flask import (
+    Blueprint,
+    Flask,
+    Response,
+    abort,
+    jsonify,
+    request,
+    send_from_directory,
+)
 from flask_compress import Compress
 from flask_cors import CORS
 from loguru import logger
@@ -1302,7 +1310,7 @@ def _normalize_dict_keys(obj):
     return obj
 
 
-def _frame_pair_counts(cfg) -> dict:
+def _frame_pair_counts(cfg: Config) -> dict:
     """``num_frame_pairs`` and ``per_loop_frame_pairs`` for a config response.
 
     A ``.pivraw`` run the reader refuses has no pair count. The two config
@@ -1343,7 +1351,8 @@ def config_endpoint():
     return jsonify(config_data)
 
 
-def _bad_request(message: str):
+def _bad_request(message: str) -> Tuple[Response, int]:
+    """A 400 answer in the backend's JSON error envelope (``errors.py``)."""
     return jsonify({"success": False, "error": message}), 400
 
 
@@ -1787,7 +1796,7 @@ def run_piv():
     # null pair count /config reports can never launch a job.
     cfg = get_config()
     if cfg.image_type == "pivraw":
-        cfg.num_frame_pairs
+        cfg.require_frame_pairs()
 
     # Get the runner and start the job
     runner = get_runner()
