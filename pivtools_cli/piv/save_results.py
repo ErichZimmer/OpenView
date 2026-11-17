@@ -175,7 +175,7 @@ def save_corr_plane_dump(
 def save_coordinates_from_config_distributed(
     config: Config,
     output_path: Path,
-    correlator_cache: Optional[dict] = None,
+    correlator_cache: dict,
     runs_to_save: Optional[List[int]] = None,
 ) -> str:
     """
@@ -187,8 +187,9 @@ def save_coordinates_from_config_distributed(
         Configuration object containing window sizes and overlap.
     output_path : Path
         Directory where coordinates.mat will be saved.
-    correlator_cache : Optional[dict]
-        Precomputed correlator cache to avoid redundant computation.
+    correlator_cache : dict
+        Cache from ``get_cache_data`` of the correlator built for this run's
+        camera. It carries that camera's image shape and window grid.
     runs_to_save : Optional[List[int]]
         List of pass indices (0-based) to save with data. If None, save all passes.
         For passes not in this list, empty coordinate grids will be saved.
@@ -202,7 +203,7 @@ def save_coordinates_from_config_distributed(
         InstantaneousCorrelatorCPU,
     )
 
-    # Create a temporary correlator with optional precomputed cache
+    # Rebuild the correlator from the camera's cache (shape and window grid)
     correlator = InstantaneousCorrelatorCPU(config, precomputed_cache=correlator_cache)
 
     # Extract the cached window centers
@@ -315,7 +316,7 @@ def save_ensemble_result_distributed(
 def save_ensemble_coordinates_from_config_distributed(
     config: Config,
     output_path: Path,
-    correlator_cache: Optional[dict] = None,
+    correlator_cache: dict,
     runs_to_save: Optional[List[int]] = None,
 ) -> str:
     """
@@ -327,8 +328,9 @@ def save_ensemble_coordinates_from_config_distributed(
         Configuration object containing ensemble window sizes and overlap.
     output_path : Path
         Directory where coordinates.mat will be saved.
-    correlator_cache : Optional[dict]
-        Precomputed correlator cache to avoid redundant computation.
+    correlator_cache : dict
+        Cache from ``get_cache_data`` of the correlator built for this run's
+        camera. It carries that camera's image shape and window grid.
     runs_to_save : Optional[List[int]]
         List of pass indices (0-based) to save with data. If None, save all passes.
 
@@ -339,7 +341,7 @@ def save_ensemble_coordinates_from_config_distributed(
     """
     from pivtools_cli.piv.piv_backend.cpu_ensemble import EnsembleCorrelatorCPU
 
-    # Create correlator with optional precomputed cache
+    # Rebuild the correlator from the camera's cache (shape and window grid)
     # This handles both standard and single mode correctly
     correlator = EnsembleCorrelatorCPU(config, precomputed_cache=correlator_cache)
 

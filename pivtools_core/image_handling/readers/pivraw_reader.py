@@ -1,23 +1,28 @@
-"""Reader for PIVTOOLS Acquisition run containers (``.pivraw``).
+"""Reader for PIVTOOLS Acquisition run containers (``.pivraw``), format version 2.
 
 One run folder per recording, laid out like Phantom ``.cine`` (one container per
 camera, the ``%d`` in the pattern names the camera)::
 
     <run_dir>/Camera1.pivraw         frames back to back, frame k at k * frame_stride
     <run_dir>/Camera1.pivraw.json    header sidecar
-    <run_dir>/Camera1.pivraw.idx     one "<qQ" record (host ns, camera frame id) per frame
+    <run_dir>/Camera1.pivraw.idx     one "<qQq" record (host_ns, frame_id, camera_ns) per frame
     <run_dir>/Camera2.pivraw ...
 
 The format is defined by the acquisition app (``pivtools-acquisition``
 ``docs/CONTRACTS.md`` section 4). PIVTOOLs does not import that package; the
-container is read here from its specification alone.
+container is read here from its specification alone, and the tests read the
+recorder's own output (``unit-tests/fixtures/pivraw_contract``).
 
 Layout facts the reader relies on:
 
 * ``frame_stride = ceil(bytes_per_frame / 4096) * 4096``; the bytes between the
   payload and the stride are zero padding. A finalised file therefore holds
   exactly ``n_frames * frame_stride`` bytes, and its ``.idx`` exactly
-  ``n_frames * 16``.
+  ``n_frames * 24``.
+* Run index = ``frame_id - first_frame_id``. In a double-frame run, run index
+  2t is frame A of the camera's run trigger t and 2t + 1 its B. The file's run
+  indices and ``missing_indices`` are disjoint and together fill
+  ``[0, span)``, the span rounded up to a whole pair for double-frame.
 * Mono12p is the PFNC LSB-first packing (two pixels in three bytes), the layout
   ``set_reader._decode_mono12p`` already decodes, so that decoder is reused.
 * BayerRG8 becomes a 2x2 superpixel sum R+G+G+B at half resolution, with no
@@ -27,18 +32,22 @@ Layout facts the reader relies on:
   ``(2k-1, 2k)`` (1-based): the ``skip_frames`` pairing preset (frame_stride 1,
   pair_stride 2). A time-resolved run pairs any two frames.
 
-The reader is strict: a missing sidecar field, a wrong ``format_version``, an
-unfinalised run, or a sidecar that disagrees with the files on disk raises
-:class:`PivrawError` (a ``ValueError``) naming the file. Frame indices are
-1-based, like every other container in PIVTOOLs. Returned pixels are raw
-counts as float32: (H, W) for a frame, (2, H, W) for a pair.
+The reader is strict and forward-only: a missing or unknown sidecar field, a
+field of the wrong type, a ``format_version`` other than the integer 2, a
+``slot`` that differs from the file name, an unfinalised run, or a sidecar and
+``.idx`` that disagree with each other or with the files on disk raise
+:class:`PivrawError` (a ``ValueError``) naming the file and the field. There is
+no version-1 path. Frame indices are 1-based, like every other container in
+PIVTOOLs. Returned pixels are raw counts as float32: (H, W) for a frame,
+(2, H, W) for a pair.
 """
 
 import json
 import logging
 import math
 import numbers
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Tuple, Union
 
@@ -50,13 +59,21 @@ from .set_reader import _decode_mono12p
 PathLike = Union[str, Path]
 
 FORMAT_NAME = "pivraw"
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2
 SIDECAR_SUFFIX = ".json"  # Camera1.pivraw -> Camera1.pivraw.json
 INDEX_SUFFIX = ".idx"  # Camera1.pivraw -> Camera1.pivraw.idx
-# One "<qQ" record per frame: host timestamp (ns, int64) + camera frame id (uint64).
-INDEX_RECORD_BYTES = 16
+# One record per frame, in file order, little-endian and packed ("<qQq", 24 B):
+# host_ns = host perf_counter_ns at delivery (one clock for every camera of a run),
+# frame_id = the camera's transport image id (not a trigger count),
+# camera_ns = the camera's own timestamp (its own clock, arbitrary origin).
+INDEX_DTYPE = np.dtype([("host_ns", "<i8"), ("frame_id", "<u8"), ("camera_ns", "<i8")])
+INDEX_RECORD_BYTES = INDEX_DTYPE.itemsize
 # Frames start on 4096-byte boundaries so the recorder can write with direct I/O.
 STRIDE_ALIGNMENT = 4096
+# The recorder names camera k's files Camera<k>.pivraw; the sidecar's slot must be k.
+_DATA_NAME = re.compile(r"^Camera(\d+)\.pivraw$")
+# How many offending run indices an error message lists.
+_LIST_IN_MESSAGE = 8
 
 MONO12P = "Mono12p"
 BAYER_RG8 = "BayerRG8"
@@ -66,9 +83,8 @@ DOUBLE_FRAME = "double_frame"
 TIME_RESOLVED = "time_resolved"
 MODES = (DOUBLE_FRAME, TIME_RESOLVED)
 
+# Every sidecar field, in the writer's order (container.Header); no other is accepted.
 REQUIRED_FIELDS = (
-    "format",
-    "format_version",
     "camera_model",
     "camera_serial",
     "slot",
@@ -89,6 +105,9 @@ REQUIRED_FIELDS = (
     "finalised",
     "dropped_pairs",
     "missing_indices",
+    "first_frame_id",
+    "format",
+    "format_version",
 )
 
 
@@ -98,12 +117,16 @@ class PivrawError(ValueError):
 
 @dataclass(frozen=True)
 class PivrawHeader:
-    """The validated sidecar of one camera's ``.pivraw`` container."""
+    """The validated sidecar and ``.idx`` of one camera's ``.pivraw`` container.
+
+    ``index`` is the read-only ``.idx`` as an ``INDEX_DTYPE`` array, one record
+    per file frame in file order.
+    """
 
     path: Path
     camera_model: str
     camera_serial: str
-    slot: Any
+    slot: int
     width: int
     height: int
     pixel_format: str
@@ -120,6 +143,8 @@ class PivrawHeader:
     n_frames: int
     dropped_pairs: int
     missing_indices: Tuple[int, ...]
+    first_frame_id: Optional[int]
+    index: np.ndarray = field(compare=False, repr=False)
 
     @property
     def image_shape(self) -> Tuple[int, int]:
@@ -177,10 +202,15 @@ def _stride_for(bytes_per_frame: int) -> int:
     return -(-bytes_per_frame // STRIDE_ALIGNMENT) * STRIDE_ALIGNMENT
 
 
+def _is_int(value: Any) -> bool:
+    """A JSON integer: ``int`` and not ``bool`` (``2.0`` and ``True`` are not)."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
 def _int_field(sidecar: Mapping[str, Any], key: str, where: str, minimum: int) -> int:
     """A required integer field >= ``minimum`` (bool is not an integer here)."""
     value = sidecar[key]
-    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+    if not _is_int(value) or value < minimum:
         raise PivrawError(
             f"{where}: {key} must be an integer >= {minimum}, got {value!r}."
         )
@@ -199,13 +229,95 @@ def _number_field(sidecar: Mapping[str, Any], key: str, where: str) -> float:
     return float(value)
 
 
-def _parse_sidecar(raw_path: Path, sidecar: Any) -> PivrawHeader:
-    """Validate a decoded sidecar against the format and the files on disk.
+def _str_field(sidecar: Mapping[str, Any], key: str, where: str) -> str:
+    """A required string field."""
+    value = sidecar[key]
+    if not isinstance(value, str):
+        raise PivrawError(f"{where}: {key} must be a string, got {value!r}.")
+    return value
+
+
+def _listed(values: np.ndarray) -> str:
+    """The first few of ``values`` for an error message."""
+    shown = ", ".join(str(int(v)) for v in values[:_LIST_IN_MESSAGE])
+    more = len(values) - _LIST_IN_MESSAGE
+    return f"[{shown}{f', ... {more} more' if more > 0 else ''}]"
+
+
+def _check_index(
+    index: np.ndarray,
+    first_frame_id: Optional[int],
+    missing_indices: Tuple[int, ...],
+    mode: str,
+    idx_file: Path,
+    where: str,
+) -> None:
+    """The ``.idx`` agrees with itself and with the sidecar, as the writer defines them.
+
+    Run index = ``frame_id - first_frame_id``. The run indices increase strictly
+    from >= 0; host times never go backwards; double-frame file positions
+    (2k, 2k+1) carry run indices (2t, 2t+1); and the run indices and
+    ``missing_indices`` together fill ``[0, span)`` exactly once each. The span
+    ends at the last index the writer received, which can be a frame A it
+    discarded because its B never came, so it is checked as a partition rather
+    than recomputed from the ``.idx``.
 
     Raises:
-        PivrawError: On any missing field, wrong format/version, unfinalised run,
-            inconsistent geometry, or a data/index file whose size disagrees with
-            ``n_frames``.
+        PivrawError: Naming the field or file that disagrees: a stale, edited or
+            foreign ``.idx`` or sidecar.
+    """
+    if index.size and first_frame_id is None:
+        raise PivrawError(
+            f"{where}: first_frame_id is null, but the run holds {index.size} "
+            "frames: their run indices cannot be known."
+        )
+    run_idx = (
+        index["frame_id"].astype(np.int64) - first_frame_id
+        if index.size
+        else np.zeros(0, dtype=np.int64)
+    )
+    if run_idx.size and (run_idx[0] < 0 or np.any(np.diff(run_idx) <= 0)):
+        raise PivrawError(
+            f"{idx_file}: frame ids are not strictly increasing from first_frame_id "
+            f"{first_frame_id} (an id wrap, a camera reset, or a foreign .idx)."
+        )
+    backwards = np.flatnonzero(np.diff(index["host_ns"]) < 0)
+    if backwards.size:
+        raise PivrawError(
+            f"{idx_file}: host_ns goes backwards at record(s) {_listed(backwards + 1)} "
+            "(0-based): not one recording's index."
+        )
+    if mode == DOUBLE_FRAME:
+        a, b = run_idx[0::2], run_idx[1::2]
+        if np.any(a % 2) or np.any(b != a + 1):
+            raise PivrawError(
+                f"{idx_file}: file positions (2k, 2k+1) are not frames A, B of one "
+                "trigger."
+            )
+    missing = np.asarray(missing_indices, dtype=np.int64)
+    if not (run_idx.size or missing.size):
+        return
+    top = int(max(run_idx.max(initial=-1), missing.max(initial=-1)))
+    span = (top // 2 + 1) * 2 if mode == DOUBLE_FRAME else top + 1
+    covered = np.bincount(np.concatenate([run_idx, missing]), minlength=span)
+    if np.any(covered != 1):
+        raise PivrawError(
+            f"{where}: missing_indices and the .idx do not partition run indices "
+            f"[0, {span}): neither holds {_listed(np.flatnonzero(covered == 0))}, "
+            f"both hold {_listed(np.flatnonzero(covered > 1))}. The sidecar or "
+            ".idx is stale, edited or from another recording."
+        )
+
+
+def _parse_sidecar(raw_path: Path, sidecar: Any) -> PivrawHeader:
+    """Validate a decoded sidecar against the format, the ``.idx`` and the files.
+
+    Raises:
+        PivrawError: On any missing or unknown field, a field of the wrong type,
+            a wrong format/version, a slot that is not the file name's, an
+            unfinalised run, inconsistent geometry, a data/index file whose size
+            disagrees with ``n_frames``, or an ``.idx`` that disagrees with the
+            sidecar (see :func:`_check_index`).
     """
     side = sidecar_path(raw_path)
     where = str(side)
@@ -215,16 +327,22 @@ def _parse_sidecar(raw_path: Path, sidecar: Any) -> PivrawHeader:
         )
     missing = [k for k in REQUIRED_FIELDS if k not in sidecar]
     if missing:
-        raise PivrawError(f"{where}: missing required field(s) {', '.join(missing)}.")
+        raise PivrawError(
+            f"{where}: missing required field(s) {', '.join(missing)} (a stale "
+            "file: re-record, or re-export with the current pivtools-acquisition)."
+        )
+    unknown = sorted(set(sidecar) - set(REQUIRED_FIELDS))
+    if unknown:
+        raise PivrawError(f"{where}: unknown field(s) {', '.join(unknown)}.")
     if sidecar["format"] != FORMAT_NAME:
         raise PivrawError(
             f"{where}: format is {sidecar['format']!r}, expected {FORMAT_NAME!r}."
         )
     version = sidecar["format_version"]
-    if isinstance(version, bool) or version != FORMAT_VERSION:
+    if not _is_int(version) or version != FORMAT_VERSION:
         raise PivrawError(
             f"{where}: format_version {version!r} is not supported; this PIVTOOLs "
-            f"reads format_version {FORMAT_VERSION}."
+            f"reads format_version {FORMAT_VERSION} (the integer) only."
         )
 
     finalised = sidecar["finalised"]
@@ -238,6 +356,14 @@ def _parse_sidecar(raw_path: Path, sidecar: Any) -> PivrawHeader:
             f"`pivtools-acq recover {raw_path.parent}`"
         )
 
+    slot = _int_field(sidecar, "slot", where, 1)
+    name = _DATA_NAME.match(raw_path.name)
+    if name is None or int(name.group(1)) != slot:
+        raise PivrawError(
+            f"{where}: sidecar slot {slot} does not match the file name "
+            f"{raw_path.name}; the recorder names camera {slot}'s file "
+            f"Camera{slot}.pivraw."
+        )
     width = _int_field(sidecar, "width", where, 1)
     height = _int_field(sidecar, "height", where, 1)
     pixel_format = sidecar["pixel_format"]
@@ -274,11 +400,19 @@ def _parse_sidecar(raw_path: Path, sidecar: Any) -> PivrawHeader:
     dropped_pairs = _int_field(sidecar, "dropped_pairs", where, 0)
     missing_indices = sidecar["missing_indices"]
     if not isinstance(missing_indices, list) or any(
-        isinstance(m, bool) or not isinstance(m, int) or m < 0 for m in missing_indices
+        not _is_int(m) or m < 0 for m in missing_indices
     ):
         raise PivrawError(
             f"{where}: missing_indices must be a list of non-negative integers, "
             f"got {missing_indices!r}."
+        )
+    first_frame_id = sidecar["first_frame_id"]
+    if first_frame_id is not None and (
+        not _is_int(first_frame_id) or first_frame_id < 0
+    ):
+        raise PivrawError(
+            f"{where}: first_frame_id must be a non-negative integer or null, got "
+            f"{first_frame_id!r}."
         )
     camera_settings = sidecar["camera_settings"]
     if not isinstance(camera_settings, dict):
@@ -300,14 +434,18 @@ def _parse_sidecar(raw_path: Path, sidecar: Any) -> PivrawHeader:
     if idx_size != n_frames * INDEX_RECORD_BYTES:
         raise PivrawError(
             f"{idx_file}: holds {idx_size} bytes, expected {n_frames} records x "
-            f"{INDEX_RECORD_BYTES} bytes = {n_frames * INDEX_RECORD_BYTES}."
+            f"{INDEX_RECORD_BYTES} bytes = {n_frames * INDEX_RECORD_BYTES} "
+            "(format_version 2 records are host_ns, frame_id, camera_ns)."
         )
+    index = np.fromfile(idx_file, dtype=INDEX_DTYPE)
+    index.setflags(write=False)
+    _check_index(index, first_frame_id, tuple(missing_indices), mode, idx_file, where)
 
     header = PivrawHeader(
         path=raw_path,
-        camera_model=str(sidecar["camera_model"]),
-        camera_serial=str(sidecar["camera_serial"]),
-        slot=sidecar["slot"],
+        camera_model=_str_field(sidecar, "camera_model", where),
+        camera_serial=_str_field(sidecar, "camera_serial", where),
+        slot=slot,
         width=width,
         height=height,
         pixel_format=pixel_format,
@@ -320,10 +458,12 @@ def _parse_sidecar(raw_path: Path, sidecar: Any) -> PivrawHeader:
         rate_hz=_number_field(sidecar, "rate_hz", where),
         dt_s=_number_field(sidecar, "dt_s", where),
         camera_settings=dict(camera_settings),
-        created_at=str(sidecar["created_at"]),
+        created_at=_str_field(sidecar, "created_at", where),
         n_frames=n_frames,
         dropped_pairs=dropped_pairs,
         missing_indices=tuple(missing_indices),
+        first_frame_id=first_frame_id,
+        index=index,
     )
     if header.dropped_pairs or header.missing_indices:
         logging.warning(

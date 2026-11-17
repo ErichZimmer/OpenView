@@ -489,7 +489,7 @@ def run_ensemble_piv(
     # 2. Scatter immutable data once
     logger.info("Scattering immutable data...")
     scattered = scatter_immutable_data(
-        client, config, vector_masks, pixel_mask, ensemble=True
+        client, config, camera_num, vector_masks, pixel_mask, ensemble=True
     )
 
     # 3. Optional gain-normalisation pre-pass (two extra reads of the data)
@@ -544,7 +544,7 @@ def run_ensemble_piv(
             f"Large dataset ({num_chunks} chunks): workers load from disk per pass"
         )
     num_passes = config.ensemble_num_passes
-    accumulator = SinglePassAccumulator(config, vector_masks)
+    accumulator = SinglePassAccumulator(config, camera_num, vector_masks)
     predictor_field = None
 
     # Check for resume from previous pass
@@ -629,7 +629,7 @@ def run_ensemble_piv(
     images_are_persisted = (num_chunks == 1) or config.ensemble_persist_images
 
     # Pre-compute correlator metadata for intermediate saves and coordinates
-    temp_correlator = make_correlator_backend(config, ensemble=True)
+    temp_correlator = make_correlator_backend(config, camera=camera_num, ensemble=True)
     correlator_cache = temp_correlator.get_cache_data()
     image_height = temp_correlator.H
     del temp_correlator
@@ -890,8 +890,13 @@ def main():
                 vector_masks = None
                 if config.masking_enabled and mask is not None:
                     logger.info("Computing vector masks...")
-                    logger.debug(f"config.image_shape = {config.image_shape}")
-                    vector_masks = compute_vector_mask(mask, config, ensemble=True)
+                    logger.debug(
+                        f"camera {camera_num} image shape = "
+                        f"{config.image_shape_for(camera_num)}"
+                    )
+                    vector_masks = compute_vector_mask(
+                        mask, config, camera_num, ensemble=True
+                    )
                     logger.info(f"  Vector masks: {len(vector_masks)} passes")
                     for i, vm in enumerate(vector_masks):
                         logger.info(f"    Pass {i}: mask shape = {vm.shape}")

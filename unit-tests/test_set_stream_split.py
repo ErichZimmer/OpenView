@@ -209,13 +209,20 @@ def test_prepaired_read_of_single_stream_camera_raises(tmp_path, clean_set_cache
         read_pair(1, s, 1, cfg)
 
 
-def test_plif_shape_probe_uses_first_selected_camera(tmp_path, clean_set_cache):
+def test_plif_shape_probe_answers_per_camera(tmp_path, clean_set_cache):
+    """The PLIF camera (6 x 8) and the PIV cameras (4 x 6) each report their
+    own shape from one config, whichever camera is asked first."""
     s = build_raw16_set(tmp_path, PLIF)
     dir_a, dir_b = tmp_path / "a", tmp_path / "b"
     dir_a.mkdir()
     dir_b.mkdir()
-    assert make_set_config(dir_a, s, 3, [2, 3], frame_stride=0).image_shape == (4, 6)
-    assert make_set_config(dir_b, s, 3, [1, 2, 3], frame_stride=1).image_shape == (6, 8)
+    pre_paired = make_set_config(dir_a, s, 3, [2, 3], frame_stride=0)
+    assert pre_paired.image_shape_for(3) == (4, 6)
+    assert pre_paired.image_shape_for(2) == (4, 6)
+    time_resolved = make_set_config(dir_b, s, 3, [1, 2, 3], frame_stride=1)
+    assert time_resolved.image_shape_for(2) == (4, 6)
+    assert time_resolved.image_shape_for(1) == (6, 8)
+    assert time_resolved.image_shape_for(3) == (4, 6)
 
 
 def test_plif_calibration_camera2_reads_stream_1(tmp_path, clean_set_cache):

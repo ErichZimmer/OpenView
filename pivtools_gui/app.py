@@ -1240,25 +1240,14 @@ def validate_files():
             f"Validation passed - preloading first 10 frames for {len(camera_numbers)} camera(s)"
         )
 
-    # Extract detected_count and image_shape from first camera (all cameras should match)
+    # Extract detected_count from first camera (all cameras should match).
+    # Image size is NOT summarised here: cameras can differ in shape, and each
+    # camera's [W, H] is already in details["camera_N"]["image_size"].
     top_detected_count = None
     for cam_key, cam_result in results.items():
         dc = cam_result.get("detected_count")
         if isinstance(dc, int):
             top_detected_count = dc
-            break
-
-    # Store detected image_shape in config data so /config endpoint can return it
-    # (avoids expensive re-read; image_size is [W, H] from validation, store as [H, W]).
-    # This key is a RESPONSE CACHE for the frontend only. Config.image_shape never
-    # reads it (auto-detection is the single source of truth) -- do not "fix" the
-    # near-miss key names into agreement, a stale stored shape would silently
-    # break the window grids.
-    for cam_key, cam_result in results.items():
-        img_size = cam_result.get("image_size")
-        if img_size and len(img_size) == 2:
-            w, h = img_size
-            cfg.data.setdefault("images", {})["image_shape"] = [h, w]
             break
 
     return jsonify(
@@ -2270,8 +2259,9 @@ def memory_check():
     Shown by the Run PIV panel, next to the controls that change the estimate.
     It is a warning, not a gate — validate_config treats it the same way.
 
-    Returns {"warning": str | None}. Reads one image via Config.image_shape;
-    None when no image can be read, because there is nothing to estimate yet.
+    Returns {"warning": str | None}. Reads one image per selected camera via
+    Config.image_shape_for and estimates for the largest; None when no image
+    can be read, because there is nothing to estimate yet.
     """
     cfg = get_config()
     return jsonify({"warning": validate_memory_for_images(cfg) or None})

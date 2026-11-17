@@ -52,11 +52,24 @@ class EnsembleCorrelatorCPU(CrossCorrelator):
     def __init__(
         self,
         config: Config,
+        *,
+        camera: Optional[int] = None,
         precomputed_cache: Optional[dict] = None,
         vector_masks: Optional[List[np.ndarray]] = None,
         active_pass_idx: Optional[int] = None,
     ) -> None:
+        """Build the ensemble correlator for one camera's image shape.
+
+        :param config: Configuration object
+        :param camera: 1-based camera number; its image shape sets the window
+            grid. Give this or ``precomputed_cache``, not both.
+        :param precomputed_cache: Cache from ``get_cache_data`` of a correlator
+            built on the client for one camera; carries that camera's shape.
+        :param vector_masks: Pre-computed vector masks for each pass
+        :param active_pass_idx: If set, only allocate buffers for this pass
+        """
         super().__init__()
+        self._require_one_shape_source(camera, precomputed_cache)
 
         # Store config for interpolation settings
         self.config = config
@@ -221,8 +234,8 @@ class EnsembleCorrelatorCPU(CrossCorrelator):
         if precomputed_cache is not None:
             self._load_precomputed_cache(precomputed_cache)
         else:
+            self.H, self.W = config.image_shape_for(camera)
             self._cache_window_padding_ensemble(config=config)
-            self.H, self.W = config.image_shape
             self._cache_interpolation_grids_ensemble(config=config)
 
         # Initialize vector masks
@@ -702,7 +715,7 @@ class EnsembleCorrelatorCPU(CrossCorrelator):
         if runtype == "single":
             # Single mode: use sum window for positioning
             result = compute_window_centers_single_mode(
-                image_shape=config.image_shape,
+                image_shape=(self.H, self.W),
                 window_size=(win_y, win_x),
                 sum_window=tuple(config.ensemble_sum_window),
                 overlap=overlap,
@@ -722,7 +735,7 @@ class EnsembleCorrelatorCPU(CrossCorrelator):
         else:
             # Standard mode
             result = compute_window_centers(
-                image_shape=config.image_shape,
+                image_shape=(self.H, self.W),
                 window_size=(win_y, win_x),
                 overlap=overlap,
                 validate=True,
@@ -884,6 +897,7 @@ class EnsembleCorrelatorCPU(CrossCorrelator):
         runtype = config.ensemble_type[pass_idx]
         is_single_mode = runtype == "single"
 
+        self._require_frame_shape(images)
         N, _, H, W = images.shape
 
         # Reuse pre-allocated correlation buffers
@@ -1126,6 +1140,7 @@ class EnsembleCorrelatorCPU(CrossCorrelator):
             - n_images: Number of images in batch
             - smoothed_predictor: Smoothed predictor field (for pass > 0)
         """
+        self._require_frame_shape(images)
         N, _, H, W = images.shape
         smoothed_predictor = None
 
@@ -1244,6 +1259,7 @@ class EnsembleCorrelatorCPU(CrossCorrelator):
         runtype = config.ensemble_type[pass_idx]
         is_single_mode = runtype == "single"
 
+        self._require_frame_shape(images)
         N, _, H, W = images.shape
         smoothed_predictor = None
 

@@ -33,13 +33,13 @@ _BIG_SHAPE = (3648, 4872)
 _SMALL_SHAPE = (64, 64)
 
 
-def _make_config(tmp_path, batch_size, memory_limit):
+def _make_config(tmp_path, batch_size, memory_limit, cameras=(1,)):
     cfg = {
         "paths": {
             "base_paths": [str(tmp_path / "out")],
             "source_paths": [str(tmp_path / "src")],
-            "camera_count": 1,
-            "camera_numbers": [1],
+            "camera_count": len(cameras),
+            "camera_numbers": list(cameras),
             "camera_subfolders": [],
         },
         "images": {
@@ -62,19 +62,23 @@ def _make_config(tmp_path, batch_size, memory_limit):
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
-    """The real api_bp route; image_shape is stubbed so no image is read."""
+    """The real api_bp route; image_shape_for is stubbed so no image is read.
 
-    def _build(batch_size, memory_limit, image_shape):
-        config = _make_config(tmp_path, batch_size, memory_limit)
-        if image_shape is None:
+    ``shapes`` maps camera number to (H, W), or is None when no image can be read.
+    """
 
-            def _raise(self):
+    def _build(batch_size, memory_limit, shapes):
+        cameras = (1,) if shapes is None else tuple(shapes)
+        config = _make_config(tmp_path, batch_size, memory_limit, cameras)
+        if shapes is None:
+
+            def _raise(self, camera):
                 raise FileNotFoundError("no image")
 
-            monkeypatch.setattr(Config, "image_shape", property(_raise))
+            monkeypatch.setattr(Config, "image_shape_for", _raise)
         else:
             monkeypatch.setattr(
-                Config, "image_shape", property(lambda self: image_shape)
+                Config, "image_shape_for", lambda self, camera: shapes[camera]
             )
         monkeypatch.setattr(gui_app, "get_config", lambda: config)
         app = Flask(__name__)
@@ -86,7 +90,7 @@ def client(tmp_path, monkeypatch):
 
 def test_warns_when_batch_exceeds_worker_memory(client):
     """50 pairs of 17.8 MP images need ~19.9 GB; 12 GB per worker is short."""
-    response = client(50, "12GB", _BIG_SHAPE).get("/backend/memory_check")
+    response = client(50, "12GB", {1: _BIG_SHAPE}).get("/backend/memory_check")
 
     assert response.status_code == 200
     warning = response.get_json()["warning"]
@@ -96,10 +100,23 @@ def test_warns_when_batch_exceeds_worker_memory(client):
 
 
 def test_silent_when_batch_fits(client):
-    response = client(10, "12GB", _SMALL_SHAPE).get("/backend/memory_check")
+    response = client(10, "12GB", {1: _SMALL_SHAPE}).get("/backend/memory_check")
 
     assert response.status_code == 200
     assert response.get_json()["warning"] is None
+
+
+def test_largest_camera_sets_the_estimate(client):
+    """Cameras run one after another on the same workers, so a small first
+    camera must not hide a large second one."""
+    response = client(50, "12GB", {1: _SMALL_SHAPE, 2: _BIG_SHAPE}).get(
+        "/backend/memory_check"
+    )
+
+    assert response.status_code == 200
+    warning = response.get_json()["warning"]
+    assert warning is not None
+    assert "17.8 MP" in warning
 
 
 def test_silent_when_no_image_can_be_read(client):
@@ -112,7 +129,7 @@ def test_silent_when_no_image_can_be_read(client):
 
 def test_validate_files_no_longer_carries_the_memory_gate(client):
     """Setup validation reports files only; the memory key is gone."""
-    response = client(50, "12GB", _BIG_SHAPE).post(
+    response = client(50, "12GB", {1: _BIG_SHAPE}).post(
         "/backend/validate_files", json={}
     )
 

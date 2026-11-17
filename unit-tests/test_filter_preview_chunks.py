@@ -1,8 +1,9 @@
 """POST /backend/filter builds its dask chunks from the batch's own shape (B7).
 
-``cfg.image_shape`` is detected once from the first selected camera, so a camera
-whose frames differ in size must not be chunked with it. The route is driven for
-real; only the readers, the filter and the worker thread are replaced.
+The preview reads one batch and needs no detected shape: chunking from the
+batch itself cannot disagree with the frames, whatever camera they come from.
+The route is driven for real; only the readers, the filter and the worker
+thread are replaced.
 """
 
 from types import SimpleNamespace
@@ -17,10 +18,10 @@ from pivtools_core.config import Config
 FRAME_SHAPE = (8, 10)
 
 
-def test_filter_preview_chunks_ignore_cfg_image_shape(
+def test_filter_preview_chunks_ignore_detected_image_shape(
     tmp_path: Any, monkeypatch: Any
 ) -> None:
-    """The batch reaches the filter whole even when ``cfg.image_shape`` is not usable."""
+    """The batch reaches the filter whole even when ``image_shape_for`` is not usable."""
     from fixtures.diagnosis import write_config
 
     import pivtools_gui.app as gui_app
@@ -43,8 +44,8 @@ def test_filter_preview_chunks_ignore_cfg_image_shape(
         def start(self) -> None:
             self._target()
 
-    def forbidden(self: Config) -> tuple:
-        raise AssertionError("image_shape must not be consulted")
+    def forbidden(self: Config, camera: int) -> tuple:
+        raise AssertionError("image_shape_for must not be consulted")
 
     monkeypatch.setattr(
         gui_app, "read_pair", lambda *a, **k: np.zeros((2, *FRAME_SHAPE), np.float32)
@@ -54,7 +55,7 @@ def test_filter_preview_chunks_ignore_cfg_image_shape(
     # Replace the module reference, not threading.Thread itself, which the
     # route's ThreadPoolExecutor also uses.
     monkeypatch.setattr(gui_app, "threading", SimpleNamespace(Thread=SyncThread))
-    monkeypatch.setattr(Config, "image_shape", property(forbidden))
+    monkeypatch.setattr(Config, "image_shape_for", forbidden)
 
     app = Flask(__name__)
     app.register_blueprint(gui_app.api_bp)
