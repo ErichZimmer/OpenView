@@ -172,7 +172,10 @@ def plan_apply_units(
     of every unit (``frame_match.check_calibration_frames``): the PIV source paired
     with each planned base path, or every configured source for an ``explicit`` unit,
     whose vectors name no base path. A mismatch raises ``CalibrationFrameMismatch``
-    (a ``ValueError``) before any job starts.
+    (a ``ValueError``) before any job starts, and a ``.pivraw`` run the reader refuses
+    raises its ``PivrawError``. A pairing applied without a comparison puts its warning
+    in every unit's ``frame_warnings`` (a tuple, the same for every unit), which the
+    callers show in the apply result.
 
     Stereo ``uncal1`` / ``uncal2`` follow the RECORD's camera order (``rec.record_pair``),
     not ``camera_pair``'s: the pair dir is shared by ``(1, 2)`` and ``(2, 1)``, and
@@ -311,6 +314,8 @@ def plan_apply_units(
 def _check_frames(full_cfg, source, units, base_indices: Optional[List[int]]) -> None:
     """Refuse the plan unless the calibration's pixel frame is the PIV images'.
 
+    Stores the check's warnings in each unit's ``frame_warnings``.
+
     ``base_indices`` are the planned base paths; each is paired with the PIV source
     at the same index of ``paths.source_paths``. None (an explicit unit, which names
     no base path) checks every configured source.
@@ -333,7 +338,9 @@ def _check_frames(full_cfg, source, units, base_indices: Optional[List[int]]) ->
             )
         piv_sources = [sources[i] for i in base_indices]
     cameras = sorted({int(c) for u in units for c in u["cameras"]})
-    check_calibration_frames(full_cfg, source, cameras, piv_sources)
+    warnings = check_calibration_frames(full_cfg, source, cameras, piv_sources)
+    for unit in units:
+        unit["frame_warnings"] = warnings
 
 
 # Config.save_timestamped_copy names snapshots "config_<YYYY-MM-DD_HH-MM-SS>.yaml".

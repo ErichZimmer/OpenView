@@ -17,25 +17,26 @@ What each side says about its frame:
 - **DaVis .set recordings**: each camera's geometry transformer.
 - **Anything else** (TIFF without notes, ``.im7``, ``.cine``): nothing.
 
-The rules (:func:`_compare_camera`):
+The rules (:data:`RULES`, applied by :func:`_compare_camera`):
 
 - app calibration notes against an app run (``.pivraw`` or exported): every note
   must agree on ``view_rotation``, ``dark_subtracted``, ``pixel_rule`` and
   ``camera_serial``. ``dark_id`` is never compared: a calibration is taken at
   another exposure with its own dark.
 - ``.set`` calibration against ``.set`` PIV: each camera's geometry must agree.
-- DaVis against plain, either way: applied, nothing compared, logged.
+- DaVis against plain, either way: applied, nothing compared, with a warning
+  returned for the apply result.
 - plain against plain: applied, nothing to compare.
 - every other pairing: refused, because the frames cannot be proven to match.
 
-The apply planner (``runio.plan_apply_units``) calls :func:`check_calibration_frames`
-once per apply, so the GUI route and both CLI apply commands check alike.
+The apply planner (``runio.plan_apply_units``) and stereo self-calibration
+(``self_cal.check_self_cal_frames``) call :func:`check_calibration_frames`, so the
+GUI routes and the CLI commands check alike.
 """
 
 from __future__ import annotations
 
 import json
-import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -63,8 +64,6 @@ from pivtools_core.image_handling.readers.set_reader import (
     set_camera_streams,
     stream_geometry,
 )
-
-logger = logging.getLogger(__name__)
 
 # The note fields that fix the pixel frame. dark_id is provenance only.
 COMPARED_FIELDS = ("view_rotation", "dark_subtracted", "pixel_rule", "camera_serial")
@@ -291,42 +290,71 @@ def _compare_notes(camera: int, cal: _CalibrationCamera, piv: _PivCamera) -> Lis
     return problems
 
 
-def _compare_camera(camera: int, cal: _CalibrationCamera, piv: _PivCamera) -> List[str]:
-    """Problems for one camera; empty when the frames match or nothing can be compared."""
-    if cal.kind == NOTED and piv.kind in (PIVRAW, EXPORTED):
-        return _compare_notes(camera, cal, piv)
-    if cal.kind == DAVIS and piv.kind == DAVIS:
+# What happens for each (calibration kind, PIV kind). Any pair not listed refuses.
+COMPARE_NOTES = "compare notes"  # every calibration note against the app run's camera
+COMPARE_GEOMETRY = "compare geometry"  # each camera's .set geometry transformer
+APPLY = "apply"  # nothing on either side to compare, as before K1
+WARN = "warn"  # applied, with a warning the user reads in the apply result
+REFUSE = "refuse"
+RULES: Dict[Tuple[str, str], str] = {
+    (NOTED, PIVRAW): COMPARE_NOTES,
+    (NOTED, EXPORTED): COMPARE_NOTES,
+    (DAVIS, DAVIS): COMPARE_GEOMETRY,
+    (PLAIN, PLAIN): APPLY,
+    # DaVis records its geometry only inside a .set; DaVis users calibrate from
+    # DaVis's own Properties/Calibration .im7 images (lead decision, 17 Nov; the
+    # option of refusing is put to Morgan).
+    (DAVIS, PLAIN): WARN,
+    (PLAIN, DAVIS): WARN,
+}
+
+# Short names for the warning sentence.
+_KIND_LABEL = {
+    DAVIS: "DaVis .set recording",
+    PLAIN: "images with no frame record",
+}
+
+
+def frames_not_compared_warning(cal_kind: str, piv_kind: str) -> str:
+    """The warning an applied-but-uncompared calibration carries in its result."""
+    return (
+        f"The calibration ({_KIND_LABEL[cal_kind]}) and the PIV images "
+        f"({_KIND_LABEL[piv_kind]}) carry no shared record of rotation or dark, so "
+        "their pixel frames could not be compared."
+    )
+
+
+def _compare_camera(
+    camera: int, cal: _CalibrationCamera, piv: _PivCamera
+) -> Tuple[List[str], Optional[str]]:
+    """(problems, warning) for one camera, by :data:`RULES`."""
+    rule = RULES.get((cal.kind, piv.kind), REFUSE)
+    if rule == COMPARE_NOTES:
+        return _compare_notes(camera, cal, piv), None
+    if rule == COMPARE_GEOMETRY:
         if cal.geometry != piv.geometry:
             return [
                 f"camera {camera}: geometry transformer {cal.geometry} in the "
                 f"calibration recording, {piv.geometry} in the PIV recording "
                 f"({piv.where})"
-            ]
-        return []
-    if cal.kind == PLAIN and piv.kind == PLAIN:
-        return []
-    if {cal.kind, piv.kind} == {DAVIS, PLAIN}:
-        logger.warning(
-            "calibration frame check: camera %d calibration is %s and the PIV source "
-            "is %s; DaVis records its geometry only inside a .set, so the two frames "
-            "are not compared",
-            camera,
-            _KIND_WORDS[cal.kind],
-            _KIND_WORDS[piv.kind],
-        )
-        return []
+            ], None
+        return [], None
+    if rule == APPLY:
+        return [], None
+    if rule == WARN:
+        return [], frames_not_compared_warning(cal.kind, piv.kind)
     calibration = (
         f"the calibration {cal.why_plain}"
         if cal.why_plain
-        else (f"the calibration holds {_KIND_WORDS[cal.kind]}")
+        else f"the calibration holds {_KIND_WORDS[cal.kind]}"
     )
     return [
-        f"camera {camera}: {calibration}, and the PIV source is {_KIND_WORDS[piv.kind]} "
-        f"({piv.where}). Their pixel frames (rotation, dark, pixel rule, camera) "
-        "cannot be proven to match. Calibrate with images of the same kind as the "
-        "PIV images: for a PIVTOOLS Acquisition run, calibration images captured "
-        "in the acquisition app"
-    ]
+        f"camera {camera}: {calibration}, and the PIV source is "
+        f"{_KIND_WORDS[piv.kind]} ({piv.where}). Their pixel frames (rotation, dark, "
+        "pixel rule, camera) cannot be proven to match. Calibrate with images of the "
+        "same kind as the PIV images: for a PIVTOOLS Acquisition run, calibration "
+        "images captured in the acquisition app"
+    ], None
 
 
 def check_calibration_frames(
@@ -334,7 +362,7 @@ def check_calibration_frames(
     calibration_source: Path,
     cameras: Sequence[int],
     piv_sources: Sequence[Path],
-) -> None:
+) -> Tuple[str, ...]:
     """Refuse a calibration whose pixel frame is not proven to be the PIV images'.
 
     Args:
@@ -343,10 +371,15 @@ def check_calibration_frames(
         cameras: the cameras the apply covers.
         piv_sources: the PIV source paths whose vectors are being calibrated.
 
+    Returns:
+        The warnings of the pairs applied without a comparison (:data:`WARN`),
+        each once, for the caller to put in the apply result the user reads.
+
     Raises:
-        CalibrationFrameMismatch: Any camera of any PIV source fails a rule in the
-            module docstring. Every problem is listed, grouped by PIV source.
-            A PIV run, note or recording that cannot be read is reported too.
+        PivrawError: The .pivraw reader refuses the PIV run (its own text).
+        CalibrationFrameMismatch: Any camera of any PIV source fails a rule of
+            :data:`RULES`. Every problem is listed, grouped by PIV source. A note
+            or recording that cannot be read is reported too.
     """
     calibration_source = Path(calibration_source)
     settings = try_load_settings(calibration_source)
@@ -368,17 +401,23 @@ def check_calibration_frames(
             + "; ".join(unreadable)
         )
     failures = []
+    warnings: List[str] = []
     for source in piv_sources:
         problems = []
         for cam in cameras:
             try:
                 piv = _piv_camera(full_cfg, Path(source), cam)
+            except PivrawError:
+                raise
             except (OSError, ValueError) as exc:
                 problems.append(
                     f"camera {cam}: the PIV source's pixel frame cannot be read: {exc}"
                 )
                 continue
-            problems.extend(_compare_camera(cam, calibration[cam], piv))
+            found, warning = _compare_camera(cam, calibration[cam], piv)
+            problems.extend(found)
+            if warning is not None and warning not in warnings:
+                warnings.append(warning)
         if problems:
             failures.append(f"against the PIV source {source}: " + "; ".join(problems))
     if failures:
@@ -389,3 +428,4 @@ def check_calibration_frames(
             + ". A calibration applied to images turned, dark-treated or taken by "
             "another camera puts every vector in the wrong place."
         )
+    return tuple(warnings)

@@ -336,7 +336,8 @@ def test_plain_tiff_calibration_against_a_run_is_refused(tmp_path):
 
 
 def test_the_gui_apply_route_returns_the_refusal(tmp_path, monkeypatch):
-    """POST /calibration/apply plans through the same planner and starts no job."""
+    """POST /calibration/apply plans through the same planner, answers 400 and
+    starts no job."""
     from flask import Flask
 
     import pivtools_gui.calibration.app.views as V
@@ -347,11 +348,11 @@ def test_the_gui_apply_route_returns_the_refusal(tmp_path, monkeypatch):
     monkeypatch.setattr(V, "_source_path", lambda idx: source)
     app = Flask(__name__)
     app.register_blueprint(V.calibration_bp)
-    body = (
-        app.test_client()
-        .post("/calibration/apply", json={"board": BOARD, "stereo": False})
-        .get_json()
+    resp = app.test_client().post(
+        "/calibration/apply", json={"board": BOARD, "stereo": False}
     )
+    body = resp.get_json()
+    assert resp.status_code == 400
     assert body["success"] is False
     assert "job_id" not in body
     assert "camera 2, 00002.tif: camera_serial SIM1 in its note, SIM2 in the run" in (
@@ -623,3 +624,328 @@ def test_source_diagnosis_does_not_list_note_files(tmp_path):
 
     (camera1,) = scan_source(tmp_path / "export").subdirs
     assert dict(camera1.ext_counts) == {".tif": 2}
+
+
+# ---------------------------------------------------------------------------
+# Applied without a comparison: the warning reaches the CLI and the GUI result
+# ---------------------------------------------------------------------------
+
+_NOT_COMPARED = (
+    "The calibration (images with no frame record) and the PIV images (DaVis .set "
+    "recording) carry no shared record of rotation or dark, so their pixel frames "
+    "could not be compared."
+)
+
+
+def _plain_one_camera_calibration(tmp_path: Path) -> Path:
+    """One camera's TIFF calibration without notes (a DaVis user's export, say)."""
+    source = tmp_path / "plain_cal"
+    source.mkdir()
+    (source / "00001.tif").write_bytes(b"tif")
+    save_settings(
+        source, {"image": {"image_format": "%05d.tif", "image_type": "standard"}}
+    )
+    REC.save_mono(
+        build_scale_factor_record(
+            camera=1, origin_px=(0.0, 0.0), px_per_mm=10.0, dt=1.0
+        ),
+        REC.mono_model_dir_for_source(source, 1, BOARD),
+    )
+    return source
+
+
+def test_davis_against_plain_applies_with_a_warning_both_ways(tmp_path):
+    piv_set = _set_with_geometry(tmp_path, "piv", 2, "rotate-cw-90")
+    (unit,) = _plan(
+        _set_piv_config(tmp_path, piv_set), _plain_one_camera_calibration(tmp_path)
+    )
+    assert unit["frame_warnings"] == (_NOT_COMPARED,)
+
+    # The mirror: a .set calibration against PIV TIFFs without notes.
+    cal_set = _set_with_geometry(tmp_path, "cal", 1, None)
+    save_settings(
+        cal_set,
+        {"image": {"image_format": cal_set.name, "image_type": "lavision_set"}},
+    )
+    REC.save_mono(
+        build_scale_factor_record(
+            camera=1, origin_px=(0.0, 0.0), px_per_mm=10.0, dt=1.0
+        ),
+        REC.mono_model_dir_for_source(cal_set, 1, BOARD),
+    )
+    cfg = {
+        "paths": {
+            "base_paths": [str(tmp_path / "results")],
+            "source_paths": [str(tmp_path / "tiffs")],
+            "camera_count": 1,
+            "camera_numbers": [1],
+        },
+        "images": {"image_format": ["B%05d_A.tif", "B%05d_B.tif"], "num_images": 2},
+    }
+    path = tmp_path / "tiff_config.yaml"
+    path.write_text(yaml.dump(cfg, default_flow_style=False), encoding="utf-8")
+    (unit,) = _plan(Config(path=str(path)), cal_set)
+    assert unit["frame_warnings"] == (
+        "The calibration (DaVis .set recording) and the PIV images (images with no "
+        "frame record) carry no shared record of rotation or dark, so their pixel "
+        "frames could not be compared.",
+    )
+
+
+def test_matched_frames_carry_no_warning(tmp_path):
+    run = copy_case(tmp_path, DF_DARK)
+    units = _plan(_piv_config(tmp_path, run), _calibration(tmp_path))
+    assert all(u["frame_warnings"] == () for u in units)
+
+
+def test_the_warning_reaches_the_cli_output(tmp_path, monkeypatch, capsys):
+    import pivtools_cli.calibration_cli as cli
+
+    piv_set = _set_with_geometry(tmp_path, "piv", 2, None)
+    source = _plain_one_camera_calibration(tmp_path)
+    monkeypatch.setattr(cli, "get_config", lambda: _set_piv_config(tmp_path, piv_set))
+    monkeypatch.setattr(cli.runio, "calibrate_mono_run", lambda *a, **k: ["B1.mat"])
+    monkeypatch.setattr(cli.runio, "stamp_unit", lambda unit, pointer: None)
+    assert cli.apply_calibration_command(_cli_apply_args(source)) == 1
+    assert f"[calibration] WARNING: {_NOT_COMPARED}" in capsys.readouterr().out
+
+
+def test_the_warning_reaches_the_gui_apply_response(tmp_path, monkeypatch):
+    import pivtools_gui.calibration.app.views as V
+
+    piv_set = _set_with_geometry(tmp_path, "piv", 2, None)
+    source = _plain_one_camera_calibration(tmp_path)
+    monkeypatch.setattr(V, "get_config", lambda: _set_piv_config(tmp_path, piv_set))
+    monkeypatch.setattr(V, "_source_path", lambda idx: source)
+    monkeypatch.setattr(V.c2runio, "calibrate_mono_run", lambda *a, **k: ["B1.mat"])
+    monkeypatch.setattr(V.c2runio, "stamp_unit", lambda unit, pointer: None)
+    client = _client(V)
+    resp = client.post("/calibration/apply", json={"board": BOARD, "stereo": False})
+    body = resp.get_json()
+    assert resp.status_code == 200 and body["success"] is True, body
+    assert body["warnings"] == [_NOT_COMPARED]
+    status = _wait_for_job(client, f"/calibration/apply/status/{body['job_id']}")
+    assert status["status"] == "completed", status
+    assert status["warnings"] == [_NOT_COMPARED]
+
+
+# ---------------------------------------------------------------------------
+# A .pivraw run the reader refuses: 400 (GUI) or exit 1 (CLI), never a job
+# ---------------------------------------------------------------------------
+
+# Camera 2 missed its first trigger: the alignment refuses the run (P2).
+REFUSED_RUN = "df_2cam_missed_trigger_cam2"
+
+
+def _client(V):
+    from flask import Flask
+
+    app = Flask(__name__)
+    app.register_blueprint(V.calibration_bp)
+    return app.test_client()
+
+
+def _wait_for_job(client, url: str, timeout_s: float = 20.0) -> dict:
+    import time
+
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        status = client.get(url).get_json()
+        if status.get("status") in ("completed", "failed", "cancelled"):
+            return status
+        time.sleep(0.05)
+    raise AssertionError(f"job at {url} did not finish in {timeout_s} s")
+
+
+def _cli_apply_args(source: Path):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        board=BOARD,
+        source=str(source),
+        camera=None,
+        dt=None,
+        z_world=None,
+        tilt_x=None,
+        tilt_y=None,
+        uncalibrated_dir=None,
+        calibrated_dir=None,
+        all_paths=True,
+        type_name=None,
+        model_type=None,
+    )
+
+
+def _reader_refusal(cfg: Config) -> str:
+    """The .pivraw reader's own text for the refused run."""
+    from pivtools_core.image_handling.readers.pivraw_reader import PivrawError
+
+    with pytest.raises(PivrawError) as exc:
+        cfg.num_frame_pairs
+    return str(exc.value)
+
+
+def _jobs(job_type: str) -> int:
+    from pivtools_gui.services.job_manager import job_manager
+
+    return len(job_manager.list_jobs(job_type=job_type))
+
+
+def test_gui_apply_answers_a_refused_run_with_400(tmp_path, monkeypatch):
+    import pivtools_gui.calibration.app.views as V
+
+    run = copy_case(tmp_path, REFUSED_RUN)
+    refusal = _reader_refusal(_piv_config(tmp_path, run))
+    source = _calibration(tmp_path)
+    monkeypatch.setattr(V, "get_config", lambda: _piv_config(tmp_path, run))
+    monkeypatch.setattr(V, "_source_path", lambda idx: source)
+    before = _jobs("calibration_apply")
+    resp = _client(V).post("/calibration/apply", json={"board": BOARD, "stereo": False})
+    assert resp.status_code == 400
+    assert resp.get_json() == {"success": False, "error": refusal}
+    assert _jobs("calibration_apply") == before
+
+
+def test_cli_apply_exits_1_with_the_reader_text(tmp_path, monkeypatch, capsys):
+    import pivtools_cli.calibration_cli as cal_cli
+    from pivtools_cli import cli
+
+    run = copy_case(tmp_path, REFUSED_RUN)
+    refusal = _reader_refusal(_piv_config(tmp_path, run))
+    source = _calibration(tmp_path)
+    monkeypatch.setattr(cal_cli, "get_config", lambda: _piv_config(tmp_path, run))
+    monkeypatch.setattr(
+        cal_cli.runio, "calibrate_mono_run", lambda *a, **k: pytest.fail("applied")
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "pivtools-cli",
+            "apply-calibration",
+            "--board",
+            BOARD,
+            "--source",
+            str(source),
+            "--all-paths",
+        ],
+    )
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+    assert exc.value.code == 1
+    assert capsys.readouterr().err.strip() == f"error: {refusal}"
+
+
+def _stereo_calibration(tmp_path: Path, notes=None) -> Path:
+    """The app calibration of :func:`_calibration`, plus a pinhole stereo model."""
+    from test_calibration_self_cal import _stereo_record
+
+    source = _calibration(tmp_path, notes)
+    REC.save_stereo(
+        _stereo_record(), REC.stereo_model_dir_for_source(source, 1, 2, "dotboard")
+    )
+    return source
+
+
+def _self_cal_body() -> dict:
+    return {"board": "dotboard", "camera_pair": [1, 2], "base_path_idx": 0}
+
+
+def test_gui_self_cal_answers_a_refused_run_with_400(tmp_path, monkeypatch):
+    import pivtools_gui.calibration.app.views as V
+
+    run = copy_case(tmp_path, REFUSED_RUN)
+    refusal = _reader_refusal(_piv_config(tmp_path, run))
+    source = _stereo_calibration(tmp_path)
+    monkeypatch.setattr(V, "get_config", lambda: _piv_config(tmp_path, run))
+    monkeypatch.setattr(V, "_source_path", lambda idx: source)
+    before = _jobs("calibration_self_cal")
+    resp = _client(V).post("/calibration/self_cal/run", json=_self_cal_body())
+    assert resp.status_code == 400
+    assert resp.get_json() == {"success": False, "error": refusal}
+    assert _jobs("calibration_self_cal") == before
+
+
+def _cli_self_cal_args(source: Path):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        board="dotboard",
+        source=str(source),
+        camera_pair="1,2",
+        base_path_idx=0,
+        n_images=None,
+        window_size=None,
+        overlap=None,
+        no_filters=True,
+        no_figures=True,
+        model_type=None,
+    )
+
+
+def test_cli_self_calibrate_refuses_a_refused_run(tmp_path, monkeypatch):
+    import pivtools_cli.calibration_cli as cal_cli
+    from pivtools_core.image_handling.readers.pivraw_reader import PivrawError
+
+    run = copy_case(tmp_path, REFUSED_RUN)
+    refusal = _reader_refusal(_piv_config(tmp_path, run))
+    source = _stereo_calibration(tmp_path)
+    monkeypatch.setattr(cal_cli, "get_config", lambda: _piv_config(tmp_path, run))
+    monkeypatch.setattr(
+        cal_cli.c2sc, "load_particle_pairs", lambda *a, **k: pytest.fail("loaded")
+    )
+    with pytest.raises(PivrawError) as exc:
+        cal_cli.self_calibrate_command(_cli_self_cal_args(source))
+    assert str(exc.value) == refusal
+
+
+# ---------------------------------------------------------------------------
+# Stereo self-calibration runs the same frame check
+# ---------------------------------------------------------------------------
+
+
+def test_gui_self_cal_refuses_a_frame_mismatch_before_any_job(tmp_path, monkeypatch):
+    import pivtools_gui.calibration.app.views as V
+
+    run = copy_case(tmp_path, DF_DARK)
+    source = _stereo_calibration(tmp_path, {(2, 1): _note(view_rotation="cw90")})
+    monkeypatch.setattr(V, "get_config", lambda: _piv_config(tmp_path, run))
+    monkeypatch.setattr(V, "_source_path", lambda idx: source)
+    before = _jobs("calibration_self_cal")
+    resp = _client(V).post("/calibration/self_cal/run", json=_self_cal_body())
+    assert resp.status_code == 400
+    assert "camera 2, 00001.tif: view_rotation cw90 in its note, none in the run" in (
+        resp.get_json()["error"]
+    )
+    assert _jobs("calibration_self_cal") == before
+
+
+def test_cli_self_calibrate_refuses_a_frame_mismatch(tmp_path, monkeypatch):
+    import pivtools_cli.calibration_cli as cal_cli
+
+    run = copy_case(tmp_path, DF_DARK)
+    source = _stereo_calibration(tmp_path, {(1, 2): _note(camera_serial="SIM2")})
+    monkeypatch.setattr(cal_cli, "get_config", lambda: _piv_config(tmp_path, run))
+    monkeypatch.setattr(
+        cal_cli.c2sc, "load_particle_pairs", lambda *a, **k: pytest.fail("loaded")
+    )
+    with pytest.raises(CalibrationFrameMismatch, match="camera 1, 00002.tif: "):
+        cal_cli.self_calibrate_command(_cli_self_cal_args(source))
+
+
+def test_self_cal_with_matching_frames_reaches_the_image_load(tmp_path, monkeypatch):
+    """The check passes matching frames on to the particle-image load."""
+    import pivtools_cli.calibration_cli as cal_cli
+
+    class _Loaded(Exception):
+        pass
+
+    def _load(*a, **k):
+        raise _Loaded
+
+    run = copy_case(tmp_path, DF_DARK)
+    source = _stereo_calibration(tmp_path)
+    monkeypatch.setattr(cal_cli, "get_config", lambda: _piv_config(tmp_path, run))
+    monkeypatch.setattr(cal_cli.c2sc, "load_particle_pairs", _load)
+    with pytest.raises(_Loaded):
+        cal_cli.self_calibrate_command(_cli_self_cal_args(source))
