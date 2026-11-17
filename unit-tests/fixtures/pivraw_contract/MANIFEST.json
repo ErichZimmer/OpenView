@@ -1,5 +1,5 @@
 {
- "writer_commit": "d9a72ef",
+ "writer_commit": "de867d0",
  "format_version": 2,
  "idx_record": "<qQq",
  "idx_fields": [
@@ -88,7 +88,7 @@
   "df_lost_first_frame/Camera1.pivraw.idx": 96,
   "df_lost_first_frame/Camera1.pivraw.json": 743,
   "df_lost_first_frame/run.yaml": 693,
-  "expected.json": 10398,
+  "expected.json": 9885,
   "expected_arrays.npz": 12198,
   "tr_bayer_clean/Camera1.pivraw": 12288,
   "tr_bayer_clean/Camera1.pivraw.idx": 72,
@@ -107,5 +107,5 @@
   "tr_lost_frame/Camera1.pivraw.json": 739,
   "tr_lost_frame/run.yaml": 690
  },
- "total_bytes": 300736
+ "total_bytes": 300223
 }

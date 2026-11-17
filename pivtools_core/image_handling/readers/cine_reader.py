@@ -51,26 +51,44 @@ def _get_cached_metadata(file_path: str):
     return metadata
 
 
+def _internal_frame(metadata, frame: int, which: str, file_path: str) -> int:
+    """The camera's frame number for 1-based ``frame``, refused if outside the file.
+
+    Frames are numbered from 1 for the user; the camera numbers them from
+    ``FirstImageNo``, which is negative for pre-trigger frames.
+    """
+    first_frame = metadata.FirstImageNo
+    last_frame = first_frame + metadata.ImageCount - 1
+    internal = frame + first_frame - 1
+    if not first_frame <= internal <= last_frame:
+        raise ValueError(
+            f"{os.path.basename(file_path)}: {which} {frame} (camera frame "
+            f"{internal}) is outside the file, which holds frames 1 to "
+            f"{metadata.ImageCount} (camera frames {first_frame} to {last_frame})."
+        )
+    return internal
+
+
 def read_cine_pair(
-    file_path: str, idx: int = 1, out: Optional[np.ndarray] = None
+    file_path: str,
+    idx: int,
+    *,
+    frame_b_idx: int,
+    out: Optional[np.ndarray] = None,
 ) -> np.ndarray:
-    """Read frame pair from .cine file.
+    """Read frames A and B of one pair from a .cine file.
 
-    This function is called by load_images.read_pair() with the frame_a index
-    already computed by config.get_frame_pair_indices().
+    ``load_images.read_pair`` passes both frame numbers from
+    ``Config.get_frame_pair_indices``. Frame B is required: this reader once
+    read ``idx + 1`` as frame B whatever ``frame_stride`` asked for, so a
+    wide-gap pairing correlated the wrong frames with no error.
 
-    The idx parameter is the user-facing frame number (1-based). This function
-    handles the translation to internal frame numbers using FirstImageNo.
-
-    Always reads exactly two frames — use :func:`read_cine_single` for one. This
-    took a ``frames`` argument that the body never read, so a caller asking for
-    ``frames=1`` silently got a pair anyway; the parameter is gone rather than
-    honoured, because a pair reader that sometimes returns one frame is the
-    ambiguity that caused the bug.
+    Always reads exactly two frames — use :func:`read_cine_single` for one.
 
     Args:
         file_path: Path to .cine file
-        idx: Frame A index (1-based, from pairing logic)
+        idx: Frame A number (1-based, from pairing logic)
+        frame_b_idx: Frame B number (1-based, from pairing logic)
         out: Optional (2, H, W) float32 C-contiguous destination; the two
             decoded frames are widened straight into it (one copy instead of
             the stack-then-astype two), and it is returned. Undefined after an
@@ -81,31 +99,11 @@ def read_cine_pair(
 
     Raises:
         FileNotFoundError: If the .cine file doesn't exist
-        ValueError: If requested frames are out of range
+        ValueError: If either frame is outside the file
     """
     metadata = _get_cached_metadata(file_path)
-
-    # Convert user frame number to internal frame number
-    # User sees frames starting at 1, internal uses FirstImageNo
-    # FirstImageNo is typically 1 but can be negative for pre-trigger
-    internal_a = idx + metadata.FirstImageNo - 1
-    internal_b = internal_a + 1
-
-    # Validate frame range
-    first_frame = metadata.FirstImageNo
-    last_frame = metadata.FirstImageNo + metadata.ImageCount - 1
-
-    if internal_a < first_frame:
-        raise ValueError(
-            f"Frame {idx} (internal {internal_a}) is before first available frame. "
-            f"CINE file has frames {first_frame} to {last_frame}."
-        )
-
-    if internal_b > last_frame:
-        raise ValueError(
-            f"Frame pair starting at {idx} (internal {internal_a}, {internal_b}) "
-            f"exceeds available frames. CINE file has frames {first_frame} to {last_frame}."
-        )
+    internal_a = _internal_frame(metadata, idx, "frame A", file_path)
+    internal_b = _internal_frame(metadata, frame_b_idx, "frame B", file_path)
 
     frame_a = cr.read_image(metadata, file_path, internal_a)
     frame_b = cr.read_image(metadata, file_path, internal_b)
@@ -115,7 +113,10 @@ def read_cine_pair(
 
     # Explicit shape checks before np.copyto: it broadcasts silently, and a
     # (1, H, W) or (H, 1) frame would fill the slot with plausible wrong pixels.
-    what = f"read_cine_pair frame {idx} of {os.path.basename(file_path)}"
+    what = (
+        f"read_cine_pair frames ({idx}, {frame_b_idx}) of "
+        f"{os.path.basename(file_path)}"
+    )
     if frame_b.shape != frame_a.shape:
         raise ValueError(
             f"{what}: frames A and B decoded to different shapes "
@@ -138,18 +139,7 @@ def read_cine_single(file_path: str, idx: int = 1) -> np.ndarray:
         np.ndarray: Shape (H, W) single frame as float32
     """
     metadata = _get_cached_metadata(file_path)
-    internal_idx = idx + metadata.FirstImageNo - 1
-
-    # Validate frame range
-    first_frame = metadata.FirstImageNo
-    last_frame = metadata.FirstImageNo + metadata.ImageCount - 1
-
-    if internal_idx < first_frame or internal_idx > last_frame:
-        raise ValueError(
-            f"Frame {idx} (internal {internal_idx}) is out of range. "
-            f"CINE file has frames {first_frame} to {last_frame}."
-        )
-
+    internal_idx = _internal_frame(metadata, idx, "frame", file_path)
     frame = cr.read_image(metadata, file_path, internal_idx)
     return frame.astype(np.float32)
 

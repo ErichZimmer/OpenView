@@ -100,6 +100,7 @@ def test_nonzero_image_count_is_refused_by_name(tmp_path, clean_set_cache, word1
         (0, 0, "version"),
         (5, 8, "bits per decoded pixel"),
         (5, 12, "bits per decoded pixel"),
+        (14, 1, "planes per frame"),
         (14, 2, "planes per frame"),
         (15, 1, "sample type"),
         (15, 2, "sample type"),
@@ -118,11 +119,16 @@ def test_unmeasured_header_word_is_refused_by_name(
     assert "Frame0-0.ims" in message
 
 
-def test_one_plane_per_frame_reads(tmp_path, clean_set_cache):
-    """Word 14 = 1 opens in lvpyio as 0 does (CU §2 C4, §4 item 1), so both read."""
+def test_one_plane_per_frame_is_refused(tmp_path, clean_set_cache):
+    """Word 14 = 1 opens in lvpyio as 0 does (CU §2 C4, §4 item 1), but no
+    real file has it, so it is refused (Morgan 2026-11-17: 0 only)."""
     set_file, set_dir = _one_stream_set(tmp_path)
     _rewrite_index(set_dir, words={14: 1})
-    assert read_set_info(set_file).n_entries == _N_ENTRIES
+    with pytest.raises(ValueError) as exc:
+        read_set_info(set_file)
+    message = str(exc.value)
+    assert "word 14 (planes per frame) is 1" in message
+    assert "Frame0-0.ims" in message
 
 
 @pytest.mark.parametrize("word2", [0, 2, 3])

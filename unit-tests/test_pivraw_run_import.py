@@ -23,7 +23,6 @@ from pivtools_core.image_handling.readers.pivraw_reader import (
     PivrawAlignmentError,
     PivrawError,
     clear_alignment_cache,
-    read_pivraw_header,
 )
 from pivtools_core.validation import validate_config
 
@@ -98,45 +97,25 @@ def test_one_camera_time_resolved_run_points_at_cam1(tmp_path):
     assert _rig_dt(source) == 0.04
 
 
-def test_a_run_with_unequal_drops_imports_and_validates(tmp_path):
-    """P2's stand-in for camera 2 dropping pair 2 (test_pivraw_alignment
-    ``_cam2_dropped_pair_2``): camera 1 holds 6 frames, camera 2 holds 4, and
-    2 pairs are complete on both. num_images is the larger count, so a check
-    that every camera holds num_images frames would refuse the run; the
-    alignment decides instead."""
-    from pivtools_core.image_handling.load_images import create_piv_frame_reader
-    from pivtools_core.image_handling.path_utils import validate_images_generic
-    from pivtools_core.image_handling.source_diagnosis import piv_diagnosis_context
-
+def test_a_run_with_a_drop_is_refused_and_nothing_is_written(tmp_path):
+    """Camera 2 dropped run trigger 1 (test_pivraw_alignment
+    ``_cam2_dropped_pair_2``). Pairs are never dropped, so the import fails
+    with the reader's ``dropped`` refusal and writes no config, calibration
+    settings or results folder."""
     project = tmp_path / "project"
     project.mkdir()
     run = copy_case(project, "df_2cam_missed_trigger_cam2", "cam2_dropped_pair_2")
     edit_index(run, 2, frame_id=[5000, 5001, 5004, 5005])
     edit_sidecar(run, 2, missing_indices=[2, 3], dropped_pairs=1)
-    counts = [read_pivraw_header(run / f"Camera{c}.pivraw").n_frames for c in (1, 2)]
-    assert counts[0] != counts[1]
     config_path = tmp_path / "config.yaml"
-    import_run(run, config_path)
-
-    cfg = Config(path=str(config_path))
-    assert cfg.num_images == max(counts)
-    ok, error, _warnings = validate_config(cfg)
-    assert ok, error
-    assert cfg.num_frame_pairs == 2
-    for camera in (1, 2):
-        result = validate_images_generic(
-            run,
-            camera,
-            cfg.image_format[0],
-            "pivraw",
-            cfg.num_images,
-            False,
-            read_frame_fn=create_piv_frame_reader(run, camera, cfg),
-            diagnosis=piv_diagnosis_context(cfg, 0),
-            pair_strides=(cfg.frame_stride, cfg.pair_stride),
-        )
-        assert result["valid"] is True, result["error"]
-        assert result["found_count"] == counts[camera - 1]
+    with pytest.raises(PivrawAlignmentError) as info:
+        import_run(run, config_path)
+    assert info.value.reason == "dropped"
+    assert "Camera2 lost 1 pair (run trigger 1)" in str(info.value)
+    assert str(info.value).endswith("Re-record the run.")
+    assert not config_path.exists()
+    assert not (project / "calibration").exists()
+    assert not (project / "results").exists()
 
 
 def test_a_run_that_cannot_align_is_refused_and_nothing_is_written(tmp_path):

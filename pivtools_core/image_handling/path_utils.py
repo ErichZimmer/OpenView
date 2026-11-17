@@ -192,19 +192,42 @@ def build_calibration_camera_path(
     return source
 
 
+def camera_path_for(config: "Config", base_source: Path, camera: int) -> Path:
+    """Where one camera's PIV images are, given a source (one loop's, if looped).
+
+    THE camera-path rule for PIV images: every reader (the pipeline, the GUI
+    routes, shape detection, validation) calls this, so none can look for a
+    camera somewhere the others do not. The folder comes from
+    ``Config.get_camera_folder`` (:func:`camera_subfolder_name`):
+
+    - ``.set``: ``base_source`` is the container file itself.
+    - ``.cine`` / ``.pivraw``: the directory holding one file per camera.
+    - ``.im7``: ``base_source / Cam{N}`` with ``images.use_camera_subfolders``
+      (one single-camera file per folder), else ``base_source`` (one
+      multi-camera file per instant).
+    - standard rasters: ``base_source / Cam{N}`` (or the configured
+      subfolder) when there is more than one camera, else ``base_source``.
+
+    Args:
+        config: Configuration object.
+        base_source: A ``paths.source_paths`` entry, or the loop source
+            ``Config.get_loop_source_path`` derived from one. The camera folder
+            sits inside the loop's source, so a loop is resolved first.
+        camera: Camera number (1-based).
+    """
+    folder = config.get_camera_folder(camera)
+    return Path(base_source) / folder if folder else Path(base_source)
+
+
 def build_piv_camera_path(
     config: "Config",
     source_path_idx: int = 0,
     camera: int = 1,
 ) -> Path:
-    """Build the path to PIV images for a specific camera.
+    """Path to one camera's PIV images in ``source_paths[source_path_idx]``.
 
-    Path structure depends on image type and use_camera_subfolders setting:
-    - .set files: source_path IS the .set file (return it directly)
-    - .cine / .pivraw files: source_path directory (no camera subfolder)
-    - IM7 with use_camera_subfolders=False: source_path (all cameras in file)
-    - IM7 with use_camera_subfolders=True: source_path / camera_folder
-    - Standard formats: source_path / camera_folder
+    :func:`camera_path_for` on the configured source (loop 0 of a looped
+    recording).
 
     Args:
         config: Configuration object
@@ -214,32 +237,7 @@ def build_piv_camera_path(
     Returns:
         Path: Path to PIV image file (.set) or directory for other formats
     """
-    source_path = config.source_paths[source_path_idx]
-    image_type = config.image_type
-
-    # SET: source_path IS the .set file - return it directly
-    if image_type == "lavision_set":
-        return source_path
-
-    # CINE / PIVRAW: source_path is the directory holding one file per camera
-    if image_type in ("cine", "pivraw"):
-        return source_path
-
-    # IM7: check if using camera subfolders
-    if image_type == "lavision_im7":
-        if config.images_use_camera_subfolders:
-            # Single-camera IM7 files in camera subdirectories
-            camera_folder = config.get_camera_folder(camera)
-            if camera_folder:
-                return source_path / camera_folder
-        # Multi-camera IM7 files (default): no subdirectory
-        return source_path
-
-    # Standard formats use camera subdirectories
-    camera_folder = config.get_camera_folder(camera)
-    if camera_folder:
-        return source_path / camera_folder
-    return source_path
+    return camera_path_for(config, config.source_paths[source_path_idx], camera)
 
 
 def resolve_file_path(
@@ -822,8 +820,8 @@ def validate_images_generic(
         - warnings: list - What should look like a warning, not a fact (a
           ``.set`` that DaVis marked ``SetIsSuspicious``)
         - pivraw_alignment: dict or None - PIV ``.pivraw`` only: the run's
-          trigger alignment (``PivrawAlignment.report``: pairs, skipped pairs
-          in total and per camera, a summary sentence, notes)
+          trigger alignment (``PivrawAlignment.report``: pairs, triggers
+          requested, a summary sentence, notes)
 
         When no pattern can be derived from the folder's files, the reason is
         appended to ``error``.
@@ -1081,17 +1079,16 @@ def _validate_core(
             result["found_count"] = get_pivraw_frame_count(pivraw_file)
         except Exception as e:
             return _container_count_failure(result, pivraw_file, e)
-        # No per-camera count check against num_images: cameras of one run hold
-        # different frame counts after unequal drops, and the run import sets
-        # num_images to the largest. The pairs come from the trigger alignment,
-        # and the pair count is min(aligned pairs, the num_images cap)
+        # No per-camera count check against num_images: the trigger alignment
+        # below refuses a run in which a selected camera lost any frame, and
+        # the pair count is min(aligned pairs, the num_images cap)
         # (Config.per_loop_frame_pairs), so no num_images can read past a
         # camera's frames. found_count stays for display.
         result["valid"] = True
 
         # PIV pairs the run's cameras by trigger. A run that cannot be aligned
         # (a camera offset by a trigger, a flipped A/B phase, a camera with no
-        # frames, ...) fails here with the camera, trigger and reason; read_error
+        # frames, a dropped frame, ...) fails here with the camera, trigger and reason; read_error
         # too, so the PIV route does not replace it with "First frame not found".
         if not calibration:
             from .readers.pivraw_reader import PivrawError, align_pivraw_run

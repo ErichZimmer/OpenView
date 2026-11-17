@@ -91,7 +91,7 @@ class RunImport:
         rig_dt: ``rig.dt`` in seconds.
         settings_created: The settings file did not exist; its image block was
             created from the acquisition app's calibration layout.
-        warnings: Validation warnings (skipped pairs, alignment notes).
+        warnings: Validation warnings (alignment notes).
     """
 
     config_path: Path
