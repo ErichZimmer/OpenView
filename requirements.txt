@@ -19,7 +19,6 @@ tifffile>=2025.6.11
 tqdm>=4.67
 numba>=0.61
 psutil>=6.1
-rawpy>=0.25
 bottleneck>=1.6
 scikit-learn>=1.7
 threadpoolctl>=3.6
