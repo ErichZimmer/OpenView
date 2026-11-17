@@ -17,6 +17,7 @@ from fixtures.diagnosis import piv_route_response, write_config
 from fixtures.lavision import build_raw16_set
 
 from pivtools_core.image_handling.load_images import load_images
+from pivtools_core.validation import validate_config
 
 PAIRS_PER_LOOP = 3
 FRAME_SHAPE = (8, 12)
@@ -33,7 +34,10 @@ def _tif_loops(tmp_path):
                     folder / f"B{pair:05d}_{role}.tif",
                     np.full(FRAME_SHAPE, 100 * loop + 10 * pair + add, np.uint16),
                 )
-    paths = {"source_paths": [str(tmp_path / "run_0")]}
+    paths = {
+        "source_paths": [str(tmp_path / "run_0")],
+        "base_paths": [str(tmp_path / "out")],
+    }
     images = {
         "image_format": ["B%05d_A.tif", "B%05d_B.tif"],
         "frame_stride": 0,
@@ -51,7 +55,7 @@ def _set_loops(tmp_path, loop_1_entries=PAIRS_PER_LOOP + 1):
         tmp_path, [FRAME_SHAPE], name="loop=0", n_entries=PAIRS_PER_LOOP + 1
     )
     build_raw16_set(tmp_path, [FRAME_SHAPE], name="loop=1", n_entries=loop_1_entries)
-    paths = {"source_paths": [str(set_0)]}
+    paths = {"source_paths": [str(set_0)], "base_paths": [str(tmp_path / "out")]}
     images = {
         "image_format": [set_0.name],
         "image_type": "lavision_set",
@@ -119,6 +123,29 @@ def test_loop_1_short_of_set_entries_is_an_error_naming_loop_1(tmp_path, monkeyp
         camera["error"]
     )
     assert "Loop 0" not in camera["error"]
+
+
+@pytest.mark.parametrize("dataset", [_tif_loops, _set_loops])
+def test_cli_preflight_passes_a_correct_looped_recording(tmp_path, dataset):
+    paths, images = dataset(tmp_path)
+    cfg = write_config(tmp_path, paths=paths, images=images)
+    valid, error, _ = validate_config(cfg)
+    assert valid, error
+
+
+def test_cli_preflight_names_loop_1_missing_its_last_tif(tmp_path):
+    """``validate_config`` (before every CLI job) reads each loop, not only loop 0."""
+    paths, images = _tif_loops(tmp_path)
+    (tmp_path / "run_1" / f"B{PAIRS_PER_LOOP:05d}_B.tif").unlink()
+    cfg = write_config(tmp_path, paths=paths, images=images)
+
+    valid, error, _ = validate_config(cfg)
+
+    assert not valid
+    assert (
+        f"Camera 1: Loop 1 (run_1): last pair ({PAIRS_PER_LOOP}) could not be read"
+        in error
+    )
 
 
 def test_a_missing_loop_source_is_named(tmp_path, monkeypatch):

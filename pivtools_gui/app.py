@@ -46,7 +46,7 @@ from pivtools_core.image_handling.path_utils import (
 )
 from pivtools_core.image_handling.readers.pivraw_reader import PivrawError
 from pivtools_core.paths import count_vector_files_by_name, get_data_paths
-from pivtools_core.validation import validate_memory_for_images
+from pivtools_core.validation import later_loop_findings, validate_memory_for_images
 
 # Calibration is calibration (the legacy v1 `calibration` package was retired — its
 # shared leaves relocated to pivtools_gui/services, calibration/detection, and
@@ -920,37 +920,6 @@ def get_status():
     return jsonify({"processing": processing})
 
 
-def _later_loop_findings(
-    cfg: Config, source_path_idx: int, camera: int, pairs_per_loop: int
-) -> list[str]:
-    """Loops 1..N-1 of a looped recording, each read through its own source.
-
-    Loop 0 is the configured source, which ``/validate_files`` checks in full.
-    Every later loop must exist, and its first and last pair must read from
-    its own camera path, as the pipeline (``load_images``) will read them.
-
-    Returns:
-        One sentence per problem, each naming the loop and its source.
-    """
-    findings: list[str] = []
-    base_source = cfg.source_paths[source_path_idx]
-    for loop_idx in range(1, cfg.num_loops):
-        loop_source = cfg.get_loop_source_path(base_source, loop_idx)
-        if not loop_source.exists():
-            findings.append(f"Loop {loop_idx} source not found: {loop_source.name}")
-            continue
-        camera_path = camera_path_for(cfg, loop_source, camera)
-        for which, pair in (("first", 1), ("last", pairs_per_loop)):
-            try:
-                read_pair(pair, camera_path, camera, cfg)
-            except Exception as e:
-                findings.append(
-                    f"Loop {loop_idx} ({loop_source.name}): {which} pair "
-                    f"({pair}) could not be read: {e}"
-                )
-    return findings
-
-
 @api_bp.route("/validate_files", methods=["POST"])
 def validate_files():
     """
@@ -1156,8 +1125,8 @@ def validate_files():
                     detected_start, cfg.start_index
                 )
 
-            loop_errors = _later_loop_findings(
-                cfg, source_path_idx, camera_num, num_pairs
+            loop_errors = later_loop_findings(
+                cfg, cfg.source_paths[source_path_idx], camera_num
             )
 
             # `found_count` is the real int count for standard/im7/.set/.cine; a
