@@ -20,7 +20,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from fixtures.diagnosis import _inp, make_ctx, piv_route_response
+from fixtures.diagnosis import _inp, make_ctx, piv_route_response, write_config
 from fixtures.lavision import (  # noqa: F401
     build_raw16_set,
     camera_keys,
@@ -54,6 +54,7 @@ from pivtools_core.image_handling.source_diagnosis import (
     set_stream_infos,
     streams_sentence,
 )
+from pivtools_core.validation import validate_config
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "davis_attr"
 NTNU = FIXTURES / "REF_background_check_1006.set"
@@ -672,6 +673,40 @@ def test_found_line_reports_partial_labels_but_not_the_suspicious_flag(
 def test_the_suspicious_flag_is_a_warning(clean_set_cache):
     assert recording_warnings(read_set_info(REC_145749)) == [SUSPICIOUS_145749]
     assert recording_warnings(read_set_info(NTNU)) == []
+
+
+def _set_config(tmp_path, set_file, camera_count):
+    return write_config(
+        tmp_path,
+        paths={
+            "source_paths": [str(set_file)],
+            "base_paths": [str(tmp_path / "out")],
+            "active_paths": [0],
+            "camera_count": camera_count,
+            "camera_numbers": list(range(1, camera_count + 1)),
+        },
+        images={
+            "image_type": "lavision_set",
+            "image_format": ["data.set"],
+            "pairing_preset": "pre_paired",
+            "frame_stride": 0,
+            "pair_stride": 1,
+            "num_images": 2,
+        },
+    )
+
+
+def test_cli_validation_reports_the_suspicious_flag_once(tmp_path, clean_set_cache):
+    """The CLI's pre-run check passes DaVis's warning on, once per recording."""
+    _ok, _error, warnings = validate_config(_set_config(tmp_path, REC_145749, 1))
+    assert warnings.count(SUSPICIOUS_145749) == 1
+
+
+def test_cli_validation_of_an_unflagged_recording_has_no_such_warning(
+    tmp_path, clean_set_cache
+):
+    _ok, _error, warnings = validate_config(_set_config(tmp_path, NTNU, 4))
+    assert not any("suspicious" in w for w in warnings)
 
 
 def test_validate_files_reports_the_suspicious_flag_as_a_warning(

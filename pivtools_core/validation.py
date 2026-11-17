@@ -136,6 +136,9 @@ def validate_config(config: Config) -> Tuple[bool, str, List[str]]:
         )
 
         warnings.extend(f"Camera {camera_num}: {note}" for note in result["notes"])
+        # The diagnosis warnings are about the recording (DaVis's SetIsSuspicious
+        # flag), the same for every camera of it: reported once.
+        warnings.extend(w for w in result["warnings"] if w not in warnings)
         if result["error"]:
             errors.append(f"Camera {camera_num}: {result['error']}")
         elif result["valid"] and image_type != "pivraw":
