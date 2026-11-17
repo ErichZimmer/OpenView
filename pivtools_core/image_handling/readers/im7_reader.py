@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Union
 
+import lz4.block
 import numpy as np
 
 from .davis_tokens import TokenStreamError, decode_pack1
@@ -62,9 +63,9 @@ PACK_LZ4 = 20
 # nor checks: footer int64 slot 5 (the last 256 bytes) points just past the
 # attribute records to an int32 2, an int32 size and a zlib stream of H x W uint8
 # (1 = valid). Measured on all 10 real ones, single-frame pack-1 calibration
-# images under F:\DAVIS_BFS\gF_Ramp_experiment\Properties, 24-53 % masked, equal
-# to lvpyio's frame.masks[0] (D3, 2026-11-17; e.g. Calibration\camera2\B00001.im7,
-# 24.2 % masked). They are ignored by decision 17 Nov 2026, not refused.
+# images in one DaVis project's Properties/Calibration and Calibration History
+# folders, 24-53 % masked, equal to lvpyio's frame.masks[0] (D3, 2026-11-17).
+# They are ignored by decision 17 Nov 2026, not refused.
 IM7_VERSION_BUFFER = 0
 # Version 1, pack 20, measured byte for byte on the real files (D3, 2026-11-17):
 # per frame an int64 compressed size and one LZ4 block; a table of size_f int64
@@ -82,6 +83,15 @@ FOOTER_FRAME_TABLE = 1
 FOOTER_MASK_TABLE = 7
 # lvpyio's mask value for a valid pixel (frame.masks), 0 for a masked one.
 DAVIS_MASK_VALID = 1
+# Pack-20 framing: an int64 compressed size in front of each LZ4 block, and the
+# int64 entries of the version-1 frame and mask offset tables.
+_INT64 = struct.Struct("<q")
+# The head of a version-1 mask block: an int32 compression tag, then the int64
+# compressed size.
+_MASK_BLOCK_HEAD = struct.Struct("<iq")
+# The int64 offset slots at the front of the version-1 footer (FOOTER_*); the
+# rest of the footer's IM7_FOOTER_SIZE bytes are 0.
+_FOOTER_SLOTS = struct.Struct("<8q")
 
 # Extended header record types (int32)
 IEH_END = 0
@@ -252,76 +262,28 @@ def _read_pixels_uncompressed(f, header: IM7Header) -> np.ndarray:
     return pixels.reshape(n_frames, header.size_z, header.size_y, header.size_x)
 
 
-try:  # optional C accelerator; the pure-python path below is correct without it
-    import lz4.block as _lz4_block_mod
-except ImportError:
-    _lz4_block_mod = None
-
-
-def _lz4_block_decompress(src: bytes, expected_size: int) -> bytes:
+def lz4_block_decompress(src: bytes, expected_size: int) -> bytes:
     """Decompress one raw LZ4 *block* (no frame header, no checksums).
 
-    Uses the ``lz4`` package when installed; otherwise a pure-python decoder
-    (~30 MB/s — fine for frame-at-a-time calibration reads). Raises if the
-    output size does not match ``expected_size`` exactly: a truncated or
-    misread buffer must fail visibly, never produce a short image.
-    """
-    if _lz4_block_mod is not None:
-        out = _lz4_block_mod.decompress(src, uncompressed_size=expected_size)
-        if len(out) != expected_size:
-            raise IOError(
-                f"LZ4 pixel buffer decompressed to {len(out)} bytes, "
-                f"expected {expected_size}"
-            )
-        return out
+    ``lz4.block`` (python-lz4, a hard dependency: pyproject.toml) is the
+    decoder. ``uncompressed_size`` caps its output buffer and does not pad it,
+    so the size is checked here: a truncated or misread buffer must fail
+    visibly, never produce a short image.
 
-    out = bytearray()
-    i, n = 0, len(src)
-    while i < n:
-        token = src[i]
-        i += 1
-        lit = token >> 4
-        if lit == 15:
-            while True:
-                b = src[i]
-                i += 1
-                lit += b
-                if b != 255:
-                    break
-        out += src[i : i + lit]
-        i += lit
-        if i >= n:
-            break  # final sequence carries literals only
-        off = src[i] | (src[i + 1] << 8)
-        i += 2
-        mlen = (token & 0xF) + 4
-        if (token & 0xF) == 15:
-            while True:
-                b = src[i]
-                i += 1
-                mlen += b
-                if b != 255:
-                    break
-        start = len(out) - off
-        if off == 0 or start < 0:
-            raise IOError(f"corrupt LZ4 stream: match offset {off} at {len(out)}")
-        if off >= mlen:
-            out += out[start : start + mlen]
-        else:
-            # Overlapping match: LZ4 semantics require byte-serial copy.
-            for _ in range(mlen):
-                out.append(out[start])
-                start += 1
-        if len(out) > expected_size:
-            raise IOError(
-                f"corrupt LZ4 stream: output exceeds expected {expected_size} bytes"
-            )
+    Raises:
+        IOError: The block is corrupt (``lz4.block.LZ4BlockError``) or
+            decompresses to a size other than ``expected_size``.
+    """
+    try:
+        out = lz4.block.decompress(src, uncompressed_size=expected_size)
+    except lz4.block.LZ4BlockError as exc:
+        raise IOError(f"corrupt LZ4 block: {exc}") from exc
     if len(out) != expected_size:
         raise IOError(
             f"LZ4 pixel buffer decompressed to {len(out)} bytes, "
             f"expected {expected_size}"
         )
-    return bytes(out)
+    return out
 
 
 def _read_pixels_lz4(
@@ -357,7 +319,7 @@ def _read_lz4_whole_buffer(
     frame_pixels = header.size_x * header.size_y * header.size_z
     total_bytes = frame_pixels * dt.itemsize * header.size_f
 
-    comp_size = struct.unpack("<q", f.read(8))[0]
+    comp_size = _INT64.unpack(f.read(_INT64.size))[0]
     if comp_size <= 0:
         raise IOError(f"invalid LZ4 compressed size: {comp_size}")
     comp = f.read(comp_size)
@@ -366,7 +328,7 @@ def _read_lz4_whole_buffer(
             f"Expected {comp_size} bytes of LZ4 data, got {len(comp)}. "
             f"File may be truncated."
         )
-    out = _lz4_block_decompress(comp, total_bytes)
+    out = lz4_block_decompress(comp, total_bytes)
     pixels = np.frombuffer(out, dtype=dt).reshape(
         header.size_f, header.size_z, header.size_y, header.size_x
     )
@@ -385,19 +347,20 @@ def _read_lz4_frame_size(f, k: int, n_frames: int, file_size: int, source: str) 
     as for one that is decoded.
     """
     pos = f.tell()
-    raw = f.read(8)
-    if len(raw) != 8:
+    raw = f.read(_INT64.size)
+    if len(raw) != _INT64.size:
         raise IOError(
             f"{source}: version-1 LZ4 frame {k} of {n_frames} is cut off: its "
-            f"8-byte size at byte {pos} has {len(raw)} bytes. The file is truncated."
+            f"{_INT64.size}-byte size at byte {pos} has {len(raw)} bytes. The file "
+            "is truncated."
         )
-    comp_size = struct.unpack("<q", raw)[0]
+    comp_size = _INT64.unpack(raw)[0]
     if comp_size <= 0:
         raise IOError(
             f"{source}: version-1 LZ4 frame {k} of {n_frames} declares "
             f"{comp_size} compressed bytes at byte {pos}. The file is damaged."
         )
-    remaining = file_size - pos - 8
+    remaining = file_size - pos - _INT64.size
     if comp_size > remaining:
         raise IOError(
             f"{source}: version-1 LZ4 frame {k} of {n_frames} declares "
@@ -436,7 +399,7 @@ def _read_lz4_per_frame(
             f.seek(comp_size, 1)
             continue
         try:
-            raw = _lz4_block_decompress(f.read(comp_size), frame_bytes)
+            raw = lz4_block_decompress(f.read(comp_size), frame_bytes)
         except IOError as exc:
             raise IOError(
                 f"{source}: version-1 LZ4 frame {k} of {n_frames}: {exc}"
@@ -444,11 +407,12 @@ def _read_lz4_per_frame(
         pixels[k - start] = np.frombuffer(raw, dtype=dt).reshape(pixels.shape[1:])
 
     pos = f.tell()
-    table_raw = f.read(8 * n_frames)
-    if len(table_raw) != 8 * n_frames:
+    table_bytes = _INT64.size * n_frames
+    table_raw = f.read(table_bytes)
+    if len(table_raw) != table_bytes:
         raise IOError(
             f"{source}: the version-1 frame-offset table at byte {pos} has "
-            f"{len(table_raw)} of its {8 * n_frames} bytes. The file is truncated."
+            f"{len(table_raw)} of its {table_bytes} bytes. The file is truncated."
         )
     table = list(struct.unpack(f"<{n_frames}q", table_raw))
     if table != starts:
@@ -501,21 +465,21 @@ def _check_masks_per_frame(f, header: IM7Header, source: str, attr_at: int) -> N
     for k in range(n_frames):
         pos = f.tell()
         mask_starts.append(pos)
-        head = f.read(12)
-        if len(head) != 12:
+        head = f.read(_MASK_BLOCK_HEAD.size)
+        if len(head) != _MASK_BLOCK_HEAD.size:
             raise damaged(pos, f"cuts off mask {k} of {n_frames}")
-        tag, comp_size = struct.unpack("<iq", head)
+        tag, comp_size = _MASK_BLOCK_HEAD.unpack(head)
         if tag != PACK_LZ4:
             raise damaged(
                 pos, f"gives mask {k} of {n_frames} compression {tag}, not {PACK_LZ4}"
             )
-        if not 0 < comp_size <= file_size - pos - 12:
+        if not 0 < comp_size <= file_size - pos - _MASK_BLOCK_HEAD.size:
             raise damaged(
                 pos, f"gives mask {k} of {n_frames} {comp_size} compressed bytes"
             )
         try:
             mask = np.frombuffer(
-                _lz4_block_decompress(f.read(comp_size), mask_bytes), np.uint8
+                lz4_block_decompress(f.read(comp_size), mask_bytes), np.uint8
             )
         except IOError as exc:
             raise IOError(f"{source}: version-1 mask {k} of {n_frames}: {exc}") from exc
@@ -531,8 +495,8 @@ def _check_masks_per_frame(f, header: IM7Header, source: str, attr_at: int) -> N
             )
 
     pos = f.tell()
-    table_raw = f.read(8 * n_frames)
-    if len(table_raw) != 8 * n_frames:
+    table_raw = f.read(_INT64.size * n_frames)
+    if len(table_raw) != _INT64.size * n_frames:
         raise damaged(pos, "cuts off the mask-offset table")
     table = list(struct.unpack(f"<{n_frames}q", table_raw))
     if table != mask_starts:
@@ -547,15 +511,17 @@ def _check_masks_per_frame(f, header: IM7Header, source: str, attr_at: int) -> N
         raise damaged(
             pos, f"has a footer of {len(footer)} bytes, not {IM7_FOOTER_SIZE}"
         )
-    got = struct.unpack_from("<8q", footer)
-    want = [0] * 8
+    got = _FOOTER_SLOTS.unpack_from(footer)
+    want = [0] * len(got)
     want[FOOTER_ATTRIBUTES] = attr_at
-    want[FOOTER_FRAME_TABLE] = attr_at - 8 * n_frames
-    want[FOOTER_MASK_TABLE] = pos - 8 * n_frames
-    if list(got) != want or any(footer[64:]):
+    want[FOOTER_FRAME_TABLE] = attr_at - _INT64.size * n_frames
+    want[FOOTER_MASK_TABLE] = pos - _INT64.size * n_frames
+    rest_set = any(footer[_FOOTER_SLOTS.size :])
+    if list(got) != want or rest_set:
         raise damaged(
             pos,
-            f"has a footer reading {list(got)}{' and more non-zero bytes' if any(footer[64:]) else ''}, "
+            f"has a footer reading {list(got)}"
+            f"{' and more non-zero bytes' if rest_set else ''}, "
             f"but the attribute records, frame table and mask table give {want}",
         )
 
@@ -741,6 +707,26 @@ def _read_pixels_packtype1(
     return frames.reshape(end - start, header.size_z, header.size_y, header.size_x)
 
 
+def _read_trailer(f, header: IM7Header, source: str) -> IM7Scales:
+    """Everything after the pixels: the attribute records, then the version-1 masks.
+
+    ``f`` must sit just past the last frame's pixel data. The intensity scale
+    comes from the attributes. A version-1 file's per-frame masks are then
+    checked (:func:`_check_masks_per_frame`). A version-0 file's single DaVis
+    mask, present on some real calibration images, is neither applied nor
+    checked, by decision 17 Nov 2026 (see :data:`IM7_VERSION_BUFFER`).
+
+    Raises:
+        Whatever :func:`_read_attributes` and :func:`_check_masks_per_frame`
+        raise for the file.
+    """
+    attr_at = f.tell()
+    scales = _read_attributes(f, source, header.pack_type)
+    if header.version == IM7_VERSION_PER_FRAME:
+        _check_masks_per_frame(f, header, source, attr_at)
+    return scales
+
+
 def _read_attributes(f, source: str, pack_type: int) -> IM7Scales:
     """Read extended header records (attributes) after the pixel data.
 
@@ -900,11 +886,7 @@ def _read_im7_internal(filepath: Path) -> tuple:
         else:
             raise _unsupported_pack_error(header, filepath.name)
 
-        attr_at = f.tell()
-        scales = _read_attributes(f, filepath.name, header.pack_type)
-        # Version 0, every pack type: DaVis masks are present on some real calibration images (F:\DAVIS_BFS\...\Properties\Calibration\camera2\B00001.im7), are not applied, and are ignored by decision 17 Nov 2026 (see IM7_VERSION_BUFFER).
-        if header.version == IM7_VERSION_PER_FRAME:
-            _check_masks_per_frame(f, header, filepath.name, attr_at)
+        scales = _read_trailer(f, header, filepath.name)
 
     return header, pixels, scales
 
@@ -1151,12 +1133,7 @@ def read_im7_camera(
         else:
             raise _unsupported_pack_error(header, filepath.name)
 
-        # Read attributes for intensity scale
-        attr_at = f.tell()
-        scales = _read_attributes(f, filepath.name, header.pack_type)
-        # Version 0, every pack type: DaVis masks are present on some real calibration images (F:\DAVIS_BFS\...\Properties\Calibration\camera2\B00001.im7), are not applied, and are ignored by decision 17 Nov 2026 (see IM7_VERSION_BUFFER).
-        if header.version == IM7_VERSION_PER_FRAME:
-            _check_masks_per_frame(f, header, filepath.name, attr_at)
+        scales = _read_trailer(f, header, filepath.name)
 
     # Apply intensity scale in-place
     if scales.slope != 1.0:

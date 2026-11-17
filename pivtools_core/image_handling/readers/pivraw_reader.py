@@ -24,7 +24,7 @@ Layout facts the reader relies on:
   indices and ``missing_indices`` are disjoint and together fill
   ``[0, span)``, the span rounded up to a whole pair for double-frame.
 * Mono12p is the PFNC LSB-first packing (two pixels in three bytes), the layout
-  ``set_reader._decode_mono12p`` already decodes, so that decoder is reused.
+  ``set_reader.decode_mono12p`` already decodes, so that decoder is reused.
 * BayerRG8 becomes a 2x2 superpixel sum R+G+G+B at half resolution, with no
   demosaicing (decision 2026-10-26). The sum of four 8-bit photosites is at most
   1020, exact in float32.
@@ -73,7 +73,7 @@ import numpy as np
 import yaml
 
 from .out_buffer import check_out
-from .set_reader import _decode_mono12p
+from .set_reader import decode_mono12p
 
 PathLike = Union[str, Path]
 
@@ -886,7 +886,7 @@ def _sensor_pixels(header: PivrawHeader, idx: int) -> np.ndarray:
             f"{header.bytes_per_frame} bytes at offset {offset})."
         )
     if header.pixel_format == MONO12P:
-        return _decode_mono12p(raw, header.width, header.height)
+        return decode_mono12p(raw, header.width, header.height)
     return raw.reshape(header.height, header.width)
 
 
@@ -1035,6 +1035,9 @@ TRIGGER_TOL_FRAC = 0.25
 # REPORT C9). Prototype ``pivraw_align.PHASE_MARGIN``, acquisition
 # ``export.AB_PHASE_MARGIN``.
 AB_PHASE_MARGIN = 0.2
+# host_ns and camera_ns are nanoseconds; messages show milliseconds.
+_NS_PER_MS = 1e6
+_NS_PER_S = 1e9
 # Why a run cannot be aligned. The first seven are the acquisition app's
 # ``export.REASONS`` and the fixtures' ``must_raise:<reason>``.
 # ``run_file_count`` is this reader's own: run.yaml requests fewer triggers
@@ -1246,16 +1249,16 @@ def _ab_phase_note(run_dir: Path, cam: _CameraTriggers) -> Optional[str]:
     if median_ba <= (1 - AB_PHASE_MARGIN) * median_ab:
         raise PivrawAlignmentError(
             "ab_phase",
-            f"{run_dir}: {name}: A->B {median_ab / 1e6:.2f} ms is longer than "
-            f"B->next A {median_ba / 1e6:.2f} ms on the camera clock: each file "
+            f"{run_dir}: {name}: A->B {median_ab / _NS_PER_MS:.2f} ms is longer than "
+            f"B->next A {median_ba / _NS_PER_MS:.2f} ms on the camera clock: each file "
             "pair is B of one trigger and A of the next (the run's first frame "
             f"was lost). {_RERECORD}",
         )
     if median_ab <= (1 - AB_PHASE_MARGIN) * median_ba:
         return None
     return (
-        f"{name}: A/B phase not provable (A->B {median_ab / 1e6:.2f} ms and "
-        f"B->next A {median_ba / 1e6:.2f} ms on the camera clock are within "
+        f"{name}: A/B phase not provable (A->B {median_ab / _NS_PER_MS:.2f} ms and "
+        f"B->next A {median_ba / _NS_PER_MS:.2f} ms on the camera clock are within "
         f"{AB_PHASE_MARGIN:.0%} of each other); pairs are read as recorded."
     )
 
@@ -1296,7 +1299,7 @@ def _check_tr_spacing(
         raise PivrawAlignmentError(
             "tr_interval",
             f"{run_dir}: {name} run triggers {pair.run_triggers}: frames "
-            f"{dt / 1e6:.1f} ms apart, expected {expected / 1e6:.1f} ms. {why}",
+            f"{dt / _NS_PER_MS:.1f} ms apart, expected {expected / _NS_PER_MS:.1f} ms. {why}",
         )
 
 
@@ -1394,7 +1397,7 @@ def align_pivraw_run(
         )
     mode, rate = modes.pop(), rates.pop()
     _check_pairing(run_dir, mode, frame_stride, pair_stride)
-    period_ns = 1e9 / rate
+    period_ns = _NS_PER_S / rate
     cams = {s: _camera_triggers(h) for s, h in headers.items()}
     empty = [f"Camera{s}" for s, c in cams.items() if not c.position]
     if empty:
@@ -1456,7 +1459,7 @@ def align_pivraw_run(
             raise PivrawAlignmentError(
                 "camera_offset",
                 f"{run_dir}: Camera{cam.slot} run trigger "
-                f"{pairs[k].run_triggers[0]} arrives {offsets[k] / 1e6:+.1f} ms "
+                f"{pairs[k].run_triggers[0]} arrives {offsets[k] / _NS_PER_MS:+.1f} ms "
                 f"({offsets[k] / period_ns:+.2f} periods) from Camera{ref.slot} "
                 "in host time: its frame ids count from a different trigger "
                 "(first frame(s) lost, or a trigger ignored), and the files "
@@ -1493,7 +1496,7 @@ def align_pivraw_run(
     alignment = PivrawAlignment(
         run_dir=run_dir,
         mode=mode,
-        period_s=period_ns / 1e9,
+        period_s=period_ns / _NS_PER_S,
         cameras=slots,
         pairs=pairs_t,
         skipped_incomplete=skipped,

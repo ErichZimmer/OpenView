@@ -46,7 +46,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 from pivtools_core.calibration_settings import try_load_settings
 from pivtools_core.image_handling.path_utils import (
-    _glob_images,
+    glob_images,
     build_calibration_camera_path,
     format_to_glob,
 )
@@ -279,7 +279,7 @@ def _calibration_camera(
             kind=PLAIN,
             why_plain=f"holds {image_type} images, which carry no image notes",
         )
-    images = sorted(_glob_images(camera_path, format_to_glob(image["image_format"])))
+    images = sorted(glob_images(camera_path, format_to_glob(image["image_format"])))
     pairs = tuple(
         (img, note if note.is_file() else None)
         for img in images

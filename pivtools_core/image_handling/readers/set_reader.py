@@ -78,7 +78,6 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
-from lz4.block import LZ4BlockError
 
 from .davis_attr import (
     DOUBLE_FRAME_ROLES,
@@ -92,7 +91,7 @@ from .davis_attr import (
     streams_text,
 )
 from .davis_tokens import TokenStreamError, decode_imx_words
-from .im7_reader import _lz4_block_decompress
+from .im7_reader import lz4_block_decompress
 from .out_buffer import check_out
 
 # ---------------------------------------------------------------------------
@@ -1204,7 +1203,7 @@ def _decode_mono10p(raw: bytes, width: int, height: int) -> np.ndarray:
 
     Each is a little-endian uint16 window over two adjacent bytes, shifted down
     by its bit offset and masked to 10 bits -- the same memory-access trick as
-    :func:`_decode_mono12p`, four overlapping windows at stride 5 instead of two
+    :func:`decode_mono12p`, four overlapping windows at stride 5 instead of two
     at stride 3. Verified bit-exact against lvpyio 1.3.1 on the 1984x1264
     MiniShaker streams of a real five-camera recording (2026-08-24).
 
@@ -1291,7 +1290,7 @@ def _decode_mono10pmsb(raw: bytes, width: int, height: int) -> np.ndarray:
     return pixels.reshape(height, width)
 
 
-def _decode_mono12p(raw: bytes, width: int, height: int) -> np.ndarray:
+def decode_mono12p(raw: bytes, width: int, height: int) -> np.ndarray:
     """Decode PFNC Mono12p (lsb packed) bytes to a uint16 array.
 
     Packing: 2 pixels in 3 bytes.
@@ -1349,7 +1348,7 @@ def _require_even_pixels(decoder: str, width: int, height: int) -> int:
 
     Raises:
         ValueError: If the frame holds an odd number of pixels, for the reason
-            given in :func:`_decode_mono12p`.
+            given in :func:`decode_mono12p`.
     """
     n_pixels = width * height
     if n_pixels % 2:
@@ -1370,7 +1369,7 @@ def _decode_mono12pmsb(raw: bytes, width: int, height: int) -> np.ndarray:
         pixel0 =  b0         << 4 | b1 >> 4
         pixel1 = (b1 & 0x0F) << 8 | b2
 
-    The mirror of :func:`_decode_mono12p` with BIG-endian windows::
+    The mirror of :func:`decode_mono12p` with BIG-endian windows::
 
         uint16 at byte 3k+0  =  b0<<8 | b1  ->  >> 4      ==  pixel0
         uint16 at byte 3k+1  =  b1<<8 | b2  ->  & 0x0FFF  ==  pixel1
@@ -1442,7 +1441,7 @@ def _decode_raw8(raw: bytes, width: int, height: int) -> np.ndarray:
     """Decode raw uint8 bytes to uint16 (DaVis 'raw-8-bit').
 
     Values are widened, NOT rescaled: an 8-bit count of 200 stays 200, it does not
-    become 51200. This matches :func:`_decode_mono12p`, which returns 0-4095 even
+    become 51200. This matches :func:`decode_mono12p`, which returns 0-4095 even
     though its DaVis label also reads "to 16 bit". Every encoding in this module
     therefore returns raw sensor counts, so intensity thresholds (masking, peak
     magnitude) mean the same thing whichever encoding a recording used.
@@ -1469,7 +1468,7 @@ def _decode_raw8(raw: bytes, width: int, height: int) -> np.ndarray:
 _IMPLEMENTED_DECODERS: dict[str, Callable[[bytes, int, int], np.ndarray]] = {
     "mono-10p": _decode_mono10p,
     "mono-10pmsb": _decode_mono10pmsb,
-    "mono-12p": _decode_mono12p,
+    "mono-12p": decode_mono12p,
     "mono-12packed": _decode_mono12packed,
     "mono-12pmsb": _decode_mono12pmsb,
     "raw-16-bit": _decode_raw16,
@@ -1585,8 +1584,8 @@ def _decompress_entry(
         return _decompress_zlib(stored, expected, where)
     if codec == "LZ4":
         try:
-            return _lz4_block_decompress(stored, expected)
-        except (OSError, LZ4BlockError) as exc:
+            return lz4_block_decompress(stored, expected)
+        except OSError as exc:
             raise IOError(
                 f"{where}: the LZ4 block does not decompress to the {expected} "
                 f"bytes the frame's geometry and encoding need ({exc})"
@@ -1698,7 +1697,7 @@ def _parse_set(set_path: Union[str, Path]) -> SetInfo:
     root = _load_stream_manifest(set_dir)
 
     # DaVis can leave a StreamSet.xml declaring .ims streams beside images it
-    # stored as .im7 files (E:\retro_tbl_35mm_far, drive-survey C7). Why is
+    # stored as .im7 files (seen on one real recording, drive-survey C7). Why is
     # unknown; the fix is the same either way, so it is named before the
     # manifest's streams are looked for and reported missing.
     im7_files = _im7_image_files(set_dir)

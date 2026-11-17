@@ -34,7 +34,7 @@ from ..calibration_settings import (
 from ..config import Config
 from .load_images import read_single_frame
 from .path_utils import (
-    _glob_images,
+    glob_images,
     build_calibration_camera_path,
     cine_extension_mismatch,
     format_to_glob,
@@ -660,7 +660,7 @@ def validate_calibration_images(
         # generic validator then reports "Camera path does not exist" and the
         # diagnosis suggests the real folders, which is what the user needs (not
         # an "expected_count is required" internal).
-        expected_count = max(len(_glob_images(camera_path, format_to_glob(fmt))), 1)
+        expected_count = max(len(glob_images(camera_path, format_to_glob(fmt))), 1)
     else:
         # Containers with blank n_views: the generic validator reads the real entry
         # count itself and has no user count to hold it to.
@@ -797,7 +797,7 @@ def get_calibration_frame_count(
     else:
         # Standard formats and IM7 both count matching files.
         pattern = format_to_glob(fmt)
-        found = FrameCount(len(_glob_images(camera_path, pattern)), "files")
+        found = FrameCount(len(glob_images(camera_path, pattern)), "files")
         where = f"'{pattern}' in {camera_path}"
 
     if found.n <= 0:

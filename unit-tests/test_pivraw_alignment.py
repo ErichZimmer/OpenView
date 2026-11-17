@@ -275,6 +275,29 @@ def test_validation_refuses_a_run_that_cannot_align(tmp_path):
     assert result["pivraw_alignment"] is None
 
 
+def test_a_preview_that_cannot_render_is_a_note_and_leaves_no_size(tmp_path):
+    """Stand-in: a first frame of zero rows, which the preview renderer cannot
+    draw. The user reads why there is no preview, and no size is reported
+    for a frame that was not shown."""
+    run = copy_case(tmp_path, "df_2cam_clean")
+    result = validate_images_generic(
+        camera_path=run,
+        camera=1,
+        image_format="Camera%d.pivraw",
+        image_type="pivraw",
+        expected_count=4,
+        zero_based_indexing=False,
+        read_frame_fn=lambda idx: np.zeros((0, 5)),
+        diagnosis=make_ctx(run, image_type="pivraw", image_format=("Camera%d.pivraw",)),
+        pair_strides=(1, 2),
+    )
+    assert result["valid"] is True, result["error"]
+    assert result["image_size"] is None and result["first_image_preview"] is None
+    assert any(
+        n.startswith("No preview of Camera1.pivraw frame 1:") for n in result["notes"]
+    ), result["notes"]
+
+
 def test_piv_validation_of_a_run_needs_the_strides(tmp_path):
     run = copy_case(tmp_path, "df_2cam_clean")
     with pytest.raises(ValueError, match="pair_strides"):
