@@ -185,15 +185,17 @@ def test_uncompressed_codec_names_read(tmp_path, clean_set_cache, codec):
 
 
 @pytest.mark.parametrize("codec", ["Zlib", "LZ4", "IMX"])
-def test_compressed_codec_is_parsed_and_refused_at_read(
+def test_raw_bytes_under_a_compressed_codec_name_are_refused_by_codec(
     tmp_path, clean_set_cache, codec
 ):
-    """The name is carried on the stream. Reading compressed bytes as raw pixels
-    would return wrong pixels whenever the stored size happens to fit (CU §2 C8)."""
+    """The name is carried on the stream and selects the decompressor. Raw pixel
+    bytes stored under it are refused naming the codec, where the old reader
+    blamed a truncated container, or decoded them when the sizes happened to
+    fit (CU §2 C8). The codecs themselves are in test_set_codecs.py."""
     set_file, set_dir = _one_stream_set(tmp_path)
     _rewrite_index(set_dir, codec=codec.encode())
     assert read_set_info(set_file).frames[0].codec == codec
-    with pytest.raises(ValueError, match=f"'{codec}' compression"):
+    with pytest.raises(OSError, match=f"'{codec}' compression"):
         read_set_frame(set_file, entry_no=1, frame_idx=0)
 
 
