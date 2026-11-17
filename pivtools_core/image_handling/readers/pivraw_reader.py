@@ -67,7 +67,7 @@ import numbers
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import yaml
@@ -280,7 +280,7 @@ def _str_field(sidecar: Mapping[str, Any], key: str, where: str) -> str:
     return value
 
 
-def _listed(values: Sequence[int]) -> str:
+def _listed(values: np.ndarray) -> str:
     """The first few of ``values`` for an error message."""
     shown = ", ".join(str(int(v)) for v in values[:_LIST_IN_MESSAGE])
     more = len(values) - _LIST_IN_MESSAGE
@@ -1306,52 +1306,58 @@ def _check_tr_spacing(
         )
 
 
+def _trigger_ranges(triggers: Sequence[int]) -> str:
+    """Ascending run triggers as ``1, 4-7, 9`` (acquisition ``export._ranges``)."""
+    spans: List[List[int]] = []
+    for t in triggers:
+        if spans and t == spans[-1][1] + 1:
+            spans[-1][1] = t
+        else:
+            spans.append([t, t])
+    return ", ".join(str(a) if a == b else f"{a}-{b}" for a, b in spans)
+
+
 def _check_no_drops(
     run_dir: Path,
-    headers: Mapping[int, PivrawHeader],
+    mode: str,
     cams: Mapping[int, _CameraTriggers],
     last: int,
     requested: int,
 ) -> None:
-    """Every selected camera holds every trigger run.yaml requested.
+    """Every selected camera holds every trigger of the run.
 
     Pairs are never dropped (Morgan, 17 Nov 2026): a run that lost a frame is
-    recorded again, not paired around the gap. A trigger is lost when it is in
-    a camera's ``missing_indices`` (the writer saw the gap), when the camera
-    holds no frame of it up to ``last``, the highest trigger any selected
-    camera accounts for (its frames stopped early), or when every camera
-    accounts for fewer than the ``requested`` triggers (lost before the first
-    or after the last delivered frame, which the files cannot tell apart).
+    recorded again, not paired around the gap. The run's triggers are
+    ``[0, max(requested, last + 1))``: run.yaml ``config.record.n`` and every
+    trigger up to ``last``, the highest one any selected camera accounts for.
+    A camera lacks one through a gap in its span (its ``missing_indices``:
+    such a run index is never in the ``.idx``, by the header's partition
+    check), frames that stopped early, or triggers lost at the end that no
+    camera accounts for. The lost set and the message are the acquisition
+    export's (``export._lost_triggers``, ``export._dropped``), with run
+    triggers 0-based as in its ``triggers.csv``.
 
     Raises:
         PivrawAlignmentError: ``dropped``, naming each camera and the run
-            triggers it lacks.
+            triggers it lost.
     """
-    losses = []
-    for slot, cam in cams.items():
-        # A run index in missing_indices is not in the .idx (the header's
-        # partition check), so its trigger is always among ``absent``.
-        absent = [t for t in range(last + 1) if t not in cam.position]
-        if not absent:
+    should = range(max(requested, last + 1))
+    unit = "pair" if mode == DOUBLE_FRAME else "frame"
+    parts = []
+    for slot, cam in sorted(cams.items()):
+        lost = [t for t in should if t not in cam.position]
+        if not lost:
             continue
-        loss = f"Camera{slot} lacks run trigger(s) {_listed(absent)}"
-        missing = headers[slot].missing_indices
-        if missing:
-            loss += f" (missing_indices {_listed(missing)})"
-        losses.append(loss)
-    if requested > last + 1:
-        held = ", ".join(f"Camera{s} holds {len(c.position)}" for s, c in cams.items())
-        losses.append(
-            f"run.yaml requested {requested} trigger(s) and {held}: "
-            f"{requested - (last + 1)} trigger(s) were lost before the first or "
-            "after the last delivered frame (the files cannot say which end)"
+        many = len(lost) != 1
+        parts.append(
+            f"Camera{slot} lost {len(lost)} {unit}{'s' if many else ''} "
+            f"(run trigger{'s' if many else ''} {_trigger_ranges(lost)})"
         )
-    if losses:
+    if parts:
         raise PivrawAlignmentError(
             "dropped",
-            f"{run_dir}: frames were dropped during the run: {'; '.join(losses)}. "
-            "PIVTOOLs pairs a run only when every camera holds every trigger. "
-            f"{_RERECORD}",
+            f"{run_dir}: {'; '.join(parts)}. PIVTOOLs processes a run only when "
+            f"every camera recorded every trigger. {_RERECORD}",
         )
 
 
@@ -1519,7 +1525,7 @@ def align_pivraw_run(
     if not pairs:
         # The checks of step 3 need a pair, so a drop is named here, before
         # the bare no_complete_pair.
-        _check_no_drops(run_dir, headers, cams, last, requested)
+        _check_no_drops(run_dir, mode, cams, last, requested)
         raise PivrawAlignmentError(
             "no_complete_pair",
             f"{run_dir}: no PIV pair is complete on every camera ({len(wanted)} "
@@ -1566,7 +1572,7 @@ def align_pivraw_run(
             "another run. Put the run's own run.yaml back beside its "
             "Camera<k>.pivraw files.",
         )
-    _check_no_drops(run_dir, headers, cams, last, requested)
+    _check_no_drops(run_dir, mode, cams, last, requested)
 
     alignment = PivrawAlignment(
         run_dir=run_dir,

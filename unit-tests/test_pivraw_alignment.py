@@ -116,7 +116,7 @@ def _refused_as_dropped(run, frame_stride=1, pair_stride=2, cameras=None):
 
 def test_a_camera_with_missing_indices_is_refused_as_dropped(tmp_path):
     message = _refused_as_dropped(_cam2_dropped_pair_2(tmp_path))
-    assert "Camera2 lacks run trigger(s) [1] (missing_indices [2, 3])" in message
+    assert "Camera2 lost 1 pair (run trigger 1). PIVTOOLs processes" in message
     assert "Camera1" not in message, message
 
 
@@ -126,13 +126,10 @@ def test_fewer_triggers_than_requested_is_refused_as_dropped(tmp_path):
     run = copy_case(tmp_path, "df_2cam_clean")
     edit_run_yaml(run, record_n=3)
     message = _refused_as_dropped(run)
-    for word in [
-        "run.yaml requested 3 trigger(s)",
-        "Camera1 holds 2",
-        "Camera2 holds 2",
-        "before the first or after the last",
-    ]:
-        assert word in message, message
+    assert (
+        "Camera1 lost 1 pair (run trigger 2); Camera2 lost 1 pair (run trigger 2)."
+        in message
+    ), message
 
 
 def test_a_camera_whose_frames_stop_early_is_refused_as_dropped(tmp_path):
@@ -145,13 +142,15 @@ def test_a_camera_whose_frames_stop_early_is_refused_as_dropped(tmp_path):
     edit_index(run, 2, host_ns=host[:4])
     assert read_pivraw_header(run / "Camera2.pivraw").missing_indices == ()
     message = _refused_as_dropped(run)
-    assert "Camera2 lacks run trigger(s) [2]" in message and "Camera1" not in message
+    assert (
+        "Camera2 lost 1 pair (run trigger 2)." in message and "Camera1" not in message
+    )
 
 
 def test_a_time_resolved_lost_frame_is_refused_as_dropped(tmp_path):
     run = copy_case(tmp_path, "tr_lost_frame")
     message = _refused_as_dropped(run, 1, 1)
-    assert "Camera1 lacks run trigger(s) [1] (missing_indices [1])" in message
+    assert "Camera1 lost 1 frame (run trigger 1)." in message
 
 
 @pytest.mark.parametrize(
@@ -180,8 +179,10 @@ def test_no_complete_pair_after_drops_is_refused_as_dropped(tmp_path):
     edit_sidecar(run, 2, missing_indices=[0, 1, 2, 3], dropped_pairs=2)
     edit_run_yaml(run, record_n=4)
     message = _refused_as_dropped(run)
-    assert "Camera1 lacks run trigger(s) [2, 3]" in message, message
-    assert "Camera2 lacks run trigger(s) [0, 1]" in message, message
+    assert (
+        "Camera1 lost 2 pairs (run triggers 2-3); Camera2 lost 2 pairs "
+        "(run triggers 0-1)." in message
+    ), message
 
 
 def test_a_stale_run_yaml_wins_over_dropped(tmp_path):
@@ -393,7 +394,7 @@ def test_validation_refuses_a_run_with_a_drop(tmp_path):
     run = _cam2_dropped_pair_2(tmp_path)
     result = _validate(run, 1, (1, 2))
     assert result["valid"] is False
-    assert "Camera2 lacks run trigger(s) [1]" in result["error"]
+    assert "Camera2 lost 1 pair (run trigger 1)" in result["error"]
     assert result["error"].endswith("Re-record the run.")
     assert result["read_error"] == result["error"]
     assert result["pivraw_alignment"] is None
@@ -442,7 +443,7 @@ def test_validate_config_refuses_a_run_with_a_drop(tmp_path):
     cfg = _config_with_base(tmp_path, run, num_images=6)
     ok, error, _warnings = validate_config(cfg)
     assert not ok
-    assert "Camera2 lacks run trigger(s) [1]" in error and "Re-record" in error
+    assert "Camera2 lost 1 pair (run trigger 1)" in error and "Re-record" in error
 
 
 def test_validate_config_says_when_num_images_caps_the_pairs(tmp_path):
