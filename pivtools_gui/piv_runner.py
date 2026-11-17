@@ -17,6 +17,7 @@ from typing import Optional
 from loguru import logger
 
 from pivtools_core.config import ACTIVE_PATHS_ENV, Config
+from pivtools_core.image_handling.load_images import load_mask_for_camera
 
 
 def active_paths_override(active_paths: Optional[list[int]]) -> Optional[str]:
@@ -40,6 +41,27 @@ def job_units(cfg: Config, active_paths: Optional[list[int]]) -> list[tuple[int,
     """
     paths = cfg.resolve_active_paths(active_paths_override(active_paths))
     return [(path_idx, camera) for path_idx in paths for camera in cfg.camera_numbers]
+
+
+def require_piv_job_inputs(cfg: Config, active_paths: Optional[list[int]]) -> None:
+    """Refuse, before a PIV job starts, any input the job would refuse.
+
+    The one preflight a job start runs. Each check is the job's own, so a
+    refusal here is the one the job would hit, with the same message:
+
+    1. The pair count (:meth:`Config.require_frame_pairs`): a ``.pivraw`` run
+       that cannot be paired by trigger (``PivrawError``), or strides another
+       image type cannot be read with (``PairingStrideError``).
+    2. Every camera's mask on every dataset of :func:`job_units`
+       (``load_mask_for_camera``): a wrong-size mask, or masking on with no
+       readable mask file (``MaskError``). With masking off it loads nothing.
+
+    All three errors are bad input, answered 400 with their message
+    (``pivtools_gui.errors.BAD_INPUT_ERRORS``).
+    """
+    cfg.require_frame_pairs()
+    for path_idx, camera in job_units(cfg, active_paths):
+        load_mask_for_camera(camera, cfg, source_path_idx=path_idx)
 
 
 class PIVProcess:

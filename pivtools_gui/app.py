@@ -60,7 +60,7 @@ from pivtools_core.validation import later_loop_findings, validate_memory_for_im
 from pivtools_gui.calibration.app import calibration_bp, calibration_stepped_bp
 from pivtools_gui.errors import register_json_error_handlers
 from pivtools_gui.masking.app.views import masking_bp
-from pivtools_gui.piv_runner import get_runner, job_units
+from pivtools_gui.piv_runner import get_runner, require_piv_job_inputs
 from pivtools_gui.plotting.app.plotting_views import vector_plot_bp
 
 # Transform endpoints (per-file storage with backup/restore, used by frontend)
@@ -1751,19 +1751,10 @@ def run_piv():
     active_paths = data.get("active_paths")  # List of path indices to process
     mode = data.get("mode", "instantaneous")  # PIV mode: instantaneous or ensemble
 
-    # A .pivraw run is paired by trigger before any job starts: a run the reader
-    # refuses raises PivrawError here (400 with its message, errors.py), so the
-    # null pair count /config reports can never launch a job.
-    cfg = get_config()
-    if cfg.image_type == "pivraw":
-        cfg.require_frame_pairs()
-
-    # Every camera's mask on every dataset the job will process is loaded
-    # first: a mask the job would refuse (wrong size, or masking on with no
-    # readable mask file) raises MaskError here, a 400 with its message
-    # (errors.py), before any job starts. With masking off this loads nothing.
-    for path_idx, camera_num in job_units(cfg, active_paths):
-        load_mask_for_camera(camera_num, cfg, source_path_idx=path_idx)
+    # Pairing (PivrawError, PairingStrideError) and masks (MaskError) are
+    # checked before any job starts; each is a 400 with its message
+    # (errors.py), so the null pair count /config reports can never launch one.
+    require_piv_job_inputs(get_config(), active_paths)
 
     # Get the runner and start the job
     runner = get_runner()

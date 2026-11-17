@@ -831,8 +831,8 @@ class Config:
         """The frame-pair count, for a caller that must refuse an unpairable source first.
 
         A job start or a calibration check calls it before anything runs, so a
-        ``.pivraw`` run the reader refuses stops there with the reader's
-        message rather than later inside the job.
+        source the job cannot pair stops there with the same message rather
+        than later inside the job.
 
         Returns
         -------
@@ -844,6 +844,8 @@ class Config:
         PivrawError
             ``.pivraw``: the run cannot be aligned or the pairing does not suit
             it (:attr:`per_loop_frame_pairs`).
+        PairingStrideError
+            Every other image type: strides it cannot be read with.
         """
         return self.num_frame_pairs
 
