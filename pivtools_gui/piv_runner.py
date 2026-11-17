@@ -16,6 +16,31 @@ from typing import Optional
 
 from loguru import logger
 
+from pivtools_core.config import ACTIVE_PATHS_ENV, Config
+
+
+def active_paths_override(active_paths: Optional[list[int]]) -> Optional[str]:
+    """The ``PIV_ACTIVE_PATHS`` value a job started with ``active_paths`` gets.
+
+    None leaves the variable unset, so the job takes the config file's
+    ``paths.active_paths``.
+    """
+    if active_paths is None:
+        return None
+    return ",".join(str(i) for i in active_paths)
+
+
+def job_units(cfg: Config, active_paths: Optional[list[int]]) -> list[tuple[int, int]]:
+    """(path index, camera) for every dataset and camera a job would process.
+
+    Uses the job's own resolution: ``Config.resolve_active_paths`` on the value
+    :meth:`PIVRunner.start_piv_job` passes, and ``cfg.camera_numbers``, which
+    ``instantaneous.main`` and ``ensemble.main`` loop over. The request's
+    ``cameras`` field is not used by the job, so it is not used here either.
+    """
+    paths = cfg.resolve_active_paths(active_paths_override(active_paths))
+    return [(path_idx, camera) for path_idx in paths for camera in cfg.camera_numbers]
+
 
 class PIVProcess:
     """Manages a single PIV computation subprocess."""
@@ -161,9 +186,10 @@ class PIVRunner:
         env["PYTHONPATH"] = str(self.project_root)
 
         # Pass active paths via environment variable if specified
-        if active_paths is not None:
-            env["PIV_ACTIVE_PATHS"] = ",".join(str(i) for i in active_paths)
-            logger.info(f"Setting PIV_ACTIVE_PATHS={env['PIV_ACTIVE_PATHS']}")
+        override = active_paths_override(active_paths)
+        if override is not None:
+            env[ACTIVE_PATHS_ENV] = override
+            logger.info(f"Setting {ACTIVE_PATHS_ENV}={override}")
 
         try:
             # Start subprocess
