@@ -12,11 +12,17 @@ instantaneous PIV job over both PIV cameras in one process:
    PIV runs on cameras 1 and 2; a PLIF camera is refused for A/B pairing by
    name and allowed time-resolved (D7, decisions of 17 Nov 2026).
 
-The particle images move one known way in sensor coordinates. Camera 1 moves
-down 3 px. Camera 2 moves right 3 px on the sensor, which ``rotate-cw-90``
-(``np.rot90(x, -1)``: sensor column c becomes output row c) turns into down
-3 px. So after the transformer both cameras see the same motion, and camera 2
-reporting it proves the rotation reached the correlator.
+The truth is built in the stored (sensor) frame: the particle centres of
+frame B are those of frame A moved by a stored shift (rows, columns), and the
+rendered stored frames are what the ``.set`` holds. DaVis's transformer is
+applied by the reader. The expected vector in each camera's OUTPUT frame is
+derived in the test, not by hand: an index map of the sensor is pushed through
+the camera's transform and the shifted pixel is located in it
+(:func:`_output_shift`). Both rotated-rig cameras get the same stored shift
+(2, 3), with both components non-zero, so the derived output shifts differ:
+(2, 3) for camera 1 and, through ``rotate-cw-90``, (3, -2) for camera 2. That
+checks both terms and the sign of the rotated displacement; a plain transpose
+would give (3, 2).
 
 Usage:
     pytest unit-tests/test_readers_end_to_end.py -v
@@ -41,8 +47,39 @@ from pivtools_core.config import Config
 SENSOR_SHAPE = (64, 96)
 OUTPUT_SHAPES = {1: (64, 96), 2: (96, 64)}
 
-# Sensor-coordinate displacement (rows, columns) between A and B, per camera.
-SENSOR_SHIFT = {1: (3, 0), 2: (0, 3)}
+# Stored (sensor) frame displacement (rows, columns) from A to B, per camera.
+# Both components non-zero, so a rotation changes both and flips one sign.
+SENSOR_SHIFT = {1: (2, 3), 2: (2, 3)}
+
+# rotate-cw-90 as lvpyio measures it (rotation-shape REPORT A1): the sensor's
+# top-left pixel lands top-right. Camera 1 has no transformer.
+# test_load_images_reads_each_camera_at_its_own_shape pins these to the pixels
+# production returns, so the displacement derived from them is production's.
+TO_OUTPUT = {1: lambda x: x, 2: lambda x: np.rot90(x, -1)}
+
+
+def _output_shift(transform, sensor_shape, stored_shift):
+    """The (rows, columns) displacement in the output frame of a stored-frame
+    displacement, found on an index map: label every sensor pixel, apply the
+    camera's transform, and locate an interior pixel and its shifted partner.
+    """
+    h, w = sensor_shape
+    index = np.arange(h * w).reshape(h, w)
+    out = transform(index)
+    r, c = h // 2, w // 2
+    before = np.argwhere(out == index[r, c])[0]
+    after = np.argwhere(out == index[r + stored_shift[0], c + stored_shift[1]])[0]
+    return tuple(int(v) for v in after - before)
+
+
+def _expected_vector(output_shift):
+    """(ux, uy) of an output-frame (rows, columns) shift. Uncalibrated vectors
+    are in image pixels, ux along columns and uy along rows (down). Measured:
+    a stored shift of +3 rows on an unrotated camera gave uy = +3.00. Camera 1
+    of the rotated rig re-checks it on every run."""
+    rows, cols = output_shift
+    return float(cols), float(rows)
+
 
 NUM_PAIRS = 2
 
@@ -194,9 +231,16 @@ def test_rotated_camera_reports_the_transposed_shape(
     assert cfg.image_shape_for(2) == (96, 64)
 
 
-# rotate-cw-90 as lvpyio measures it (rotation-shape REPORT A1): the sensor's
-# top-left pixel lands top-right. Camera 1 has no transformer.
-TO_OUTPUT = {1: lambda x: x, 2: lambda x: np.rot90(x, -1)}
+def test_output_shift_of_a_quarter_turn_is_the_rotated_stored_shift():
+    """The index-map derivation against the written-out rule for
+    ``np.rot90(x, -1)``: a stored (dy, dx) appears as (dx, -dy). Two
+    independent routes to the expected vector must agree, and the rig's own
+    stored shift must come out different from itself and from its transpose."""
+    for dy, dx in [(2, 3), (-1, 4), (3, 0), (0, 3)]:
+        assert _output_shift(TO_OUTPUT[2], SENSOR_SHAPE, (dy, dx)) == (dx, -dy)
+        assert _output_shift(TO_OUTPUT[1], SENSOR_SHAPE, (dy, dx)) == (dy, dx)
+    rotated = _output_shift(TO_OUTPUT[2], SENSOR_SHAPE, SENSOR_SHIFT[2])
+    assert rotated not in (SENSOR_SHIFT[2], SENSOR_SHIFT[2][::-1])
 
 
 @MODES
@@ -229,7 +273,6 @@ def test_load_images_reads_each_camera_at_its_own_shape(
 # centre at 16 px): 64 px holds centres 16, 32, 48 -> 3 windows; 96 px holds
 # 16 ... 80 -> 5 windows. Camera 2's grid is camera 1's transposed.
 EXPECTED_GRID = {1: (3, 5), 2: (5, 3)}
-SHIFT_PX = 3.0
 # One 32 px pass with a 3-point Gaussian peak fit on clean synthetic particles;
 # the median over the grid is well inside this.
 SHIFT_TOLERANCE_PX = 0.25
@@ -283,25 +326,44 @@ def _median_displacement(output_path, pair):
     return float(np.nanmedian(ux)), float(np.nanmedian(uy)), ux.shape
 
 
+def _assert_vectors(output_path, pair, grid, expected, label):
+    """Pass 1 of ``pair`` is on ``grid`` and its median (ux, uy) is ``expected``."""
+    ux, uy, got_grid = _median_displacement(output_path, pair)
+    assert got_grid == grid, f"{label} pair {pair}: grid {got_grid}"
+    assert (
+        abs(ux - expected[0]) < SHIFT_TOLERANCE_PX
+    ), f"{label} pair {pair}: ux {ux}, expected {expected[0]}"
+    assert (
+        abs(uy - expected[1]) < SHIFT_TOLERANCE_PX
+    ), f"{label} pair {pair}: uy {uy}, expected {expected[1]}"
+
+
+def _rotated_rig_vector(cam):
+    """Camera ``cam``'s expected (ux, uy): its stored shift through its transform."""
+    return _expected_vector(
+        _output_shift(TO_OUTPUT[cam], SENSOR_SHAPE, SENSOR_SHIFT[cam])
+    )
+
+
 @MODES
 def test_instantaneous_runs_both_cameras_each_on_its_own_grid(
     tmp_path, clean_set_cache, pre_paired
 ):
-    """Both cameras in one job. Each camera's vectors land on its own grid,
-    and camera 2, whose sensor saw the particles move sideways, reports the
-    same downward motion as camera 1: its transformer reached the correlator.
-    Without the rotation it would report the motion on the other axis."""
+    """Both cameras in one job. Each camera's vectors land on its own grid and
+    equal its stored-frame shift carried through its own transformer: camera 1
+    (no transformer) reports the stored shift, camera 2 the cw-90-rotated one.
+    Without the rotation camera 2 would report camera 1's vector."""
     cfg, _set_file, _sensor = _rotated_config(tmp_path, pre_paired)
     outputs = _run_instantaneous(cfg, [1, 2])
     for pair in range(1, NUM_PAIRS + 1):
-        measured = {cam: _median_displacement(outputs[cam], pair) for cam in (1, 2)}
-        for cam, (ux, uy, grid) in measured.items():
-            assert grid == EXPECTED_GRID[cam], f"camera {cam} pair {pair}"
-            assert abs(ux) < SHIFT_TOLERANCE_PX, f"camera {cam} pair {pair}: ux {ux}"
-            assert (
-                abs(abs(uy) - SHIFT_PX) < SHIFT_TOLERANCE_PX
-            ), f"camera {cam} pair {pair}: uy {uy}"
-        assert np.sign(measured[1][1]) == np.sign(measured[2][1]), f"pair {pair}"
+        for cam in (1, 2):
+            _assert_vectors(
+                outputs[cam],
+                pair,
+                EXPECTED_GRID[cam],
+                _rotated_rig_vector(cam),
+                f"camera {cam}",
+            )
 
 
 # A cold interpreter, a LocalCluster and two cameras took 11 s on the
@@ -337,8 +399,13 @@ def test_cli_instantaneous_processes_both_cameras(tmp_path, clean_set_cache):
             assert (output_path / f"B{pair:05d}.mat").is_file(), (
                 f"camera {cam} pair {pair} not written:\n" + result.stderr[-3000:]
             )
-            _ux, _uy, grid = _median_displacement(output_path, pair)
-            assert grid == EXPECTED_GRID[cam], f"camera {cam} pair {pair}"
+            _assert_vectors(
+                output_path,
+                pair,
+                EXPECTED_GRID[cam],
+                _rotated_rig_vector(cam),
+                f"CLI camera {cam}",
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -361,8 +428,19 @@ PLIF_SHAPE = (48, 64)
 # Every stream holds this many images: 3 A/B pairs for the PIV cameras, and 3
 # frames (2 overlapping pairs) for a PLIF camera processed time-resolved.
 NTNU_IMAGES = 3
-# Each camera's motion in sensor coordinates (rows, columns).
-NTNU_SHIFT = {1: (3, 0), 2: (0, 3), 3: (3, 0), 4: (0, 3)}
+# Each camera's stored-frame motion (rows, columns), different per camera so a
+# camera reading another's streams shows. No transformers on this rig.
+NTNU_SHIFT = {1: (3, 0), 2: (0, 3), 3: (2, -3), 4: (0, 3)}
+NTNU_SHAPES = {1: PIV_SHAPE, 2: PIV_SHAPE, 3: PLIF_SHAPE, 4: PLIF_SHAPE}
+
+
+def _ntnu_vector(cam):
+    """Camera ``cam``'s expected (ux, uy): its stored shift, no transformer."""
+    return _expected_vector(
+        _output_shift(lambda x: x, NTNU_SHAPES[cam], NTNU_SHIFT[cam])
+    )
+
+
 # 32 px windows at 50 % overlap: 48 px -> 2 windows, 64 px -> 3, 96 px -> 5.
 NTNU_GRID = {1: (3, 5), 2: (3, 5), 3: (2, 3)}
 
@@ -452,12 +530,9 @@ def test_ntnu_piv_runs_on_the_two_piv_cameras(tmp_path, clean_set_cache):
     outputs = _run_instantaneous(cfg, [1, 2])
     for cam in (1, 2):
         for pair in range(1, NTNU_IMAGES + 1):
-            ux, uy, grid = _median_displacement(outputs[cam], pair)
-            assert grid == NTNU_GRID[cam], f"camera {cam} pair {pair}"
-            # Camera 2 moves sideways on its unrotated sensor.
-            along, across = (uy, ux) if cam == 1 else (ux, uy)
-            assert abs(abs(along) - SHIFT_PX) < SHIFT_TOLERANCE_PX, f"camera {cam}"
-            assert abs(across) < SHIFT_TOLERANCE_PX, f"camera {cam}"
+            _assert_vectors(
+                outputs[cam], pair, NTNU_GRID[cam], _ntnu_vector(cam), f"camera {cam}"
+            )
 
 
 def test_ntnu_plif_camera_is_refused_for_ab_pairing_by_name(tmp_path, clean_set_cache):
@@ -494,7 +569,4 @@ def test_ntnu_plif_camera_runs_time_resolved(tmp_path, clean_set_cache):
 
     outputs = _run_instantaneous(cfg, [3])
     for pair in range(1, NTNU_IMAGES):
-        ux, uy, grid = _median_displacement(outputs[3], pair)
-        assert grid == NTNU_GRID[3]
-        assert abs(abs(uy) - SHIFT_PX) < SHIFT_TOLERANCE_PX
-        assert abs(ux) < SHIFT_TOLERANCE_PX
+        _assert_vectors(outputs[3], pair, NTNU_GRID[3], _ntnu_vector(3), "camera 3")
