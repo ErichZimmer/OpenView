@@ -22,6 +22,7 @@ from flask_cors import CORS
 from loguru import logger
 
 from pivtools_cli.preprocessing.preprocess import apply_filters_to_batch
+from pivtools_cli.run_import import RunImportConflict, import_run
 from pivtools_core.config import Config, get_config, reload_config
 from pivtools_core.fft_sizes import BUILT_FFT_SIZES, SINGLE_MODE_WINDOW_SIZES
 from pivtools_core.image_handling.load_images import (
@@ -1324,6 +1325,66 @@ def config_endpoint():
     return jsonify(config_data)
 
 
+def _bad_request(message: str):
+    return jsonify({"success": False, "error": message}), 400
+
+
+@api_bp.route("/import_run", methods=["POST"])
+def import_run_endpoint():
+    """Write the GUI's ``config.yaml`` for a ``.pivraw`` run recorded by the acquisition app.
+
+    Request JSON: ``run_dir`` (the run folder, required), ``base_path`` (where
+    PIV results go; omitted or null for ``<project>/results/<run name>``),
+    ``force`` (bool, default false: replace the config and a different
+    ``rig.dt``).
+
+    200 ``{"success": true, "summary": <RunImport.summary() text>}``, after the
+    config is reloaded and the image caches cleared. 409 when the import would
+    replace something (always the config itself, since the GUI has one, plus a
+    different ``rig.dt``): ``error`` lists every conflict, and the GUI asks
+    before posting again with ``force``. 400 for a malformed request, a run
+    the reader refuses (``PivrawError``, via ``errors.py``) or a config that
+    does not validate; nothing is written then.
+    """
+    global raw_image_cache, processed_store, FRAME_1_KEYS
+    data = request.get_json(silent=True) or {}
+    run_dir = data.get("run_dir")
+    if not isinstance(run_dir, str) or not run_dir.strip():
+        return _bad_request("run_dir is required: the folder of the recorded run.")
+    base_path = data.get("base_path")
+    if base_path is not None and not isinstance(base_path, str):
+        return _bad_request("base_path must be a folder path or null.")
+    force = data.get("force", False)
+    if not isinstance(force, bool):
+        return _bad_request("force must be true or false.")
+
+    try:
+        result = import_run(
+            Path(run_dir.strip()),
+            Path(get_config().config_path),
+            base_path=(
+                Path(base_path.strip()) if base_path and base_path.strip() else None
+            ),
+            force=force,
+        )
+    except RunImportConflict as e:
+        return (
+            jsonify({"success": False, "error": " ".join(e.conflicts)}),
+            409,
+        )
+    except PivrawError:
+        raise  # errors.py answers 400 with the reader's message
+    except ValueError as e:
+        return _bad_request(str(e))
+
+    with cache_lock:
+        raw_image_cache.clear()
+        FRAME_1_KEYS.clear()
+    processed_store["processed"] = {}
+    reload_config()
+    return jsonify({"success": True, "summary": result.summary()})
+
+
 @api_bp.route("/fft_sizes", methods=["GET"])
 def fft_sizes_endpoint():
     """Window axis lengths the codelet FFT engine was built for.
@@ -1634,10 +1695,13 @@ def update_config():
     cfg.save()
     reload_config()
 
-    # Inject computed image properties into response so frontend stays in sync
+    # Inject computed image properties into response so frontend stays in sync.
+    # A paths change (source, cameras) re-pairs a .pivraw run too, so it carries
+    # the pair status even when no images key was posted: the GUI must never
+    # keep the count, or the refusal, of the previous source.
     cfg = get_config()
-    if "images" in data:
-        data["images"].update(_frame_pair_counts(cfg))
+    if "images" in data or "paths" in data:
+        data.setdefault("images", {}).update(_frame_pair_counts(cfg))
 
     # Echo server-reconciled camera state so the frontend context tracks the
     # persisted config (camera_numbers/camera_subfolders may differ from what

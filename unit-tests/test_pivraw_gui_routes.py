@@ -96,6 +96,41 @@ def test_update_config_saves_and_carries_the_refusal(tmp_path, monkeypatch):
     assert yaml.safe_load(open("config.yaml"))["images"]["num_images"] == 6
 
 
+def test_a_source_change_carries_the_new_pair_status(tmp_path, monkeypatch):
+    """Changing only the source re-pairs the run: the GUI must not keep the old status.
+
+    Moving from the refused run to a clean one answers with the clean count and no
+    pairing_error, and moving back answers with the refusal, though no images key
+    was posted either time.
+    """
+    client = _client(tmp_path, monkeypatch)
+    clean = copy_case(tmp_path, "df_2cam_clean")
+    refused = tmp_path / "df_2cam_missed_trigger_cam2"
+
+    r = client.post(
+        "/backend/update_config", json={"paths": {"source_paths": [str(clean)]}}
+    )
+    assert r.status_code == 200
+    images = r.get_json()["updated"]["images"]
+    assert images["num_frame_pairs"] == 2
+    assert "pairing_error" not in images
+
+    r = client.post(
+        "/backend/update_config", json={"paths": {"source_paths": [str(refused)]}}
+    )
+    images = r.get_json()["updated"]["images"]
+    assert images["num_frame_pairs"] is None
+    assert REFUSAL in images["pairing_error"]
+    assert set(images) == {"num_frame_pairs", "per_loop_frame_pairs", "pairing_error"}
+
+
+def test_an_update_of_another_section_carries_no_images(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    r = client.post("/backend/update_config", json={"filters": []})
+    assert r.status_code == 200
+    assert "images" not in r.get_json()["updated"]
+
+
 @pytest.mark.parametrize("mode", ["instantaneous", "ensemble"])
 def test_run_piv_refuses_the_run_and_starts_no_job(tmp_path, monkeypatch, mode):
     """A null pair count in the config response must never launch a job."""

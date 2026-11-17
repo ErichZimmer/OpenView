@@ -22,7 +22,7 @@ import os
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Sequence, Tuple
 
 import yaml
 
@@ -59,6 +59,23 @@ APP_CALIBRATION_DIRNAME = "calibration"
 APP_CALIBRATION_CAMERA_DIR = "Cam{slot}"
 APP_CALIBRATION_IMAGE_FORMAT = "%05d.tif"
 APP_CALIBRATION_IMAGE_TYPE = "standard"
+
+
+class RunImportConflict(FileExistsError):
+    """The import would replace what exists: the config, a different ``rig.dt``, or both.
+
+    Every conflict is collected before anything is written, so the user sees
+    all of them before choosing ``force``, which replaces all of them.
+
+    Attributes:
+        conflicts: One plain sentence per conflict, without an interface's hint
+            (the CLI's ``str()`` adds ``--force``; the GUI adds its own wording).
+    """
+
+    def __init__(self, conflicts: Sequence[str]):
+        self.conflicts = tuple(conflicts)
+        what = "it" if len(self.conflicts) == 1 else "them"
+        super().__init__(f"{' '.join(self.conflicts)} Use --force to replace {what}.")
 
 
 @dataclass(frozen=True)
@@ -259,9 +276,10 @@ def import_run(
     Raises:
         PivrawError: The reader refuses the run (``PivrawAlignmentError`` when
             it cannot be paired by trigger), or the cameras disagree on dt_s.
-        FileExistsError: ``config_path`` exists and ``force`` is False.
-        ValueError: The calibration settings hold a different ``rig.dt`` and
-            ``force`` is False, or the config does not validate.
+        RunImportConflict: ``force`` is False and ``config_path`` exists, or
+            the calibration settings hold a different ``rig.dt``; it names
+            every such conflict.
+        ValueError: The config does not validate.
     """
     run_dir = Path(os.path.abspath(run_dir))
     config_path = Path(os.path.abspath(config_path))
@@ -275,20 +293,20 @@ def import_run(
     dt_s = _run_dt_s(run_dir, headers)
     rig_dt = dt_s if alignment.mode == DOUBLE_FRAME else frame_stride * dt_s
 
-    if config_path.exists() and not force:
-        raise FileExistsError(
-            f"{config_path} already exists. Use --force to overwrite it."
-        )
     calibration_source = _calibration_source(project, cameras)
     settings_file = cs.settings_path(calibration_source)
     stored_dt = _stored_rig_dt(calibration_source)
+    conflicts = []
+    if config_path.exists() and not force:
+        conflicts.append(f"{config_path} already exists.")
     if stored_dt is not None and stored_dt != rig_dt and not force:
-        raise ValueError(
+        conflicts.append(
             f"{settings_file} holds rig.dt {stored_dt!r} s, and run {run_dir.name} "
             f"was recorded at {rig_dt!r} s. Velocity scales with dt, so the "
-            "calibration of the run(s) recorded at the old value would change. "
-            "Use --force to replace it."
+            "calibration of the run(s) recorded at the old value would change."
         )
+    if conflicts:
+        raise RunImportConflict(conflicts)
 
     data = _build_config(
         run_dir,
