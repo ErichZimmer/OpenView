@@ -3090,7 +3090,11 @@ class Config:
         """
         return self.resolve_active_paths(os.environ.get(ACTIVE_PATHS_ENV))
 
-    def resolve_active_paths(self, override: Optional[str]) -> list:
+    def resolve_active_paths(
+        self,
+        override: Optional[object] = None,
+        label: Optional[str] = None,
+    ) -> list:
         """Active path indices given the ``PIV_ACTIVE_PATHS`` value ``override``.
 
         The one resolution a PIV job's datasets come from. ``active_paths``
@@ -3103,10 +3107,17 @@ class Config:
 
         Parameters
         ----------
-        override : str or None
-            Comma-separated indices (blank entries are skipped), or None for
-            the config file's ``paths.active_paths`` (every dataset when that
-            is unset).
+        override : str, list or None
+            The selection: a comma-separated string (blank entries are
+            skipped), a list of entries as a request sent them, or None for the
+            config file's ``paths.active_paths`` (every dataset when that is
+            unset). A list and its ``",".join(map(str, ...))`` string, which is
+            what the job receives, are accepted or refused alike.
+        label : str, optional
+            What the user touched, named in every refusal: "the Run PIV dataset
+            selection [5]", "--active-paths '0,9'". None names the
+            ``PIV_ACTIVE_PATHS`` value, the job's own environment, which a
+            route check has already passed unless it was bypassed.
 
         Returns
         -------
@@ -3128,12 +3139,23 @@ class Config:
             datasets = f"this config has {n} {plural} (paths.source_paths), numbered {numbered}"
 
         if override is not None:
-            where = f"{ACTIVE_PATHS_ENV} '{override}'"
-            note = (
-                f" {ACTIVE_PATHS_ENV} holds the datasets chosen in Run PIV or "
-                "with --active-paths."
-            )
-            entries: list = [e.strip() for e in override.split(",") if e.strip()]
+            if label is None:
+                where = f"{ACTIVE_PATHS_ENV} '{override}'"
+                note = (
+                    f" {ACTIVE_PATHS_ENV} holds the datasets chosen in Run PIV or "
+                    "with --active-paths."
+                )
+            else:
+                where, note = label, ""
+            if isinstance(override, str):
+                entries: list = [e.strip() for e in override.split(",") if e.strip()]
+            elif isinstance(override, (list, tuple)):
+                entries = list(override)
+            else:
+                raise ActivePathsError(
+                    f"{where} is {override!r}, not a list of dataset numbers: "
+                    f"{datasets}.{note}"
+                )
         else:
             where = "paths.active_paths"
             note = ""

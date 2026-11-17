@@ -602,6 +602,15 @@ def preload_images():
     )
 
 
+def _query_selection(text: str) -> list:
+    """A query string's comma-separated dataset selection, as its entries.
+
+    Blank entries are skipped, as the job skips them. The entries stay text,
+    for ``job_paths`` to accept or refuse by name.
+    """
+    return [entry.strip() for entry in text.split(",") if entry.strip()]
+
+
 def _source_path_idx_error(idx: object, n_sources: int) -> Optional[str]:
     """Return an error message when ``idx`` is not a valid index into the sources.
 
@@ -2136,41 +2145,12 @@ def get_uncalibrated_count():
     base_paths = cfg.base_paths
 
     # active_paths is required: defaulting to dataset 0 is what pinned the progress
-    # bar at 100% for the rest of a multi-dataset run.
-    raw_active = request.args.get("active_paths", "")
-    try:
-        active_paths = [int(p) for p in raw_active.split(",") if p.strip()]
-    except ValueError:
-        return (
-            jsonify(
-                {
-                    "error": "active_paths must be comma-separated integers, "
-                    f"got {raw_active!r}"
-                }
-            ),
-            400,
-        )
-    if not active_paths:
-        return (
-            jsonify(
-                {
-                    "error": "active_paths is required "
-                    "(comma-separated base path indices)"
-                }
-            ),
-            400,
-        )
-    out_of_range = [i for i in active_paths if not 0 <= i < len(base_paths)]
-    if out_of_range:
-        return (
-            jsonify(
-                {
-                    "error": f"active_paths entries out of range: {out_of_range} "
-                    f"({len(base_paths)} base path(s) configured)"
-                }
-            ),
-            400,
-        )
+    # bar at 100% for the rest of a multi-dataset run. It is resolved as the job
+    # resolves it, so an empty, non-integer or out-of-range selection is an
+    # ActivePathsError, a 400 (errors.py).
+    active_paths = job_paths(
+        cfg, _query_selection(request.args.get("active_paths", ""))
+    )
 
     # Camera is part of the key because `files` is camera-specific.
     cache_key = (tuple(active_paths), type_name, cam)
@@ -2246,13 +2226,11 @@ def get_uncalibrated_count():
 def check_output_exists():
     """Check if output data exists for given paths/cameras."""
     cfg = get_config()
-    active_paths_str = request.args.get("active_paths", "")
+    selection = _query_selection(request.args.get("active_paths", ""))
     # A selection is resolved as the PIV job resolves it: a dataset outside the
     # config or a non-integer is ActivePathsError, a 400 (errors.py). No
     # selection asks about nothing.
-    active_paths = (
-        cfg.resolve_active_paths(active_paths_str) if active_paths_str.strip() else []
-    )
+    active_paths = job_paths(cfg, selection) if selection else []
     mode = request.args.get("mode", "")  # "instantaneous" or "ensemble"
     types_to_check = (
         [mode]

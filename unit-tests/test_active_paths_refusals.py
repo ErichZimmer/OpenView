@@ -111,13 +111,39 @@ def routes(two, monkeypatch: Any):
     return app.test_client(), runner
 
 
-@pytest.mark.parametrize("selection", [[5], [], [0, "x"]])
-def test_run_piv_refuses_a_selection_that_names_no_dataset(routes, selection) -> None:
+TAIL = "this config has 2 datasets (paths.source_paths), numbered 0 to 1"
+
+
+@pytest.mark.parametrize(
+    "selection, expected",
+    [
+        (
+            [5],
+            f"Dataset 5 in the Run PIV dataset selection [5] is out of range: {TAIL}.",
+        ),
+        (
+            [],
+            f"the Run PIV dataset selection [] selects no dataset: {TAIL}. Select at least one.",
+        ),
+        (
+            [0, "x"],
+            f"Dataset 'x' in the Run PIV dataset selection [0, x] is not a dataset number: {TAIL}.",
+        ),
+        (
+            [1.5],
+            f"Dataset 1.5 in the Run PIV dataset selection [1.5] is not a dataset number: {TAIL}.",
+        ),
+    ],
+)
+def test_run_piv_refuses_a_selection_that_names_no_dataset(
+    routes, selection, expected: str
+) -> None:
+    """The message names the Run PIV selection, never PIV_ACTIVE_PATHS, which a
+    GUI user never sees."""
     client, runner = routes
     response = client.post("/backend/run_piv", json={"active_paths": selection})
     assert response.status_code == 400
-    error = response.get_json()["error"]
-    assert "PIV_ACTIVE_PATHS" in error and "2 datasets" in error
+    assert response.get_json()["error"] == expected
     assert runner.started == []
 
 
@@ -142,7 +168,9 @@ def test_clear_output_refuses_a_negative_dataset_and_deletes_nothing(
         json={"active_paths": [-1], "camera_numbers": [1], "mode": "instantaneous"},
     )
     assert response.status_code == 400
-    assert "Dataset -1" in response.get_json()["error"]
+    assert response.get_json()["error"] == (
+        f"Dataset -1 in the Run PIV dataset selection [-1] is out of range: {TAIL}."
+    )
     assert (data_dir / "B00001.mat").exists()
 
 
@@ -150,7 +178,9 @@ def test_check_output_exists_refuses_an_out_of_range_dataset(routes) -> None:
     client, _ = routes
     response = client.get("/backend/check_output_exists?active_paths=0,9")
     assert response.status_code == 400
-    assert "Dataset 9" in response.get_json()["error"]
+    assert response.get_json()["error"] == (
+        f"Dataset 9 in the Run PIV dataset selection [0, 9] is out of range: {TAIL}."
+    )
     # Control: no selection asks about nothing, as before.
     assert client.get("/backend/check_output_exists").get_json() == {
         "exists": False,
@@ -173,10 +203,116 @@ def test_the_cli_override_is_refused_the_same_way(two) -> None:
 
     from pivtools_cli.cli import get_active_paths_from_args
 
-    with pytest.raises(ActivePathsError, match=r"Dataset 9 in PIV_ACTIVE_PATHS '0,9'"):
+    with pytest.raises(ActivePathsError) as err:
         get_active_paths_from_args(SimpleNamespace(active_paths="0,9"), two)
+    assert str(err.value) == (
+        f"Dataset 9 in --active-paths '0,9' is out of range: {TAIL}."
+    )
     assert get_active_paths_from_args(SimpleNamespace(active_paths="1"), two) == [1]
     assert get_active_paths_from_args(SimpleNamespace(active_paths=None), two) == [0, 1]
+
+
+@pytest.mark.parametrize("command", ["instantaneous", "ensemble"])
+def test_the_cli_piv_commands_name_the_flag_before_starting(
+    two, tmp_path: Path, monkeypatch: Any, capsys: Any, command: str
+) -> None:
+    """The PIV commands hand --active-paths to the job through PIV_ACTIVE_PATHS;
+    the flag is checked first, so the refusal names what the user typed and
+    no job (no Dask cluster) starts."""
+    import yaml
+
+    import pivtools_cli.cli as cli
+    from pivtools_core import ensemble, instantaneous
+
+    work = tmp_path / "cli"
+    work.mkdir()
+    (work / "config.yaml").write_text(yaml.dump(two.data))
+    monkeypatch.chdir(work)
+
+    def no_job() -> None:
+        raise AssertionError("the job started")
+
+    monkeypatch.setattr(instantaneous, "main", no_job)
+    monkeypatch.setattr(ensemble, "main", no_job)
+    monkeypatch.setattr(sys, "argv", ["pivtools-cli", command, "--active-paths", "0,9"])
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main()
+    assert exit_info.value.code == 1
+    assert (
+        f"error: Dataset 9 in --active-paths '0,9' is out of range: {TAIL}."
+        in capsys.readouterr().err
+    )
+
+
+@pytest.mark.parametrize(
+    "query, expected",
+    [
+        (
+            "active_paths=0,9",
+            f"Dataset 9 in the Run PIV dataset selection [0, 9] is out of range: {TAIL}.",
+        ),
+        (
+            "active_paths=0,x",
+            f"Dataset 'x' in the Run PIV dataset selection [0, x] is not a dataset number: {TAIL}.",
+        ),
+        (
+            "",
+            f"the Run PIV dataset selection [] selects no dataset: {TAIL}. Select at least one.",
+        ),
+    ],
+)
+def test_the_progress_route_refuses_through_the_same_check(
+    routes, query: str, expected: str
+) -> None:
+    """get_uncalibrated_count had its own copy of the check, with other wording."""
+    client, _ = routes
+    response = client.get(f"/backend/get_uncalibrated_count?camera=1&{query}")
+    assert response.status_code == 400
+    assert response.get_json()["error"] == expected
+
+
+@pytest.mark.parametrize(
+    "selection, expected",
+    [
+        (
+            [1.5],
+            f"Dataset 1.5 in the calibration apply dataset selection [1.5] is not a dataset number: {TAIL}.",
+        ),
+        (
+            [True],
+            f"Dataset True in the calibration apply dataset selection [True] is not a dataset number: {TAIL}.",
+        ),
+        (
+            [0, 5],
+            f"Dataset 5 in the calibration apply dataset selection [0, 5] is out of range: {TAIL}.",
+        ),
+        (
+            [-1],
+            f"Dataset -1 in the calibration apply dataset selection [-1] is out of range: {TAIL}.",
+        ),
+    ],
+)
+def test_calibration_apply_refuses_through_the_same_check(
+    two, selection, expected: str
+) -> None:
+    """plan_apply_units took int(i): 1.5 and True became dataset 1."""
+    from pivtools_gui.calibration.runio import plan_apply_units
+
+    with pytest.raises(ActivePathsError) as err:
+        plan_apply_units(two, None, None, False, "planar", active_paths=selection)
+    assert str(err.value) == expected
+
+
+def test_the_jobs_own_environment_check_names_the_variable(two, monkeypatch) -> None:
+    """Only the job's own resolution names PIV_ACTIVE_PATHS: it fails only when the
+    route check was bypassed (an environment set by hand)."""
+    monkeypatch.setenv(ACTIVE_PATHS_ENV, "7")
+    with pytest.raises(ActivePathsError) as err:
+        _ = two.active_paths
+    assert str(err.value) == (
+        f"Dataset 7 in PIV_ACTIVE_PATHS '7' is out of range: {TAIL}. "
+        "PIV_ACTIVE_PATHS holds the datasets chosen in Run PIV or with --active-paths."
+    )
 
 
 def test_a_config_with_no_datasets_is_refused(tmp_path: Path) -> None:

@@ -49,7 +49,9 @@ def get_active_paths_from_args(args, config):
     Returns list of path indices.
     """
     if getattr(args, "active_paths", None):
-        return config.resolve_active_paths(args.active_paths)
+        return config.resolve_active_paths(
+            args.active_paths, label=f"--active-paths '{args.active_paths}'"
+        )
     return config.active_paths
 
 
@@ -860,6 +862,11 @@ def instantaneous_command(args):
     from pivtools_core import instantaneous
 
     if args.active_paths:
+        # Checked here first, so a refusal names --active-paths, not the
+        # PIV_ACTIVE_PATHS variable the job is handed.
+        from pivtools_core.config import Config
+
+        get_active_paths_from_args(args, Config())
         os.environ["PIV_ACTIVE_PATHS"] = args.active_paths
     # instantaneous/ensemble delegate to main(), which reads config.camera_numbers,
     # so the camera override is passed via env var (statistics/transform own their
@@ -896,6 +903,11 @@ def ensemble_command(args):
     from pivtools_core import ensemble
 
     if args.active_paths:
+        # Checked here first, so a refusal names --active-paths, not the
+        # PIV_ACTIVE_PATHS variable the job is handed.
+        from pivtools_core.config import Config
+
+        get_active_paths_from_args(args, Config())
         os.environ["PIV_ACTIVE_PATHS"] = args.active_paths
     # instantaneous/ensemble delegate to main(), which reads config.camera_numbers,
     # so the camera override is passed via env var (statistics/transform own their
