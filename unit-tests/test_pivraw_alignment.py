@@ -479,6 +479,29 @@ def test_a_reader_refusal_reaches_shape_detection_unchanged(tmp_path):
     assert "Could not read" not in message
 
 
+def test_a_batch_resolves_the_alignment_once(tmp_path, monkeypatch):
+    """A batch of pairs looks the run's alignment up once, not once per pair
+    (each lookup lists the run folder and stats every camera's files). The
+    frames read are the same as pair by pair."""
+    from pivtools_core.image_handling.readers import pivraw_reader
+
+    run = _cam2_dropped_pair_2(tmp_path)
+    cfg = Config(path=str(write_piv_config(tmp_path, run, 2, 4)))
+    cfg.image_shape_for(2)
+    calls = []
+    align = pivraw_reader.align_pivraw_run
+
+    def counting(*args, **kwargs):
+        calls.append(args)
+        return align(*args, **kwargs)
+
+    monkeypatch.setattr(pivraw_reader, "align_pivraw_run", counting)
+    batch = _read_batch(1, 2, run, 2, cfg)
+    assert len(calls) == 1
+    source = "df_2cam_missed_trigger_cam2"
+    np.testing.assert_array_equal(batch[1], expected_frames(source, 2)[2:4])
+
+
 def test_pivraw_pair_indices_need_the_camera(tmp_path):
     run = copy_case(tmp_path, "df_2cam_clean")
     cfg = Config(path=str(write_piv_config(tmp_path, run, 2, 4)))

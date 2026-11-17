@@ -233,9 +233,7 @@ def _write_validated(
         the move.
     """
     created = [
-        d
-        for base in data["paths"]["base_paths"]
-        for d in _missing_folders(Path(base))
+        d for base in data["paths"]["base_paths"] for d in _missing_folders(Path(base))
     ]
     fd, tmp_path = tempfile.mkstemp(
         prefix=config_path.name + ".", suffix=".tmp", dir=config_path.parent

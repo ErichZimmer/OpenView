@@ -2,7 +2,7 @@ import logging
 import math
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Tuple
 
 import dask
 import dask.array as da
@@ -240,6 +240,7 @@ def read_pair(
     config: Config,
     *,
     out: Optional[np.ndarray] = None,
+    frame_indices: Optional[Tuple[int, int]] = None,
 ) -> np.ndarray:
     """Read a pair of images (A and B frames).
 
@@ -285,6 +286,9 @@ def read_pair(
             directly rather than through the extension registry when ``out``
             is in play: a ``**kwargs`` wrapper that dropped it would leave the
             slot as uninitialised memory with no error.
+        frame_indices (tuple, optional): Pair ``idx``'s (frame A, frame B)
+            file indices when the caller resolved them for a whole batch
+            (``Config.frame_pair_indices_batch``); None resolves them here.
 
     Returns:
         np.ndarray: Stacked array of shape (2, H, W) containing frame A and B;
@@ -294,8 +298,10 @@ def read_pair(
     image_type = config.image_type
     # A .pivraw run is paired by trigger, per camera, and camera_path is its run
     # folder; every other type pairs by the stride formula alone.
-    frame_a_idx, frame_b_idx = config.get_frame_pair_indices(
-        idx, camera=camera, source=camera_path
+    frame_a_idx, frame_b_idx = (
+        frame_indices
+        if frame_indices is not None
+        else config.get_frame_pair_indices(idx, camera=camera, source=camera_path)
     )
 
     # Handle container formats (single file contains multiple frames/cameras)
@@ -495,9 +501,19 @@ def _read_batch(
     """
     height, width = config.image_shape_for(camera)
     batch = np.empty((count, 2, height, width), dtype=np.float32)
+    indices = config.frame_pair_indices_batch(
+        start_idx, count, camera, source=camera_path
+    )
     for i in range(count):
         try:
-            read_pair(start_idx + i, camera_path, camera, config, out=batch[i])
+            read_pair(
+                start_idx + i,
+                camera_path,
+                camera,
+                config,
+                out=batch[i],
+                frame_indices=indices[i],
+            )
         except ValueError as exc:
             if "out has" not in str(exc):
                 raise

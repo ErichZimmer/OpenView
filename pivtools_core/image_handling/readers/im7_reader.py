@@ -24,7 +24,7 @@ import struct
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Union
+from typing import Optional, Set, Tuple, Union
 
 import lz4.block
 import numpy as np
@@ -707,12 +707,20 @@ def _read_pixels_packtype1(
     return frames.reshape(end - start, header.size_z, header.size_y, header.size_x)
 
 
-def _read_trailer(f, header: IM7Header, source: str) -> IM7Scales:
+# Version-1 files whose masks and trailer passed _check_masks_per_frame, by
+# (path, size, mtime_ns): decoding every mask plane costs as much as the
+# frames, and the verdict is about the file, so it is reached once per file
+# version per process. A failed check is not stored and fails every read.
+_MASKS_CHECKED: Set[Tuple[str, int, int]] = set()
+
+
+def _read_trailer(f, header: IM7Header, path: Path) -> IM7Scales:
     """Everything after the pixels: the attribute records, then the version-1 masks.
 
-    ``f`` must sit just past the last frame's pixel data. The intensity scale
-    comes from the attributes. A version-1 file's per-frame masks are then
-    checked (:func:`_check_masks_per_frame`). A version-0 file's single DaVis
+    ``f`` must sit just past the last frame's pixel data of the file ``path``.
+    The intensity scale comes from the attributes. A version-1 file's
+    per-frame masks are then checked (:func:`_check_masks_per_frame`), once
+    per file stamp (:data:`_MASKS_CHECKED`). A version-0 file's single DaVis
     mask, present on some real calibration images, is neither applied nor
     checked, by decision 17 Nov 2026 (see :data:`IM7_VERSION_BUFFER`).
 
@@ -721,9 +729,13 @@ def _read_trailer(f, header: IM7Header, source: str) -> IM7Scales:
         raise for the file.
     """
     attr_at = f.tell()
-    scales = _read_attributes(f, source, header.pack_type)
+    scales = _read_attributes(f, path.name, header.pack_type)
     if header.version == IM7_VERSION_PER_FRAME:
-        _check_masks_per_frame(f, header, source, attr_at)
+        st = os.fstat(f.fileno())
+        stamp = (str(path.absolute()), st.st_size, st.st_mtime_ns)
+        if stamp not in _MASKS_CHECKED:
+            _check_masks_per_frame(f, header, path.name, attr_at)
+            _MASKS_CHECKED.add(stamp)
     return scales
 
 
@@ -886,7 +898,7 @@ def _read_im7_internal(filepath: Path) -> tuple:
         else:
             raise _unsupported_pack_error(header, filepath.name)
 
-        scales = _read_trailer(f, header, filepath.name)
+        scales = _read_trailer(f, header, filepath)
 
     return header, pixels, scales
 
@@ -1133,7 +1145,7 @@ def read_im7_camera(
         else:
             raise _unsupported_pack_error(header, filepath.name)
 
-        scales = _read_trailer(f, header, filepath.name)
+        scales = _read_trailer(f, header, filepath)
 
     # Apply intensity scale in-place
     if scales.slope != 1.0:

@@ -670,8 +670,7 @@ class Config:
                 "run is aligned and there is no pair count."
             )
         aligned = {
-            str(source): len(self.pivraw_alignment(source).pairs)
-            for source in sources
+            str(source): len(self.pivraw_alignment(source).pairs) for source in sources
         }
         if len(set(aligned.values())) > 1:
             listed = "; ".join(f"{s}: {n}" for s, n in aligned.items())
@@ -918,6 +917,29 @@ class Config:
             return (pair_start, pair_start)
         else:
             return (pair_start, pair_start + fs)
+
+    def frame_pair_indices_batch(
+        self,
+        first_pair: int,
+        count: int,
+        camera: int,
+        source: Optional[Path] = None,
+    ) -> List[Tuple[int, int]]:
+        """:meth:`get_frame_pair_indices` for ``count`` pairs from ``first_pair``.
+
+        A ``.pivraw`` run's alignment is looked up once for the batch: each
+        lookup lists the run folder and stats every camera's files, so a
+        lookup per pair cost that I/O ``count`` times. The indices are the
+        same as pair by pair.
+
+        Raises:
+            PivrawError: As :meth:`get_frame_pair_indices`.
+        """
+        pairs = range(first_pair, first_pair + count)
+        if self.image_type != "pivraw":
+            return [self.get_frame_pair_indices(n) for n in pairs]
+        alignment = self.pivraw_alignment(source)
+        return [alignment.file_frames(n, camera) for n in pairs]
 
     def image_shape_for(self, camera: int) -> tuple[int, int]:
         """
