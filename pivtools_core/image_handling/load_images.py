@@ -11,6 +11,7 @@ import numpy as np
 from ..config import Config
 from ..vector_loading import read_mask_from_mat
 from ..window_utils import compute_window_centers, compute_window_centers_single_mode
+from .path_utils import camera_path_for
 
 # Import all readers to register them
 from .readers import get_reader
@@ -344,13 +345,16 @@ def read_pair(
             )
             return result
         else:
-            # Pre-paired: A+B frames in one entry - read directly
+            # Pre-paired: A and B are two streams of one entry, the entry the
+            # strides name (frame_stride 0 makes frame A and frame B equal).
             from .readers.set_reader import camera_streams, read_set_pair
 
             streams = camera_streams(
                 set_file_path, camera, config.camera_count, pair=True
             )
-            return _written(read_set_pair(set_file_path, streams, idx, out=out), out)
+            return _written(
+                read_set_pair(set_file_path, streams, frame_a_idx, out=out), out
+            )
 
     elif image_type == "lavision_im7":
         from .readers.im7_reader import read_im7_camera
@@ -405,11 +409,15 @@ def read_pair(
     elif image_type == "cine":
         from .readers.cine_reader import read_cine_pair
 
-        # .cine: one video file per camera, frames extracted by index
+        # .cine: one video file per camera, frames A and B as the strides ask.
         cine_filename = format_str % camera
         cine_path = camera_path / cine_filename
-        # For pairs, read 2 consecutive frames starting at frame_a_idx
-        return _written(read_cine_pair(str(cine_path), idx=frame_a_idx, out=out), out)
+        return _written(
+            read_cine_pair(
+                str(cine_path), frame_a_idx, frame_b_idx=frame_b_idx, out=out
+            ),
+            out,
+        )
 
     elif image_type == "pivraw":
         from .readers.pivraw_reader import read_pivraw_pair
@@ -560,25 +568,7 @@ def load_images(
     if source is None:
         source = config.source_paths[0]
 
-    # Determine camera_path based on image type
-    image_type = config.image_type
     num_loops = config.num_loops
-
-    # Helper: derive camera_path from a base source directory/file
-    def _camera_path_from_source(base_source: Path) -> Path:
-        if image_type == "lavision_set":
-            return base_source  # .set file IS the camera_path
-        elif image_type in ("cine", "pivraw"):
-            return base_source  # directory containing Camera%d.cine / .pivraw
-        elif image_type == "lavision_im7":
-            if config.images_use_camera_subfolders:
-                folder = config.get_camera_folder(camera)
-                return base_source / folder if folder else base_source
-            return base_source
-        else:
-            folder = config.get_camera_folder(camera)
-            return base_source / folder if folder else base_source
-
     image_shape = config.image_shape_for(camera)
 
     # Multi-loop: create batches per loop, concatenate
@@ -588,7 +578,7 @@ def load_images(
 
         for loop_idx in range(num_loops):
             loop_source = config.get_loop_source_path(source, loop_idx)
-            camera_path = _camera_path_from_source(loop_source)
+            camera_path = camera_path_for(config, loop_source, camera)
 
             num_batches = math.ceil(per_loop / batch_size)
             for batch_idx in range(num_batches):
@@ -615,7 +605,7 @@ def load_images(
         return images
 
     # --- Single-loop logic ---
-    camera_path = _camera_path_from_source(source)
+    camera_path = camera_path_for(config, source, camera)
 
     num_pairs = config.num_frame_pairs
     num_batches = math.ceil(num_pairs / batch_size)

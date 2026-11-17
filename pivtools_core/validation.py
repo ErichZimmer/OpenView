@@ -8,6 +8,7 @@ Used by both instantaneous.py and ensemble.py entry points.
 import logging
 import os
 import re
+from pathlib import Path
 from typing import List, Tuple
 
 from pivtools_core.config import Config
@@ -16,14 +17,59 @@ from pivtools_core.fft_sizes import (
     SINGLE_MODE_A_SIZES,
     SINGLE_MODE_WINDOW_SIZES,
 )
-from pivtools_core.image_handling.load_images import create_piv_frame_reader
+from pivtools_core.image_handling.load_images import (
+    create_piv_frame_reader,
+    read_pair,
+)
 from pivtools_core.image_handling.path_utils import (
+    camera_path_for,
     format_to_glob,
     validate_images_generic,
 )
 from pivtools_core.image_handling.source_diagnosis import piv_diagnosis_context
 
 logger = logging.getLogger(__name__)
+
+
+def later_loop_findings(config: Config, base_source: Path, camera: int) -> List[str]:
+    """Loops 1..N-1 of a looped recording, each read through its own source.
+
+    Loop 0 is ``base_source`` itself, which the callers (``validate_config``,
+    the GUI's ``/validate_files``) check in full. Every later loop must exist,
+    and its first and last pair must read from its own camera path, as the
+    pipeline (``load_images``) will read them.
+
+    Args:
+        config: Configuration object.
+        base_source: The configured ``paths.source_paths`` entry (loop 0).
+        camera: Camera number (1-based).
+
+    Returns:
+        One sentence per problem, each naming the loop and its source; empty
+        for a single-loop recording.
+    """
+    findings: List[str] = []
+    if config.num_loops <= 1:
+        # Nothing to read, and the pair count is not asked for: a .pivraw run
+        # that cannot be paired raises there, and validate_config reports that
+        # refusal itself (_pivraw_pairing_findings).
+        return findings
+    pairs_per_loop = config.per_loop_frame_pairs
+    for loop_idx in range(1, config.num_loops):
+        loop_source = config.get_loop_source_path(base_source, loop_idx)
+        if not loop_source.exists():
+            findings.append(f"Loop {loop_idx} source not found: {loop_source.name}")
+            continue
+        camera_path = camera_path_for(config, loop_source, camera)
+        for which, pair in (("first", 1), ("last", pairs_per_loop)):
+            try:
+                read_pair(pair, camera_path, camera, config)
+            except Exception as e:
+                findings.append(
+                    f"Loop {loop_idx} ({loop_source.name}): {which} pair "
+                    f"({pair}) could not be read: {e}"
+                )
+    return findings
 
 
 def _pivraw_pairing_findings(config: Config, warnings: List[str]) -> List[str]:
@@ -149,13 +195,8 @@ def validate_config(config: Config) -> Tuple[bool, str, List[str]]:
     diagnosis = piv_diagnosis_context(config, 0)
 
     for camera_num in camera_numbers:
-        # Determine camera path
         format_str = config.image_format[0]
-        if image_type in ("lavision_set", "lavision_im7", "cine", "pivraw"):
-            camera_path = source_path
-        else:
-            folder = config.get_camera_folder(camera_num)
-            camera_path = source_path / folder if folder else source_path
+        camera_path = camera_path_for(config, source_path, camera_num)
 
         # Use the canonical validator (handles .set, .cine, .pivraw, .im7, standard)
         read_frame = create_piv_frame_reader(camera_path, camera_num, config)
@@ -187,14 +228,10 @@ def validate_config(config: Config) -> Tuple[bool, str, List[str]]:
                     f"Camera {camera_num}: Processing subset - using {config.num_images} of {found} available files"
                 )
 
-        # Supplementary: multi-loop source validation
-        if config.num_loops > 1:
-            for loop_idx in range(config.num_loops):
-                loop_path = config.get_loop_source_path(source_path, loop_idx)
-                if not loop_path.exists():
-                    errors.append(
-                        f"Camera {camera_num}: Loop {loop_idx} source not found: {loop_path}"
-                    )
+        errors.extend(
+            f"Camera {camera_num}: {finding}"
+            for finding in later_loop_findings(config, source_path, camera_num)
+        )
 
         # Supplementary: indexing mismatch check (standard types only)
         if image_type == "standard" and result["valid"] and camera_path.exists():

@@ -132,6 +132,16 @@ class CalibrationSourceError(ValueError):
     """
 
 
+class PairingStrideError(ValueError):
+    """The pairing strides cannot be read from this image type: the user fixes the config.
+
+    Raised by :meth:`Config.get_frame_pair_indices` and the pair counts, naming
+    the key and the fix. The GUI treats it as it treats a ``.pivraw`` run the
+    reader refuses: the config routes carry it in ``images.pairing_error`` and
+    the routes that read pairs answer HTTP 400 with its message.
+    """
+
+
 # Image types read by PIVTOOLs' own readers. Every refusal they make is a
 # ValueError (PivrawError, SetConfigError and SetPairingError,
 # CameraIdentityError, AttrFormatError, a blocked camera, the strict-header
@@ -653,14 +663,17 @@ class Config:
 
         Raises
         ------
+        PairingStrideError
+            Every other image type: the strides cannot be read from this image
+            type (:meth:`_require_strides_suit_source`).
         PivrawError
             ``.pivraw``: no source path is active, an active run cannot be
             aligned, the pairing does not suit it, or the active runs align
             different numbers of pairs.
         """
-        stride_pairs = self._stride_pair_count()
         if self.image_type != "pivraw":
-            return stride_pairs
+            self._require_strides_suit_source()
+            return self._stride_pair_count()
         from .image_handling.readers.pivraw_reader import PivrawError
 
         sources = self.active_source_paths
@@ -679,21 +692,67 @@ class Config:
                 f"aligned pairs, since one pair count serves them all ({listed}). "
                 "Process the runs in separate configs."
             )
-        return min(next(iter(aligned.values())), stride_pairs)
+        # align_pivraw_run has refused strides below 1, so the count is defined.
+        return min(next(iter(aligned.values())), self._stride_pair_count())
 
     def _stride_pair_count(self) -> int:
-        """Pairs ``num_images`` frames give under the pairing strides."""
-        num_images = self.num_images
-        fs = self.frame_stride
-        ps = self.pair_stride
+        """Pairs ``num_images`` frames give under the pairing strides.
 
-        if fs == 0:
-            return num_images
+        Pair n's frame B is ``start_index + (n - 1) * pair_stride +
+        frame_stride``, and the last of ``num_images`` frames is ``start_index
+        + num_images - 1``, so n runs to ``(num_images - 1 - frame_stride) //
+        pair_stride + 1``. ``frame_stride`` 0 (pre-paired) is the same formula:
+        every ``pair_stride``-th of ``num_images`` entries.
+        """
+        span = self.num_images - 1 - self.frame_stride
+        return max(0, span // self.pair_stride + 1)
 
-        if ps <= 0:
-            ps = 1
+    # Image types whose frames are numbered from 1 by their own reader, with the
+    # file extension a refusal names. A .set numbers its entries 1..N as DaVis
+    # does (read_set_frame / read_set_pair take 1-based entries), and the .cine
+    # reader takes 1-based frames it offsets by the camera's FirstImageNo. A
+    # start_index of 0 asks these readers for a frame that does not exist.
+    _ONE_BASED_IMAGE_TYPES = {"lavision_set": ".set", "cine": ".cine"}
 
-        return max(0, (num_images - 1 - fs) // ps + 1)
+    def _require_strides_suit_source(self) -> None:
+        """Refuse, by name, strides the image type cannot be read with.
+
+        ``.pivraw`` is not checked here: :meth:`pivraw_alignment` decides its
+        pairing from the trigger record and refuses its own.
+
+        Raises
+        ------
+        PairingStrideError
+            ``frame_stride`` is negative, ``pair_stride`` is below 1 (every pair
+            would read the same or earlier frames), ``start_index`` is below 1
+            on a ``.set`` or ``.cine``, or ``frame_stride`` is 0 on a ``.cine``
+            (a .cine holds one frame per image, so there is no A+B entry to
+            read pre-paired).
+        """
+        fs, ps, si = self.frame_stride, self.pair_stride, self.start_index
+        if fs < 0:
+            raise PairingStrideError(
+                f"images.frame_stride is {fs}; it is the frames from A to B of "
+                "a pair, so it must be 0 (pre-paired) or more."
+            )
+        if ps < 1:
+            raise PairingStrideError(
+                f"images.pair_stride is {ps}; it is the frames from one pair's "
+                "A to the next pair's A, so it must be 1 or more."
+            )
+        ext = self._ONE_BASED_IMAGE_TYPES.get(self.image_type)
+        if ext is not None and si < 1:
+            raise PairingStrideError(
+                f"images.start_index is {si}, but a {ext} numbers its frames "
+                "from 1, so there is no frame 0. Set start_index to 1 (or to "
+                "the first frame to process)."
+            )
+        if self.image_type == "cine" and fs == 0:
+            raise PairingStrideError(
+                "images.frame_stride is 0 (pre-paired), but a .cine holds one "
+                "frame per image, so there is no A+B entry. Set frame_stride 1 "
+                "(pair_stride 1 overlapping, 2 for consecutive pairs)."
+            )
 
     @property
     def active_source_paths(self) -> List[Path]:
@@ -747,14 +806,14 @@ class Config:
         """Total frame pairs across all loops.
 
         Uses the unified stride formula per loop, multiplied by num_loops:
-        - frame_stride == 0 (pre-paired/A-B): num_images pairs per loop
-        - frame_stride > 0: (num_images - 1 - frame_stride) // pair_stride + 1 per loop
+        (num_images - 1 - frame_stride) // pair_stride + 1 per loop.
 
         Examples (single loop):
             time_resolved (fs=1, ps=1): 100 images → 99 pairs
             skip_frames   (fs=1, ps=2): 100 images → 50 pairs
             ab_format     (fs=0, ps=1): 100 images → 100 pairs
             pre_paired    (fs=0, ps=1): 100 images → 100 pairs
+            every 2nd pre-paired entry (fs=0, ps=2): 100 images → 50 pairs
 
         With num_loops=3 and 40 per-loop pairs: returns 120.
 
@@ -896,6 +955,8 @@ class Config:
 
         Raises:
             ValueError: ``.pivraw`` without ``camera``.
+            PairingStrideError: Strides the image type cannot be read with
+                (:meth:`_require_strides_suit_source`).
             PivrawError: ``.pivraw`` whose run cannot be aligned, or a pair or
                 camera outside it.
         """
@@ -907,6 +968,7 @@ class Config:
                 )
             return self.pivraw_alignment(source).file_frames(pair_number, camera)
 
+        self._require_strides_suit_source()
         si = self.start_index
         fs = self.frame_stride
         ps = self.pair_stride
@@ -1005,13 +1067,9 @@ class Config:
 
         format_str = image_format[0]  # Always tuple now
 
-        # Determine camera_path the way load_images._camera_path_from_source
-        # does. get_camera_folder already answers "" for .set, .cine and
-        # multi-camera .im7; single-camera-per-subfolder .im7 gets its folder.
-        # Treating every .im7 as "no subdir" here made shape detection look for
-        # source/B00001.im7 on a Cam1/B00001.im7 layout and fail as not found.
-        folder = self.get_camera_folder(camera_num)
-        camera_path = source_path / folder if folder else source_path
+        from .image_handling.path_utils import camera_path_for
+
+        camera_path = camera_path_for(self, source_path, camera_num)
 
         logging.debug(f"Camera path: {camera_path}")
 
@@ -1107,10 +1165,13 @@ class Config:
                 logging.debug(f"Detected image shape: {shape}")
                 return shape
             elif img_type == "cine":
-                # For .cine files, read the first pair (idx=1); the shape is
-                # taken off it below. read_cine_pair always reads exactly two
-                # frames — it takes no frame count.
-                img = read_image(str(file_path), idx=1)
+                # The first frame's shape: one decode, and no pairing
+                # assumption (the pair reader needs both frames named).
+                from .image_handling.readers.cine_reader import get_cine_image_shape
+
+                shape = get_cine_image_shape(str(file_path))
+                logging.debug(f"Detected image shape: {shape}")
+                return shape
             else:
                 # Regular files don't need extra parameters
                 img = read_image(str(file_path))
