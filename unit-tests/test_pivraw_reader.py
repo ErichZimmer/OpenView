@@ -500,7 +500,7 @@ def test_shape_comes_from_sidecar_without_decoding(tmp_path, monkeypatch):
         raise AssertionError("shape detection decoded pixels")
 
     monkeypatch.setattr(pivraw_reader, "_decode_into", _no_decode)
-    assert cfg.image_shape == (4, 4)
+    assert cfg.image_shape_for(1) == (4, 4)
 
 
 def test_read_pair_and_read_batch_through_config(tmp_path):
@@ -571,7 +571,7 @@ def test_end_to_end_validate_then_read(tmp_path):
 
     ok, error, _warnings = validate_config(cfg)
     assert ok, error
-    assert cfg.image_shape == DF_SHAPE
+    assert cfg.image_shape_for(2) == DF_SHAPE
     np.testing.assert_array_equal(
         read_pair(2, run, 2, cfg), expected_frames(DF_CLEAN, 2)[2:4]
     )

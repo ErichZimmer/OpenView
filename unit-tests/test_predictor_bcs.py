@@ -50,10 +50,9 @@ SECTIONS = (
 
 
 def _config(data: dict) -> Config:
-    """Build a Config without a YAML file and with a fixed image shape."""
+    """Build a Config without a YAML file. The correlator stub carries H, W."""
     cfg = Config.__new__(Config)
     cfg.data = data
-    cfg._detected_image_shape = (IMG_H, IMG_W)
     return cfg
 
 

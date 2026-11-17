@@ -191,15 +191,19 @@ def test_reader_that_ignores_out_is_caught(tmp_path, _clean_set_cache, monkeypat
         read_pair(1, set_file, 1, cfg, out=np.empty((2, 4, 6), np.float32))
 
 
-def test_read_batch_refuses_a_camera_whose_shape_differs(tmp_path, _clean_set_cache):
-    """config.image_shape is detected once per process from the first configured
-    camera. A second camera with another shape must fail by name here, not
-    produce a batch that disagrees with what Dask was told."""
-    set_file = build_raw16_set(tmp_path, [(4, 6), (8, 10)], name="mixed")
+def test_read_batch_sizes_each_camera_from_its_own_shape(tmp_path, _clean_set_cache):
+    """A mixed-resolution .set used to refuse camera 2: the batch buffer was
+    sized from camera 1's shape, detected once per process. Each camera's
+    batch now takes that camera's shape, whichever camera is read first."""
+    set_file = build_raw16_set(
+        tmp_path, [(4, 6), (8, 10)], name="mixed", n_entries=2, fill_with_index=True
+    )
     cfg = make_set_config(tmp_path, set_file, camera_count=2, camera_numbers=[1, 2])
-    assert cfg.image_shape == (4, 6)
-    with pytest.raises(ValueError, match=r"detected from camera 1"):
-        _read_batch(1, 1, set_file, 2, cfg)
+    batch2 = _read_batch(1, 1, set_file, 2, cfg)
+    batch1 = _read_batch(1, 1, set_file, 1, cfg)
+    assert batch2.shape == (1, 2, 8, 10)
+    assert batch1.shape == (1, 2, 4, 6)
+    np.testing.assert_array_equal(batch2[0], read_pair(1, set_file, 2, cfg))
 
 
 if __name__ == "__main__":
