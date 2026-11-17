@@ -152,32 +152,36 @@ def write_manifest(
 
     Args:
         set_dir: companion directory.
-        frame_readers: (prefix, stream_index) per image stream.
-        scale_readers: (prefix, stream_index) per .scales file.
+        frame_readers: (prefix, stream_index) per image stream, or
+            (prefix, start_frame, end_frame) for a stream file holding several
+            frames of each image (DaVis 11.4 writes A and B into one file).
+        scale_readers: (prefix, stream_index) per .scales file, or
+            (prefix, start_frame, end_frame) to build a span DaVis was not seen
+            to write.
         transformers: (id, prefix, stream_index) per correction.
         reader_name: the FrameReader ``Name``. Every real recording carries
             ``Images_16bit_8Bit``; anything else builds a foreign reader.
         associated_to_frames: the FrameReader's ``IsAssociatedToFrames``.
     """
 
-    def purpose(frame, associated="true"):
+    def purpose(frame, associated="true", end=None):
         return (
             f'<ContentPurpose IsAssociatedToFrames="{associated}" '
             f'IsAssociatedToEntireImage="false" IsAssociatedToAllImages="false" '
-            f'StartFrame="{frame}" EndFrame="{frame}"/>'
+            f'StartFrame="{frame}" EndFrame="{frame if end is None else end}"/>'
         )
 
     body = "".join(
         f'<ReaderInfo Name="{reader_name}" Type="Core.Set.Recording.FrameReader" '
         f'FilePrefix="{prefix}" FormatDescription="LaVision image stream format">'
-        f"{purpose(frame, associated_to_frames)}</ReaderInfo>"
-        for prefix, frame in frame_readers
+        f"{purpose(frames[0], associated_to_frames, end=frames[-1])}</ReaderInfo>"
+        for prefix, *frames in frame_readers
     )
     body += "".join(
         f'<ReaderInfo Name="ScaleReaderV1" Type="Core.Set.Recording.ScaleReader" '
         f'FilePrefix="{prefix}" FormatDescription="Frame scale files">'
-        f"{purpose(frame)}</ReaderInfo>"
-        for prefix, frame in scale_readers
+        f"{purpose(frames[0], end=frames[-1])}</ReaderInfo>"
+        for prefix, *frames in scale_readers
     )
     body += "".join(
         f'<Transformer ID="{tid}" Label="L" FilePrefix="{prefix}" '
