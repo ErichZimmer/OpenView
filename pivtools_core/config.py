@@ -674,12 +674,20 @@ class Config:
             aligned, the pairing does not suit it, or the active runs align
             different numbers of pairs.
         """
+        return self._per_loop_pairs(self.active_source_paths)
+
+    def _per_loop_pairs(self, sources: List[Path]) -> int:
+        """:attr:`per_loop_frame_pairs` for the datasets ``sources``.
+
+        ``sources`` is used by ``.pivraw`` only, whose runs are each aligned;
+        every other type counts from ``num_images`` alone. Raises as
+        :attr:`per_loop_frame_pairs` does.
+        """
         if self.image_type != "pivraw":
             self._require_strides_suit_source()
             return self._stride_pair_count()
         from .image_handling.readers.pivraw_reader import PivrawError
 
-        sources = self.active_source_paths
         if not sources:
             raise PivrawError(
                 "No source path is active (paths.active_paths), so no .pivraw "
@@ -827,17 +835,25 @@ class Config:
         """
         return self.num_loops * self.per_loop_frame_pairs
 
-    def require_frame_pairs(self) -> int:
+    def require_frame_pairs(self, active_paths: Optional[List[int]] = None) -> int:
         """The frame-pair count, for a caller that must refuse an unpairable source first.
 
         A job start or a calibration check calls it before anything runs, so a
         source the job cannot pair stops there with the same message rather
         than later inside the job.
 
+        Parameters
+        ----------
+        active_paths : list of int, optional
+            The datasets the job will process, already resolved (the GUI's Run
+            PIV passes the request's, which never reach ``paths.active_paths``
+            in the file). None pairs :attr:`active_paths`, as the job does with
+            no override.
+
         Returns
         -------
         int
-            :attr:`num_frame_pairs`.
+            :attr:`num_frame_pairs` over those datasets.
 
         Raises
         ------
@@ -847,7 +863,10 @@ class Config:
         PairingStrideError
             Every other image type: strides it cannot be read with.
         """
-        return self.num_frame_pairs
+        if active_paths is None:
+            return self.num_frame_pairs
+        sources = [self.source_paths[i] for i in active_paths]
+        return self.num_loops * self._per_loop_pairs(sources)
 
     def get_loop_source_path(self, source_path: Path, loop_idx: int) -> Path:
         """Get the source file/directory path for a specific loop index.
