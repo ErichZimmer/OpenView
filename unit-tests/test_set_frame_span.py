@@ -293,4 +293,4 @@ def test_time_resolved_read_pair_takes_frame_a_of_consecutive_images(
 def test_config_image_shape_of_an_ab_stream_camera(tmp_path, clean_set_cache):
     set_file = _write_streams(tmp_path, _TWO_AB_CAMERAS)
     cfg = make_set_config(tmp_path, set_file, 2, [2], frame_stride=0)
-    assert cfg.image_shape == (_H, _W)
+    assert cfg.image_shape_for(2) == (_H, _W)
