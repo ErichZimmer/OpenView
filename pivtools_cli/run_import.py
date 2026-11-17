@@ -21,7 +21,7 @@ import os
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import yaml
 
@@ -220,7 +220,9 @@ def _write_validated(
     checks. Then ``before_commit`` runs (the calibration settings write), and
     only then is the staged file moved into place, as the last step. Any
     failure before the move leaves ``config_path`` as it was and no staged
-    file behind.
+    file behind. Validation creates the missing base path folders
+    (``validate_config``); a failure removes the ones it created, so a refused
+    import leaves no empty results folder.
 
     Returns:
         The config's frame-pair count and the validation warnings.
@@ -230,9 +232,13 @@ def _write_validated(
         Whatever ``before_commit`` raises, and ``OSError`` from the staging or
         the move.
     """
+    created = [
+        d for base in data["paths"]["base_paths"] for d in _missing_folders(Path(base))
+    ]
     fd, tmp_path = tempfile.mkstemp(
         prefix=config_path.name + ".", suffix=".tmp", dir=config_path.parent
     )
+    committed = False
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
@@ -243,10 +249,32 @@ def _write_validated(
         n_pairs = staged.num_frame_pairs
         before_commit()
         os.replace(tmp_path, config_path)
+        committed = True
     finally:
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
+        if not committed:
+            _remove_empty_folders(created)
     return n_pairs, tuple(warnings)
+
+
+def _missing_folders(path: Path) -> List[Path]:
+    """``path`` and each ancestor that does not exist yet, deepest first."""
+    missing = []
+    while not path.exists() and path.parent != path:
+        missing.append(path)
+        path = path.parent
+    return missing
+
+
+def _remove_empty_folders(folders: Sequence[Path]) -> None:
+    """Remove each folder of ``folders`` (deepest first) that exists and is empty.
+
+    A folder something else wrote into since is kept.
+    """
+    for folder in folders:
+        if folder.is_dir() and not any(folder.iterdir()):
+            folder.rmdir()
 
 
 def import_run(

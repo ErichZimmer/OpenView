@@ -7,6 +7,7 @@ script, which also checks that lvpyio returns the designed pixels and the
 intensity scale 2 x + 1. The variant files below come from the same builder.
 """
 
+import os
 import struct
 from pathlib import Path
 
@@ -235,3 +236,36 @@ def test_an_inconsistent_trailer_is_refused_by_name(tmp_path, reader, edit):
         IOError, match=r"B00007\.im7: version-1 trailer " + ".*" + message
     ):
         ALL_READERS[reader](_write(tmp_path, data))
+
+
+def test_a_files_masks_are_checked_once_per_stamp(tmp_path, monkeypatch):
+    """Every v1 read decodes its frames, but the masks only on the first read
+    of a file: the verdict is cached on (path, size, mtime). A rewrite of the
+    file is checked again. Counted at the LZ4 decoder, which decodes 3 frames
+    and 3 masks on a first read of the fixture."""
+    from pivtools_core.image_handling.readers import im7_reader
+
+    path = tmp_path / "three.im7"
+    path.write_bytes(FIXTURE.read_bytes())
+    calls = []
+    decode = im7_reader.lz4_block_decompress
+
+    def counting(src, expected_size):
+        calls.append(expected_size)
+        return decode(src, expected_size)
+
+    monkeypatch.setattr(im7_reader, "lz4_block_decompress", counting)
+    read_im7(path)
+    assert len(calls) == 6
+    calls.clear()
+    read_im7(path)
+    assert len(calls) == 3
+    calls.clear()
+    read_im7_camera(path, 2, 1)
+    assert len(calls) == 1
+
+    path.write_bytes(FIXTURE.read_bytes() + b"")
+    os.utime(path, ns=(1, 1))
+    calls.clear()
+    read_im7(path)
+    assert len(calls) == 6

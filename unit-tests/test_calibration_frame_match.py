@@ -45,6 +45,7 @@ from pivtools_core.image_handling.calibration_loader import (  # noqa: E402
     validate_calibration_images,
 )
 from pivtools_core.image_handling.readers.pivraw_reader import (  # noqa: E402
+    PivrawError,
     clear_header_cache,
 )
 from pivtools_core.image_handling.readers.set_reader import (  # noqa: E402
@@ -272,12 +273,24 @@ def test_the_run_side_comes_from_run_yaml_and_the_sidecar(tmp_path):
     """Rotation from run.yaml's slot, dark from run.yaml's dark key, serial and
     pixel format from the camera sidecar: change the run, not the notes."""
     run = copy_case(tmp_path, DF_DARK)
+    # Camera 2 is another camera, SIM7, and so is its in-run dark.
     edit_sidecar(run, 2, camera_serial="SIM7")
+    edit_sidecar(run / "dark", 2, camera_serial="SIM7")
     with pytest.raises(CalibrationFrameMismatch) as exc:
         _plan(_piv_config(tmp_path, run), _calibration(tmp_path))
     assert "camera 2, 00001.tif: camera_serial SIM2 in its note, SIM7 in the run" in (
         str(exc.value)
     )
+
+
+def test_a_run_whose_dark_is_not_its_cameras_is_refused_as_the_reader_does(tmp_path):
+    """The run's in-run dark of camera 2 names another camera: the reader
+    refuses to decode it, so the frame check refuses it too, with the reader's
+    words, rather than call the run dark-subtracted."""
+    run = copy_case(tmp_path, DF_DARK)
+    edit_sidecar(run / "dark", 2, camera_serial="OTHER")
+    with pytest.raises(PivrawError, match="does not match camera 2"):
+        _plan(_piv_config(tmp_path, run), _calibration(tmp_path))
 
 
 def test_a_run_without_a_dark_refuses_dark_subtracted_notes(tmp_path):
@@ -402,9 +415,8 @@ def test_an_explicit_apply_checks_every_configured_source(tmp_path):
         _plan(_piv_config(tmp_path, run), source, camera=1, explicit=explicit)
 
 
-def test_a_pivraw_run_and_an_image_less_calibration_are_refused(tmp_path):
-    """A scale factor typed in without images records no frame at all."""
-    run = copy_case(tmp_path, DF_DARK)
+def _image_less_calibration(tmp_path: Path) -> Path:
+    """A scale factor typed in without images: models, and no settings.yaml."""
     source = tmp_path / "typed"
     for cam in (1, 2):
         REC.save_mono(
@@ -413,8 +425,25 @@ def test_a_pivraw_run_and_an_image_less_calibration_are_refused(tmp_path):
             ),
             REC.mono_model_dir_for_source(source, cam, BOARD),
         )
-    with pytest.raises(CalibrationFrameMismatch, match="has no settings.yaml"):
-        _plan(_piv_config(tmp_path, run), source)
+    return source
+
+
+def test_an_image_less_calibration_applies_to_a_run_with_a_warning(tmp_path):
+    """No images, so no frame to compare: applied, and the user is told. Plain
+    calibration images against a run stay refused (the test above)."""
+    run = copy_case(tmp_path, DF_DARK)
+    units = _plan(_piv_config(tmp_path, run), _image_less_calibration(tmp_path))
+    assert len(units) == 2
+    assert all(
+        u["frame_warnings"]
+        == (
+            "The calibration (a model made without calibration images) and the "
+            "PIV images (a PIVTOOLS Acquisition .pivraw run) carry no shared "
+            "record of rotation or dark, so their pixel frames could not be "
+            "compared.",
+        )
+        for u in units
+    ), [u["frame_warnings"] for u in units]
 
 
 # ---------------------------------------------------------------------------
@@ -475,6 +504,25 @@ def test_an_exported_run_and_a_plain_calibration_are_refused(tmp_path):
         _plan(_exported_config(tmp_path / "a", run_notes), source)
 
 
+def test_an_image_less_calibration_applies_to_an_exported_run_with_a_warning(
+    tmp_path,
+):
+    run_notes = {cam: _note(camera_serial=f"SIM{cam}") for cam in (1, 2)}
+    units = _plan(
+        _exported_config(tmp_path / "a", run_notes), _image_less_calibration(tmp_path)
+    )
+    assert units and all(
+        u["frame_warnings"]
+        == (
+            "The calibration (a model made without calibration images) and the "
+            "PIV images (TIFFs exported by PIVTOOLS Acquisition) carry no shared "
+            "record of rotation or dark, so their pixel frames could not be "
+            "compared.",
+        )
+        for u in units
+    )
+
+
 # ---------------------------------------------------------------------------
 # DaVis .set against .set: each camera's geometry transformer
 # ---------------------------------------------------------------------------
@@ -517,7 +565,11 @@ def _davis_plan(tmp_path: Path, cal_geometry, piv_geometry):
 
 def test_davis_matching_geometry_applies(tmp_path):
     (unit,) = _davis_plan(tmp_path, "rotate-cw-90", "rotate-cw-90")
-    assert unit["frame_warnings"] == (_IDENTITY_NOT_COMPARED,)
+    assert unit["frame_warnings"] == (
+        _IDENTITY_NOT_COMPARED,
+        "The calibration recording cal.set carries no camera labels, so it was "
+        "split into cameras with the PIV config's camera count (1).",
+    )
 
 
 # Neither recording carries camera labels, so camera k is taken as camera k.
@@ -763,6 +815,8 @@ def test_davis_against_plain_applies_with_a_warning_both_ways(tmp_path):
         "The calibration (DaVis .set recording) and the PIV images (images with no "
         "frame record) carry no shared record of rotation or dark, so their pixel "
         "frames could not be compared.",
+        "The calibration recording cal.set carries no camera labels, so it was "
+        "split into cameras with the PIV config's camera count (1).",
     )
 
 

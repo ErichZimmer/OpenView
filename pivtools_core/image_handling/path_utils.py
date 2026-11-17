@@ -851,6 +851,7 @@ def validate_images_generic(
         read_frame_fn,
         calibration=diagnosis.calibration,
         pair_strides=pair_strides,
+        selected_cameras=diagnosis.camera_numbers,
     )
     apply_diagnosis(
         result, diagnosis, camera, camera_path, expected_count, scan_cache=scan_cache
@@ -869,12 +870,14 @@ def _validate_core(
     *,
     calibration: bool,
     pair_strides: Optional[Tuple[int, int]] = None,
+    selected_cameras: Sequence[int] = (),
 ) -> Dict[str, Any]:
     """The validation body of :func:`validate_images_generic`, before diagnosis.
 
     ``calibration`` selects how a missing-pattern reason is derived (calibration
     never pairs A/B patterns) and whether a ``.pivraw`` run is aligned by
-    trigger (PIV only, with ``pair_strides``). Returns the result dict without
+    trigger (PIV only, with ``pair_strides``, over ``selected_cameras``, the
+    cameras selected for processing). Returns the result dict without
     ``found`` / ``suggestions`` / ``streams`` / ``warnings``.
     """
     result: Dict[str, Any] = {
@@ -1078,7 +1081,13 @@ def _validate_core(
             result["found_count"] = get_pivraw_frame_count(pivraw_file)
         except Exception as e:
             return _container_count_failure(result, pivraw_file, e)
-        _check_container_count(result, expected_count)
+        # No per-camera count check against num_images: cameras of one run hold
+        # different frame counts after unequal drops, and the run import sets
+        # num_images to the largest. The pairs come from the trigger alignment,
+        # and the pair count is min(aligned pairs, the num_images cap)
+        # (Config.per_loop_frame_pairs), so no num_images can read past a
+        # camera's frames. found_count stays for display.
+        result["valid"] = True
 
         # PIV pairs the run's cameras by trigger. A run that cannot be aligned
         # (a camera offset by a trigger, a flipped A/B phase, a camera with no
@@ -1088,7 +1097,9 @@ def _validate_core(
             from .readers.pivraw_reader import PivrawError, align_pivraw_run
 
             try:
-                alignment = align_pivraw_run(camera_path, *pair_strides)
+                alignment = align_pivraw_run(
+                    camera_path, *pair_strides, cameras=selected_cameras
+                )
             except PivrawError as e:
                 result["valid"] = False
                 result["error"] = str(e)

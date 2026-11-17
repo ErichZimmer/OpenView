@@ -27,25 +27,27 @@ logger = logging.getLogger(__name__)
 
 
 def _pivraw_pairing_findings(config: Config, warnings: List[str]) -> List[str]:
-    """The trigger pairing of a ``.pivraw`` config, reported for every run.
+    """The trigger pairing of a ``.pivraw`` config, reported for every active run.
 
-    Appends to ``warnings``, per source path: the skipped pairs per camera and
-    the alignment notes (unprovable A/B phase, unaccounted triggers), each led
-    by the run folder; then a ``num_images`` cap that bites. Returns the
-    errors: a run that cannot be paired (named by the reader), or source paths
-    whose runs align different pair counts.
+    Appends to ``warnings``, per active source path: the skipped pairs per
+    camera and the alignment notes (unprovable A/B phase, unaccounted
+    triggers), each led by the run folder, and a camera in the run that is not
+    selected but would refuse it if it were; then a ``num_images`` cap that
+    bites. Returns the errors: a run that cannot be paired (named by the
+    reader), or active runs that align different pair counts.
     """
     from pivtools_core.image_handling.readers.pivraw_reader import PivrawError
 
     try:
         n_pairs = config.num_frame_pairs
-        alignments = [config.pivraw_alignment(s) for s in config.source_paths]
+        alignments = [config.pivraw_alignment(s) for s in config.active_source_paths]
     except PivrawError as e:
         return [str(e)]
     for alignment in alignments:
         if alignment.skipped_incomplete:
             warnings.append(f"{alignment.run_dir}: {alignment.summary}")
         warnings.extend(f"{alignment.run_dir}: {note}" for note in alignment.notes)
+        warnings.extend(_unselected_camera_notes(config, alignment))
     # num_frame_pairs refuses runs that align different pair counts, so one
     # count stands for every run.
     aligned = len(alignments[0].pairs)
@@ -55,6 +57,38 @@ def _pivraw_pairing_findings(config: Config, warnings: List[str]) -> List[str]:
             f"images.num_images ({config.num_images}) caps them."
         )
     return []
+
+
+def _unselected_camera_notes(config: Config, alignment) -> List[str]:
+    """A note per camera in the run but not selected that would refuse it.
+
+    The alignment covers the selected cameras only. Each other camera of the
+    run is aligned with them in turn, and one the reader refuses is named with
+    the reader's reason, so the user knows the run is not whole.
+    """
+    from pivtools_core.image_handling.readers.pivraw_reader import (
+        PivrawError,
+        align_pivraw_run,
+        run_cameras,
+    )
+
+    notes = []
+    for slot in run_cameras(alignment.run_dir):
+        if slot in alignment.cameras:
+            continue
+        try:
+            align_pivraw_run(
+                alignment.run_dir,
+                config.frame_stride,
+                config.pair_stride,
+                cameras=alignment.cameras + (slot,),
+            )
+        except PivrawError as e:
+            notes.append(
+                f"{alignment.run_dir}: Camera{slot} is in the run but not selected "
+                f"for processing; selected, it would refuse the run: {e}"
+            )
+    return notes
 
 
 def validate_config(config: Config) -> Tuple[bool, str, List[str]]:

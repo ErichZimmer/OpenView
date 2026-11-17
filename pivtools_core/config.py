@@ -647,22 +647,30 @@ class Config:
         (:meth:`pivraw_alignment`), so its count is the aligned pairs, capped
         by the stride formula on ``num_images``: ``num_images`` keeps its
         meaning of a processing subset (the first aligned pairs, at most as
-        many as that many frames of a clean run give).
+        many as that many frames of a clean run give). Only the active source
+        paths are aligned (:attr:`active_source_paths`): an inactive run is not
+        processed, so it cannot block the active ones.
 
         Raises
         ------
         PivrawError
-            ``.pivraw``: a run cannot be aligned, the pairing does not suit it,
-            or the source paths' runs align different numbers of pairs.
+            ``.pivraw``: no source path is active, an active run cannot be
+            aligned, the pairing does not suit it, or the active runs align
+            different numbers of pairs.
         """
         stride_pairs = self._stride_pair_count()
         if self.image_type != "pivraw":
             return stride_pairs
         from .image_handling.readers.pivraw_reader import PivrawError
 
+        sources = self.active_source_paths
+        if not sources:
+            raise PivrawError(
+                "No source path is active (paths.active_paths), so no .pivraw "
+                "run is aligned and there is no pair count."
+            )
         aligned = {
-            str(source): len(self.pivraw_alignment(source).pairs)
-            for source in self.source_paths
+            str(source): len(self.pivraw_alignment(source).pairs) for source in sources
         }
         if len(set(aligned.values())) > 1:
             listed = "; ".join(f"{s}: {n}" for s, n in aligned.items())
@@ -687,12 +695,19 @@ class Config:
 
         return max(0, (num_images - 1 - fs) // ps + 1)
 
+    @property
+    def active_source_paths(self) -> List[Path]:
+        """The source paths of :attr:`active_paths`, in that order."""
+        return [self.source_paths[i] for i in self.active_paths]
+
     def pivraw_alignment(self, source: Optional[Path] = None) -> "PivrawAlignment":
         """The trigger alignment of one ``.pivraw`` run, with this config's pairing.
 
         The strides are in recorded frames: a double-frame run takes the
         skip_frames preset (A with B of each trigger), a time-resolved run pairs
-        trigger t with t + ``frame_stride``, stepped by ``pair_stride``.
+        trigger t with t + ``frame_stride``, stepped by ``pair_stride``. The
+        cameras aligned are the ones selected for processing
+        (``paths.camera_numbers``), so a deselected camera cannot block them.
 
         Parameters
         ----------
@@ -723,7 +738,9 @@ class Config:
                 "the runs as source_paths."
             )
         run_dir = Path(source) if source is not None else self.source_paths[0]
-        return align_pivraw_run(run_dir, self.frame_stride, self.pair_stride)
+        return align_pivraw_run(
+            run_dir, self.frame_stride, self.pair_stride, cameras=self.camera_numbers
+        )
 
     @property
     def num_frame_pairs(self):
@@ -900,6 +917,29 @@ class Config:
             return (pair_start, pair_start)
         else:
             return (pair_start, pair_start + fs)
+
+    def frame_pair_indices_batch(
+        self,
+        first_pair: int,
+        count: int,
+        camera: int,
+        source: Optional[Path] = None,
+    ) -> List[Tuple[int, int]]:
+        """:meth:`get_frame_pair_indices` for ``count`` pairs from ``first_pair``.
+
+        A ``.pivraw`` run's alignment is looked up once for the batch: each
+        lookup lists the run folder and stats every camera's files, so a
+        lookup per pair cost that I/O ``count`` times. The indices are the
+        same as pair by pair.
+
+        Raises:
+            PivrawError: As :meth:`get_frame_pair_indices`.
+        """
+        pairs = range(first_pair, first_pair + count)
+        if self.image_type != "pivraw":
+            return [self.get_frame_pair_indices(n) for n in pairs]
+        alignment = self.pivraw_alignment(source)
+        return [alignment.file_frames(n, camera) for n in pairs]
 
     def image_shape_for(self, camera: int) -> tuple[int, int]:
         """

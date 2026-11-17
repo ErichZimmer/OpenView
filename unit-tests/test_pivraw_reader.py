@@ -394,10 +394,11 @@ def test_truncated_data_and_missing_index_raise(tmp_path):
         get_pivraw_frame_count(path)
 
 
-def test_missing_sidecar_is_file_not_found(tmp_path):
+def test_missing_sidecar_is_a_pivraw_error(tmp_path):
+    """An incomplete run folder, refused by name like every other run fault."""
     path = copy_case(tmp_path, DF_CLEAN) / "Camera1.pivraw"
     Path(str(path) + ".json").unlink()
-    with pytest.raises(FileNotFoundError, match="PIVRAW sidecar not found"):
+    with pytest.raises(PivrawError, match="PIVRAW sidecar not found"):
         get_pivraw_frame_count(path)
 
 
@@ -628,9 +629,11 @@ def test_count_validation(tmp_path):
     assert ok["format_detected"] == "pivraw" and ok["image_size"] == (16, 8)
     assert "4 frames" in ok["found"]
 
-    short = _validate(run, 6)
-    assert short["valid"] is False
-    assert short["error"].startswith("found 4 entries, expected 6")
+    # num_images above a camera's frames is not a shortfall for a .pivraw run:
+    # its pairs come from the trigger alignment, which caps the pair count.
+    more = _validate(run, 6)
+    assert more["valid"] is True, more["error"]
+    assert more["found_count"] == 4
 
 
 def test_count_validation_surfaces_unfinalised_run(tmp_path):

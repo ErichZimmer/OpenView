@@ -204,6 +204,30 @@ def test_fewer_triggers_requested_than_recorded_is_refused(tmp_path):
         assert word in message, message
 
 
+@pytest.mark.parametrize("suffix", [".json", ".idx"])
+def test_a_missing_camera_file_is_refused_by_name(tmp_path, suffix):
+    """A run folder missing Camera2's sidecar or index: a PivrawError naming
+    the file, which every route answers as 400, not a bare FileNotFoundError."""
+    run = copy_case(tmp_path, "df_2cam_clean")
+    missing = run / f"Camera2.pivraw{suffix}"
+    missing.unlink()
+    with pytest.raises(PivrawError) as info:
+        align_pivraw_run(run, 1, 2)
+    assert str(missing) in str(info.value)
+
+
+def test_clearing_the_header_cache_drops_the_alignments_too(tmp_path):
+    """clear_header_cache drops every cached view of the run's files, so the
+    alignment is computed again (a new object, not the cached one)."""
+    from pivtools_core.image_handling.readers.pivraw_reader import clear_header_cache
+
+    run = copy_case(tmp_path, "df_2cam_clean")
+    first = align_pivraw_run(run, 1, 2)
+    assert align_pivraw_run(run, 1, 2) is first
+    clear_header_cache()
+    assert align_pivraw_run(run, 1, 2) is not first
+
+
 def test_missing_run_yaml_is_refused(tmp_path):
     run = copy_case(tmp_path, "df_2cam_clean")
     (run / "run.yaml").unlink()
@@ -243,7 +267,13 @@ def _validate(run, camera, pair_strides):
         expected_count=4,
         zero_based_indexing=False,
         read_frame_fn=lambda idx: read_pivraw_single(path, idx),
-        diagnosis=make_ctx(run, image_type="pivraw", image_format=("Camera%d.pivraw",)),
+        diagnosis=make_ctx(
+            run,
+            image_type="pivraw",
+            image_format=("Camera%d.pivraw",),
+            camera_count=2,
+            camera_numbers=(1, 2),
+        ),
         pair_strides=pair_strides,
     )
 
@@ -449,6 +479,29 @@ def test_a_reader_refusal_reaches_shape_detection_unchanged(tmp_path):
     assert "Could not read" not in message
 
 
+def test_a_batch_resolves_the_alignment_once(tmp_path, monkeypatch):
+    """A batch of pairs looks the run's alignment up once, not once per pair
+    (each lookup lists the run folder and stats every camera's files). The
+    frames read are the same as pair by pair."""
+    from pivtools_core.image_handling.readers import pivraw_reader
+
+    run = _cam2_dropped_pair_2(tmp_path)
+    cfg = Config(path=str(write_piv_config(tmp_path, run, 2, 4)))
+    cfg.image_shape_for(2)
+    calls = []
+    align = pivraw_reader.align_pivraw_run
+
+    def counting(*args, **kwargs):
+        calls.append(args)
+        return align(*args, **kwargs)
+
+    monkeypatch.setattr(pivraw_reader, "align_pivraw_run", counting)
+    batch = _read_batch(1, 2, run, 2, cfg)
+    assert len(calls) == 1
+    source = "df_2cam_missed_trigger_cam2"
+    np.testing.assert_array_equal(batch[1], expected_frames(source, 2)[2:4])
+
+
 def test_pivraw_pair_indices_need_the_camera(tmp_path):
     run = copy_case(tmp_path, "df_2cam_clean")
     cfg = Config(path=str(write_piv_config(tmp_path, run, 2, 4)))
@@ -494,6 +547,65 @@ def test_two_runs_with_different_pair_counts_are_refused(tmp_path):
     with pytest.raises(PivrawError, match="same number of aligned pairs") as info:
         cfg.num_frame_pairs
     assert str(clean) in str(info.value) and str(dropped) in str(info.value)
+
+
+def test_an_inactive_run_does_not_block_the_active_one(tmp_path):
+    """source_paths [clean, refused], active_paths [0]: only the active run is
+    aligned, so the refused one does not stop it."""
+    clean = copy_case(tmp_path, "df_2cam_clean")
+    refused = copy_case(tmp_path, "df_2cam_missed_trigger_cam2")
+    cfg = _config_with_base(tmp_path, clean, num_images=4)
+    cfg.data["paths"]["source_paths"] = [str(clean), str(refused)]
+    cfg.data["paths"]["base_paths"] = [str(tmp_path / "o1"), str(tmp_path / "o2")]
+    cfg.data["paths"]["active_paths"] = [0]
+    assert cfg.num_frame_pairs == 2
+    ok, error, _warnings = validate_config(cfg)
+    assert ok, error
+
+
+def test_the_alignment_covers_the_selected_cameras_only():
+    """Camera 2 of df_2cam_cam2_empty holds no frames. Aligned over every
+    camera the run is refused; over camera 1 alone it aligns."""
+    run = CONTRACT_DIR / "df_2cam_cam2_empty"
+    with pytest.raises(PivrawAlignmentError, match="Camera2 holds no frames"):
+        align_pivraw_run(run, 1, 2)
+    alignment = align_pivraw_run(run, 1, 2, cameras=(1,))
+    assert alignment.cameras == (1,)
+    assert len(alignment.pairs) >= 1
+
+
+def test_deselecting_a_dead_camera_unblocks_the_config(tmp_path):
+    run = copy_case(tmp_path, "df_2cam_cam2_empty")
+    cfg = _config_with_base(tmp_path, run, num_images=4)
+    cfg.data["paths"]["camera_numbers"] = [1]
+    assert cfg.num_frame_pairs >= 1
+    ok, error, warnings = validate_config(cfg)
+    assert ok, error
+    assert any(
+        "Camera2 is in the run but not selected" in w and "holds no frames" in w
+        for w in warnings
+    ), warnings
+
+
+def test_pairs_are_one_trigger_across_the_selected_cameras(tmp_path):
+    """Camera 2 lacks trigger 1. Over cameras 1 and 2, pair 2 is trigger 2 on
+    both; over camera 1 alone, nothing is skipped and pair 2 is trigger 1. The
+    two alignments are cached apart."""
+    run = _cam2_dropped_pair_2(tmp_path)
+    both = align_pivraw_run(run, 1, 2, cameras=(1, 2))
+    one = align_pivraw_run(run, 1, 2, cameras=(1,))
+    assert [p.run_triggers for p in both.pairs] == [(0, 0), (2, 2)]
+    assert both.pairs[1].file_frames == {1: (5, 6), 2: (3, 4)}
+    assert [p.run_triggers for p in one.pairs] == [(0, 0), (1, 1), (2, 2)]
+    assert one.pairs[1].file_frames == {1: (3, 4)}
+    assert one.skipped_incomplete == 0
+
+
+def test_a_selected_camera_missing_from_the_run_is_refused(tmp_path):
+    run = copy_case(tmp_path, "df_2cam_clean")
+    with pytest.raises(PivrawError, match="camera 3") as info:
+        align_pivraw_run(run, 1, 2, cameras=(1, 3))
+    assert "[1, 2]" in str(info.value)
 
 
 def test_recorded_dropped_pairs_are_accepted():
