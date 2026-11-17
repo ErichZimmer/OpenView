@@ -1762,6 +1762,12 @@ def test_validate_files_unreadable_set_index_reports_reason(
     assert cam["streams"] is None
 
 
+# The strides the Setup page writes for a .cine (sourceDiagnosis.ts
+# imageTypeDefaults): a .cine holds single frames, so the config refuses the
+# pre-paired frame_stride 0 that an unset key defaults to.
+CINE_STRIDES = {"start_index": 1, "frame_stride": 1, "pair_stride": 1}
+
+
 def test_validate_files_multi_camera_cine_never_suggests_a_literal(
     tmp_path, monkeypatch
 ):
@@ -1771,7 +1777,12 @@ def test_validate_files_multi_camera_cine_never_suggests_a_literal(
         tmp_path,
         monkeypatch,
         paths={"source_paths": [str(src)], "camera_count": 2, "camera_numbers": [1, 2]},
-        images={"image_type": "cine", "image_format": ["run.cine"], "num_images": 1},
+        images={
+            "image_type": "cine",
+            "image_format": ["run.cine"],
+            "num_images": 1,
+            **CINE_STRIDES,
+        },
     ).get_json()
     for key in ("camera_1", "camera_2"):
         formats = [
@@ -1791,7 +1802,12 @@ def test_validate_files_single_cine_at_two_cameras_suggests_nothing(
         tmp_path,
         monkeypatch,
         paths={"source_paths": [str(src)], "camera_count": 2, "camera_numbers": [1, 2]},
-        images={"image_type": "cine", "image_format": ["run.cine"], "num_images": 1},
+        images={
+            "image_type": "cine",
+            "image_format": ["run.cine"],
+            "num_images": 1,
+            **CINE_STRIDES,
+        },
     ).get_json()
     for key in ("camera_1", "camera_2"):
         assert not any(

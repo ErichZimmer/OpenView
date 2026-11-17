@@ -345,13 +345,16 @@ def read_pair(
             )
             return result
         else:
-            # Pre-paired: A+B frames in one entry - read directly
+            # Pre-paired: A and B are two streams of one entry, the entry the
+            # strides name (frame_stride 0 makes frame A and frame B equal).
             from .readers.set_reader import camera_streams, read_set_pair
 
             streams = camera_streams(
                 set_file_path, camera, config.camera_count, pair=True
             )
-            return _written(read_set_pair(set_file_path, streams, idx, out=out), out)
+            return _written(
+                read_set_pair(set_file_path, streams, frame_a_idx, out=out), out
+            )
 
     elif image_type == "lavision_im7":
         from .readers.im7_reader import read_im7_camera
@@ -406,11 +409,15 @@ def read_pair(
     elif image_type == "cine":
         from .readers.cine_reader import read_cine_pair
 
-        # .cine: one video file per camera, frames extracted by index
+        # .cine: one video file per camera, frames A and B as the strides ask.
         cine_filename = format_str % camera
         cine_path = camera_path / cine_filename
-        # For pairs, read 2 consecutive frames starting at frame_a_idx
-        return _written(read_cine_pair(str(cine_path), idx=frame_a_idx, out=out), out)
+        return _written(
+            read_cine_pair(
+                str(cine_path), frame_a_idx, frame_b_idx=frame_b_idx, out=out
+            ),
+            out,
+        )
 
     elif image_type == "pivraw":
         from .readers.pivraw_reader import read_pivraw_pair
