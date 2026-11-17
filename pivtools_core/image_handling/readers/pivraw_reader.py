@@ -28,9 +28,14 @@ Layout facts the reader relies on:
 * BayerRG8 becomes a 2x2 superpixel sum R+G+G+B at half resolution, with no
   demosaicing (decision 2026-10-26). The sum of four 8-bit photosites is at most
   1020, exact in float32.
-* A double-frame run holds whole pairs A, B, A, B, ... so a PIV pair is frames
-  ``(2k-1, 2k)`` (1-based): the ``skip_frames`` pairing preset (frame_stride 1,
-  pair_stride 2). A time-resolved run pairs any two frames.
+* A double-frame run holds whole pairs A, B, A, B, ... so a recorded pair is
+  frames ``(2k-1, 2k)`` (1-based): the ``skip_frames`` pairing preset
+  (frame_stride 1, pair_stride 2). A time-resolved run pairs any two frames.
+* PIV pairs are matched across cameras by trigger, not by file position
+  (:func:`align_pivraw_run`, decision 02-1): with unequal drops each camera
+  holds pair n at its own file frames, incomplete pairs are skipped and
+  counted, and a run whose cameras cannot be shown to count from the same
+  trigger is refused by name.
 
 The reader is strict and forward-only: a missing or unknown sidecar field, a
 field of the wrong type, a ``format_version`` other than the integer 2, a
@@ -52,6 +57,7 @@ from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Tuple, Union
 
 import numpy as np
+import yaml
 
 from .out_buffer import check_out
 from .set_reader import _decode_mono12p
@@ -244,6 +250,24 @@ def _listed(values: np.ndarray) -> str:
     return f"[{shown}{f', ... {more} more' if more > 0 else ''}]"
 
 
+def _frames_per_trigger(mode: str) -> int:
+    """Frames one trigger fires: A and B for double-frame, one for time-resolved."""
+    return 2 if mode == DOUBLE_FRAME else 1
+
+
+def _run_span(run_idx: np.ndarray, missing: np.ndarray, mode: str) -> int:
+    """Run indices the writer accounts for, ``[0, span)``: file frames plus ``missing_indices``.
+
+    The span ends at the largest index of either, rounded up to a whole pair for
+    double-frame (``container.py`` of the writer). 0 when the camera accounts
+    for no frame.
+    """
+    top = int(max(run_idx.max(initial=-1), missing.max(initial=-1)))
+    if top < 0:
+        return 0
+    return (top // 2 + 1) * 2 if mode == DOUBLE_FRAME else top + 1
+
+
 def _check_index(
     index: np.ndarray,
     first_frame_id: Optional[int],
@@ -295,10 +319,9 @@ def _check_index(
                 "trigger."
             )
     missing = np.asarray(missing_indices, dtype=np.int64)
-    if not (run_idx.size or missing.size):
+    span = _run_span(run_idx, missing, mode)
+    if span == 0:
         return
-    top = int(max(run_idx.max(initial=-1), missing.max(initial=-1)))
-    span = (top // 2 + 1) * 2 if mode == DOUBLE_FRAME else top + 1
     covered = np.bincount(np.concatenate([run_idx, missing]), minlength=span)
     if np.any(covered != 1):
         raise PivrawError(
@@ -440,6 +463,15 @@ def _parse_sidecar(raw_path: Path, sidecar: Any) -> PivrawHeader:
     index = np.fromfile(idx_file, dtype=INDEX_DTYPE)
     index.setflags(write=False)
     _check_index(index, first_frame_id, tuple(missing_indices), mode, idx_file, where)
+    # The writer derives dropped_pairs from missing_indices: whole missing pairs
+    # for double-frame, always 0 for time-resolved.
+    dropped_expected = len(missing_indices) // 2 if mode == DOUBLE_FRAME else 0
+    if dropped_pairs != dropped_expected:
+        raise PivrawError(
+            f"{where}: dropped_pairs {dropped_pairs} disagrees with "
+            f"missing_indices ({len(missing_indices)} run indices), which give "
+            f"{dropped_expected} for a {mode} run. The sidecar is stale or edited."
+        )
 
     header = PivrawHeader(
         path=raw_path,
@@ -465,15 +497,6 @@ def _parse_sidecar(raw_path: Path, sidecar: Any) -> PivrawHeader:
         first_frame_id=first_frame_id,
         index=index,
     )
-    if header.dropped_pairs or header.missing_indices:
-        logging.warning(
-            "%s: the recorder reports %d dropped pair(s) and %d missing frame "
-            "index(es) %s. Frames are read by their position in the file.",
-            raw_path,
-            header.dropped_pairs,
-            len(header.missing_indices),
-            list(header.missing_indices[:10]),
-        )
     return header
 
 
@@ -634,3 +657,535 @@ def read_pivraw_pair(
     _decode_into(header, idx, out[0])
     _decode_into(header, frame_b, out[1])
     return out
+
+
+# ---------------------------------------------------------------------------
+# Trigger alignment (decision 02-1)
+# ---------------------------------------------------------------------------
+#
+# Frames are paired across cameras by trigger, never by position in the file:
+# with unequal drops, file pair k of one camera is another trigger than file
+# pair k of the next. The rules and constants are the decided alignment,
+# prototyped in the pivraw-contract research
+# (``02-pivraw-reader/followup/pivraw-contract/scripts/pivraw_align.py``) and
+# mirrored by the acquisition app's TIFF export (``recorder/export.py``
+# ``align_run``). Both are held to the outcome of every case in
+# ``pivraw_contract/expected.json``, which keeps the two aligners in agreement.
+
+# The recorder's run description beside the camera files (CONTRACTS section 4).
+RUN_FILE = "run.yaml"
+# run.yaml ``trigger``: what fired the cameras.
+SOFTWARE_TRIGGER = "software"
+RUN_TRIGGERS = (SOFTWARE_TRIGGER, "daq")
+# Fraction of a trigger period two host times may differ by and still be the
+# same trigger. The rig measured its cameras within 0.74 ms of each other at a
+# 200 ms period (pivraw-contract REPORT C8); a quarter period keeps a wide
+# margin and stays below the half period at which a one-trigger offset becomes
+# ambiguous. Prototype ``pivraw_align.TOL_FRAC``, acquisition
+# ``export.TRIGGER_TOL_FRAC``.
+TRIGGER_TOL_FRAC = 0.25
+# Double-frame A/B phase on the camera clock: B->next A no longer than
+# (1 - margin) of A->B is a flip, A->B no longer than (1 - margin) of B->next A
+# is proven, and in between the phase is not provable (the CX-25 near its
+# 9.6 pairs/s maximum reads B out 52 ms after A and the next A 59 ms after B,
+# REPORT C9). Prototype ``pivraw_align.PHASE_MARGIN``, acquisition
+# ``export.AB_PHASE_MARGIN``.
+AB_PHASE_MARGIN = 0.2
+# Why a run cannot be aligned. The same names as the acquisition app's
+# ``export.REASONS`` and the fixtures' ``must_raise:<reason>``.
+ALIGNMENT_REASONS = (
+    "inconsistent_files",
+    "cameras_disagree",
+    "no_frames",
+    "no_complete_pair",
+    "camera_offset",
+    "tr_interval",
+    "ab_phase",
+)
+# The one pairing of a double-frame run, in recorded frames: A and B of each
+# trigger (the skip_frames preset).
+DOUBLE_FRAME_STRIDES = (1, 2)
+_RERECORD = "Re-record the run."
+
+
+class PivrawAlignmentError(PivrawError):
+    """A run whose cameras cannot be paired by trigger.
+
+    ``reason`` is one of :data:`ALIGNMENT_REASONS`; the message names the run,
+    the camera and, where there is one, the trigger.
+    """
+
+    def __init__(self, reason: str, message: str) -> None:
+        if reason not in ALIGNMENT_REASONS:
+            raise ValueError(f"unknown alignment reason {reason!r}")
+        super().__init__(message)
+        self.reason = reason
+
+
+@dataclass(frozen=True)
+class AlignedPair:
+    """One PIV pair complete on every camera.
+
+    ``run_triggers`` are the run triggers of its two frames (equal for
+    double-frame); ``file_frames`` maps each camera slot to its 1-based file
+    frames (A, B).
+    """
+
+    run_triggers: Tuple[int, int]
+    file_frames: Mapping[int, Tuple[int, int]]
+
+
+@dataclass(frozen=True)
+class PivrawAlignment:
+    """Every camera of one run, paired by trigger.
+
+    Attributes:
+        run_dir: The run folder.
+        mode: ``double_frame`` or ``time_resolved``.
+        period_s: Trigger period, ``1 / rate_hz``.
+        cameras: Camera slots of the run, ascending.
+        pairs: The complete pairs in trigger order; pair number n is
+            ``pairs[n - 1]``.
+        skipped_incomplete: Pairs that should exist but lack a frame on at
+            least one camera.
+        skipped_by_camera: Per slot, the skipped pairs that camera lacks a
+            frame of (a pair can count against several cameras).
+        triggers_requested: run.yaml ``config.record.n``.
+        triggers_unaccounted: Triggers requested that no camera accounts for:
+            lost before the first or after the last delivered frame, which the
+            files cannot tell apart.
+        trigger_source: run.yaml ``trigger``.
+        notes: Plain sentences for validation: phases that could not be proven
+            and unaccounted triggers.
+    """
+
+    run_dir: Path
+    mode: str
+    period_s: float
+    cameras: Tuple[int, ...]
+    pairs: Tuple[AlignedPair, ...]
+    skipped_incomplete: int
+    skipped_by_camera: Mapping[int, int]
+    triggers_requested: int
+    triggers_unaccounted: int
+    trigger_source: str
+    notes: Tuple[str, ...]
+
+    def file_frames(self, pair_number: int, camera: int) -> Tuple[int, int]:
+        """1-based file frames (A, B) of 1-based ``pair_number`` on ``camera``.
+
+        Raises:
+            PivrawError: The pair number is outside ``1..len(pairs)`` or the
+                camera is not in the run.
+        """
+        if not 1 <= pair_number <= len(self.pairs):
+            raise PivrawError(
+                f"{self.run_dir}: pair {pair_number} is out of range; the run "
+                f"aligns {len(self.pairs)} pair(s) on every camera (1-based)."
+            )
+        if camera not in self.cameras:
+            raise PivrawError(
+                f"{self.run_dir}: camera {camera} is not in the run; its cameras "
+                f"are {list(self.cameras)}."
+            )
+        return self.pairs[pair_number - 1].file_frames[camera]
+
+    @property
+    def summary(self) -> str:
+        """One sentence: pairs aligned, and pairs skipped with the cameras lacking them."""
+        text = (
+            f"{len(self.pairs)} pair(s) aligned by trigger on every camera; "
+            f"{self.skipped_incomplete} skipped as incomplete"
+        )
+        lacking = [
+            f"Camera{s} lacks a frame of {n}"
+            for s, n in self.skipped_by_camera.items()
+            if n
+        ]
+        return text + (f" ({', '.join(lacking)})." if lacking else ".")
+
+    def report(self) -> Dict[str, Any]:
+        """JSON-safe summary for validation results (camera keys as strings)."""
+        return {
+            "pairs": len(self.pairs),
+            "skipped_incomplete": self.skipped_incomplete,
+            "skipped_by_camera": {str(s): n for s, n in self.skipped_by_camera.items()},
+            "triggers_requested": self.triggers_requested,
+            "triggers_unaccounted": self.triggers_unaccounted,
+            "summary": self.summary,
+            "notes": list(self.notes),
+        }
+
+
+@dataclass(frozen=True)
+class _CameraTriggers:
+    """One camera's frames by run trigger (internal to the alignment)."""
+
+    slot: int
+    span: int  # run indices the writer accounts for: [0, span)
+    position: Dict[int, int]  # run trigger -> 0-based file position of its first frame
+    host_ns: np.ndarray  # per file frame
+    camera_ns: np.ndarray  # per file frame
+
+
+# {(run_dir, frame_stride, pair_stride): (stamp, alignment)}
+_alignment_cache: Dict[
+    Tuple[str, int, int], Tuple[Tuple[Any, ...], PivrawAlignment]
+] = {}
+
+
+def clear_alignment_cache() -> None:
+    """Drop every cached alignment."""
+    _alignment_cache.clear()
+
+
+def _run_cameras(run_dir: Path) -> Tuple[int, ...]:
+    """Slots of the ``Camera<k>.pivraw`` files in ``run_dir``, ascending."""
+    try:
+        names = [p.name for p in run_dir.iterdir()]
+    except OSError as exc:
+        raise PivrawError(f"{run_dir}: cannot list the run folder ({exc}).") from exc
+    slots = sorted(int(m.group(1)) for n in names if (m := _DATA_NAME.match(n)))
+    if not slots:
+        raise PivrawError(f"{run_dir}: no Camera<k>.pivraw file; not a run folder.")
+    return tuple(slots)
+
+
+def _read_run_file(run_dir: Path) -> Tuple[int, str]:
+    """run.yaml's ``config.record.n`` (triggers requested) and ``trigger``.
+
+    Raises:
+        PivrawError: run.yaml is missing or unreadable, or either key is absent
+            or of the wrong kind.
+    """
+    path = run_dir / RUN_FILE
+    try:
+        run = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as exc:
+        raise PivrawError(
+            f"{path}: cannot read the run description ({exc}). Every recorded "
+            "run holds one; the folder is incomplete."
+        ) from exc
+    try:
+        requested = run["config"]["record"]["n"]
+        trigger = run["trigger"]
+    except (KeyError, TypeError) as exc:
+        raise PivrawError(
+            f"{path}: config.record.n or trigger is missing ({exc!r}); not a "
+            "run.yaml the recorder wrote."
+        ) from exc
+    if not _is_int(requested) or requested < 1:
+        raise PivrawError(
+            f"{path}: config.record.n must be a positive integer, got {requested!r}."
+        )
+    if trigger not in RUN_TRIGGERS:
+        raise PivrawError(
+            f"{path}: trigger must be one of {RUN_TRIGGERS}, got {trigger!r}."
+        )
+    return requested, trigger
+
+
+def _camera_triggers(header: PivrawHeader) -> _CameraTriggers:
+    """Run trigger -> file position of one camera, from its validated header."""
+    per = _frames_per_trigger(header.mode)
+    missing = np.asarray(header.missing_indices, dtype=np.int64)
+    if header.n_frames == 0:
+        empty = np.zeros(0, dtype=np.int64)
+        return _CameraTriggers(
+            header.slot, _run_span(empty, missing, header.mode), {}, empty, empty
+        )
+    run_idx = header.index["frame_id"].astype(np.int64) - header.first_frame_id
+    position = {int(run_idx[k]) // per: k for k in range(0, header.n_frames, per)}
+    return _CameraTriggers(
+        header.slot,
+        _run_span(run_idx, missing, header.mode),
+        position,
+        header.index["host_ns"].astype(np.int64),
+        header.index["camera_ns"].astype(np.int64),
+    )
+
+
+def _ab_phase_note(run_dir: Path, cam: _CameraTriggers) -> Optional[str]:
+    """None when the camera's A/B phase is proven, a note when it cannot be.
+
+    Judged on the camera's own clock (``camera_ns``): its origin is arbitrary
+    and differs between cameras by hours, but within one camera it times
+    exposures without host delivery jitter. A ratio of two intervals is used,
+    so the clock's unit does not matter.
+
+    Raises:
+        PivrawAlignmentError: ``ab_phase``, the phase is flipped: every file
+            pair is B of one trigger and A of the next.
+    """
+    a_to_b = [cam.camera_ns[k + 1] - cam.camera_ns[k] for k in cam.position.values()]
+    b_to_next_a = [
+        cam.camera_ns[cam.position[t + 1]] - cam.camera_ns[k + 1]
+        for t, k in cam.position.items()
+        if t + 1 in cam.position
+    ]
+    name = f"Camera{cam.slot}"
+    if not b_to_next_a:
+        return (
+            f"{name}: A/B phase not provable (fewer than two consecutive "
+            "pairs); pairs are read as recorded."
+        )
+    median_ab, median_ba = float(np.median(a_to_b)), float(np.median(b_to_next_a))
+    if median_ba <= (1 - AB_PHASE_MARGIN) * median_ab:
+        raise PivrawAlignmentError(
+            "ab_phase",
+            f"{run_dir}: {name}: A->B {median_ab / 1e6:.2f} ms is longer than "
+            f"B->next A {median_ba / 1e6:.2f} ms on the camera clock: each file "
+            "pair is B of one trigger and A of the next (the run's first frame "
+            f"was lost). {_RERECORD}",
+        )
+    if median_ab <= (1 - AB_PHASE_MARGIN) * median_ba:
+        return None
+    return (
+        f"{name}: A/B phase not provable (A->B {median_ab / 1e6:.2f} ms and "
+        f"B->next A {median_ba / 1e6:.2f} ms on the camera clock are within "
+        f"{AB_PHASE_MARGIN:.0%} of each other); pairs are read as recorded."
+    )
+
+
+def _check_tr_spacing(
+    run_dir: Path,
+    cam: _CameraTriggers,
+    pairs: Tuple[AlignedPair, ...],
+    period_ns: float,
+    trigger_source: str,
+) -> None:
+    """Time-resolved: the two frames of each pair are their triggers apart in host time.
+
+    Host time, as in the prototype and the acquisition export: it is one
+    nanosecond clock for every camera, while the unit of a camera's own clock
+    is not yet confirmed on the rig (lab visit L1).
+
+    Raises:
+        PivrawAlignmentError: ``tr_interval``, naming the camera, the triggers
+            and, for a software-triggered run, the DAQ.
+    """
+    name = f"Camera{cam.slot}"
+    for pair in pairs:
+        first, second = (f - 1 for f in pair.file_frames[cam.slot])
+        dt = cam.host_ns[second] - cam.host_ns[first]
+        expected = (pair.run_triggers[1] - pair.run_triggers[0]) * period_ns
+        if abs(dt - expected) <= TRIGGER_TOL_FRAC * period_ns:
+            continue
+        if trigger_source == SOFTWARE_TRIGGER:
+            why = (
+                "The run was software-triggered (run.yaml trigger: software), "
+                "and a late software tick spaces frames unevenly. Software "
+                "triggering is for setup, focus and calibration: record "
+                "measurements with the DAQ trigger."
+            )
+        else:
+            why = f"The camera ignored a trigger (its ids stay contiguous). {_RERECORD}"
+        raise PivrawAlignmentError(
+            "tr_interval",
+            f"{run_dir}: {name} run triggers {pair.run_triggers}: frames "
+            f"{dt / 1e6:.1f} ms apart, expected {expected / 1e6:.1f} ms. {why}",
+        )
+
+
+def _check_pairing(
+    run_dir: Path, mode: str, frame_stride: int, pair_stride: int
+) -> None:
+    """The pairing strides (in recorded frames) suit the run's mode.
+
+    Raises:
+        PivrawError: A double-frame run paired other than A with B of each
+            trigger, or a time-resolved stride below 1.
+    """
+    if mode == DOUBLE_FRAME:
+        if (frame_stride, pair_stride) != DOUBLE_FRAME_STRIDES:
+            raise PivrawError(
+                f"{run_dir}: a double-frame run pairs A with B of each trigger: "
+                "use the skip_frames pairing preset (frame_stride 1, "
+                f"pair_stride 2), not frame_stride {frame_stride}, pair_stride "
+                f"{pair_stride}."
+            )
+        return
+    if frame_stride < 1 or pair_stride < 1:
+        raise PivrawError(
+            f"{run_dir}: a time-resolved run pairs two different frames: "
+            f"frame_stride and pair_stride must be >= 1, got {frame_stride} and "
+            f"{pair_stride}."
+        )
+
+
+def _run_stamp(run_dir: Path, slots: Tuple[int, ...]) -> Tuple[Any, ...]:
+    """Stamps of the files the alignment reads: every camera's three and run.yaml."""
+    try:
+        run = (run_dir / RUN_FILE).stat()
+        run_stamp: Tuple[int, int] = (run.st_mtime_ns, run.st_size)
+    except FileNotFoundError:
+        run_stamp = (-1, -1)
+    return (slots, run_stamp) + tuple(
+        _stamp(run_dir / f"Camera{s}.pivraw") for s in slots
+    )
+
+
+def align_pivraw_run(
+    run_dir: PathLike, frame_stride: int, pair_stride: int
+) -> PivrawAlignment:
+    """Pair every camera of a run by trigger, cached by the files' stamps.
+
+    Steps (the decided alignment, section comment above):
+
+    1. Each camera's header is read strictly (:func:`read_pivraw_header`): run
+       index = ``frame_id - first_frame_id``, and run trigger = run index
+       (time-resolved) or run index // 2 (double-frame).
+    2. Every trigger up to the last one any camera accounts for is a pair that
+       should exist: double-frame A_t with B_t, time-resolved t with
+       t + ``frame_stride``, stepped by ``pair_stride``. A pair is complete when
+       every camera holds all its frames; the others are skipped and counted.
+    3. The ids alone cannot see a camera that lost its first frame(s) or
+       ignored a trigger, so: (a) each complete pair's first frame arrives at
+       the same host time on every camera within :data:`TRIGGER_TOL_FRAC` of
+       the period (host time is the one clock all cameras share); (b)
+       time-resolved, the two frames of a pair are their triggers apart in host
+       time; (c) double-frame, each camera's A/B phase on its own clock.
+    4. Triggers run.yaml requested that no camera accounts for become a note.
+
+    Args:
+        run_dir: The run folder (``Camera<k>.pivraw`` files and ``run.yaml``).
+        frame_stride: Recorded frames from A to B of a pair. Double-frame
+            accepts only the skip_frames preset (1, with ``pair_stride`` 2).
+        pair_stride: Recorded frames from one pair's A to the next pair's A.
+
+    Raises:
+        PivrawError: A camera's files are refused (strict header), run.yaml is
+            missing or malformed, or the strides do not suit the mode.
+        PivrawAlignmentError: The run cannot be aligned; ``reason`` says why.
+    """
+    run_dir = Path(run_dir)
+    slots = _run_cameras(run_dir)
+    key = (str(run_dir), int(frame_stride), int(pair_stride))
+    stamp = _run_stamp(run_dir, slots)
+    cached = _alignment_cache.get(key)
+    if cached is not None and cached[0] == stamp:
+        return cached[1]
+
+    headers = {s: read_pivraw_header(run_dir / f"Camera{s}.pivraw") for s in slots}
+    requested, trigger_source = _read_run_file(run_dir)
+    modes = {h.mode for h in headers.values()}
+    rates = {h.rate_hz for h in headers.values()}
+    if len(modes) != 1 or len(rates) != 1:
+        raise PivrawAlignmentError(
+            "cameras_disagree",
+            f"{run_dir}: cameras disagree on the mode {sorted(modes)} or the "
+            f"trigger rate {sorted(rates)} Hz: not one recording. {_RERECORD}",
+        )
+    mode, rate = modes.pop(), rates.pop()
+    _check_pairing(run_dir, mode, frame_stride, pair_stride)
+    period_ns = 1e9 / rate
+    cams = {s: _camera_triggers(h) for s, h in headers.items()}
+    empty = [f"Camera{s}" for s, c in cams.items() if not c.position]
+    if empty:
+        raise PivrawAlignmentError(
+            "no_frames",
+            f"{run_dir}: {', '.join(empty)} holds no frames, so no pair is "
+            "complete on every camera. Check that camera, then re-record the run.",
+        )
+
+    per = _frames_per_trigger(mode)
+    last = max(c.span // per for c in cams.values()) - 1
+    if mode == DOUBLE_FRAME:
+        wanted = [(t, t) for t in range(last + 1)]
+    else:
+        wanted = [
+            (t, t + frame_stride)
+            for t in range(0, last - frame_stride + 1, pair_stride)
+        ]
+    pairs = []
+    skipped = 0
+    skipped_by = {s: 0 for s in slots}
+    for ta, tb in wanted:
+        lacking = [
+            s for s, c in cams.items() if ta not in c.position or tb not in c.position
+        ]
+        if lacking:
+            skipped += 1
+            for s in lacking:
+                skipped_by[s] += 1
+            continue
+        if mode == DOUBLE_FRAME:
+            files = {
+                s: (c.position[ta] + 1, c.position[ta] + 2) for s, c in cams.items()
+            }
+        else:
+            files = {
+                s: (c.position[ta] + 1, c.position[tb] + 1) for s, c in cams.items()
+            }
+        pairs.append(AlignedPair((ta, tb), files))
+    if not pairs:
+        raise PivrawAlignmentError(
+            "no_complete_pair",
+            f"{run_dir}: no PIV pair is complete on every camera ({skipped} "
+            f"incomplete). {_RERECORD}",
+        )
+
+    ref = cams[slots[0]]
+    for cam in (cams[s] for s in slots[1:]):
+        offsets = np.array(
+            [
+                cam.host_ns[cam.position[p.run_triggers[0]]]
+                - ref.host_ns[ref.position[p.run_triggers[0]]]
+                for p in pairs
+            ],
+            dtype=np.float64,
+        )
+        k = int(np.argmax(np.abs(offsets)))
+        if abs(offsets[k]) > TRIGGER_TOL_FRAC * period_ns:
+            raise PivrawAlignmentError(
+                "camera_offset",
+                f"{run_dir}: Camera{cam.slot} run trigger "
+                f"{pairs[k].run_triggers[0]} arrives {offsets[k] / 1e6:+.1f} ms "
+                f"({offsets[k] / period_ns:+.2f} periods) from Camera{ref.slot} "
+                "in host time: its frame ids count from a different trigger "
+                "(first frame(s) lost, or a trigger ignored), and the files "
+                f"cannot show which. {_RERECORD}",
+            )
+
+    pairs_t = tuple(pairs)
+    notes = []
+    for cam in cams.values():
+        if mode == DOUBLE_FRAME:
+            note = _ab_phase_note(run_dir, cam)
+            if note is not None:
+                notes.append(note)
+        else:
+            _check_tr_spacing(run_dir, cam, pairs_t, period_ns, trigger_source)
+    unaccounted = requested - (last + 1)
+    if unaccounted > 0:
+        notes.append(
+            f"run.yaml requested {requested} trigger(s) and the cameras account "
+            f"for {last + 1}: {unaccounted} trigger(s) were lost before the "
+            "first or after the last delivered frame (the files cannot say "
+            "which end)."
+        )
+    elif unaccounted < 0:
+        notes.append(
+            f"run.yaml requested {requested} trigger(s) but the cameras account "
+            f"for {last + 1}."
+        )
+
+    alignment = PivrawAlignment(
+        run_dir=run_dir,
+        mode=mode,
+        period_s=period_ns / 1e9,
+        cameras=slots,
+        pairs=pairs_t,
+        skipped_incomplete=skipped,
+        skipped_by_camera=dict(skipped_by),
+        triggers_requested=requested,
+        triggers_unaccounted=unaccounted,
+        trigger_source=trigger_source,
+        notes=tuple(notes),
+    )
+    if skipped or notes:
+        logging.warning(
+            "%s: %s", run_dir, " ".join((alignment.summary,) + alignment.notes)
+        )
+    _alignment_cache[key] = (stamp, alignment)
+    return alignment

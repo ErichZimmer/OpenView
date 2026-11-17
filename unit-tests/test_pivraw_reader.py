@@ -520,12 +520,15 @@ def test_read_pair_and_read_batch_through_config(tmp_path):
 
 
 def test_read_pair_with_wrong_preset_fails_loudly(tmp_path):
-    """time_resolved pairing on a double-frame run would correlate B with the next A."""
+    """time_resolved pairing on a double-frame run would correlate B with the next A.
+
+    The trigger alignment refuses the preset before any frame is read.
+    """
     run = copy_case(tmp_path, DF_CLEAN)
     cfg = Config(path=str(write_piv_config(tmp_path, run, 2, 4, "time_resolved")))
-    read_pair(1, run, 1, cfg)  # (1, 2) is a recorded pair
-    with pytest.raises(PivrawError, match="skip_frames"):
-        read_pair(2, run, 1, cfg)  # (2, 3) is not
+    for pair in (1, 2):
+        with pytest.raises(PivrawError, match="skip_frames"):
+            read_pair(pair, run, 1, cfg)
 
 
 def test_read_pair_passes_frame_b_through(tmp_path):
@@ -534,7 +537,7 @@ def test_read_pair_passes_frame_b_through(tmp_path):
     cfg = Config(path=str(write_piv_config(tmp_path, run, 1, 3, "time_resolved")))
     cfg.data["images"]["pairing_preset"] = "custom"
     cfg.data["images"]["frame_stride"] = 2
-    assert cfg.get_frame_pair_indices(1) == (1, 3)
+    assert cfg.get_frame_pair_indices(1, camera=1) == (1, 3)
     np.testing.assert_array_equal(
         read_pair(1, run, 1, cfg), expected_frames(TR_BAYER, 1)[[0, 2]]
     )
@@ -544,8 +547,9 @@ def test_ab_format_preset_on_double_frame_run_is_refused(tmp_path):
     """ab_format gives (A, B) = (1, 1); the reader must not quietly read (1, 2)."""
     run = copy_case(tmp_path, DF_CLEAN)
     cfg = Config(path=str(write_piv_config(tmp_path, run, 2, 4, "ab_format")))
-    assert cfg.get_frame_pair_indices(1) == (1, 1)
-    with pytest.raises(PivrawError, match=r"frames \(1, 1\) were requested"):
+    with pytest.raises(PivrawError, match="skip_frames pairing preset"):
+        cfg.get_frame_pair_indices(1, camera=1)
+    with pytest.raises(PivrawError, match="skip_frames pairing preset"):
         read_pair(1, run, 1, cfg)
 
 
@@ -614,6 +618,7 @@ def _validate(run, expected_count, image_format="Camera%d.pivraw"):
         zero_based_indexing=False,
         read_frame_fn=lambda idx: read_pivraw_single(path, idx),
         diagnosis=make_ctx(run, image_type="pivraw", image_format=(image_format,)),
+        pair_strides=(1, 2),  # skip_frames: every case here is double-frame
     )
 
 

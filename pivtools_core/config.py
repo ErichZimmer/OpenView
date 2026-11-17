@@ -7,9 +7,12 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import TYPE_CHECKING, List, Optional, Tuple
 
 import yaml
+
+if TYPE_CHECKING:
+    from .image_handling.readers.pivraw_reader import PivrawAlignment
 
 # ===================== ENDPOINT CONSTRAINTS =====================
 # Tool-specific source_endpoint constraints - defines what data sources each tool can use
@@ -627,11 +630,44 @@ class Config:
 
     @property
     def per_loop_frame_pairs(self) -> int:
-        """Frame pairs within a single loop (original stride calculation).
+        """Frame pairs within a single loop.
 
         This is the number of pairs from one source (file or folder) before
         considering multiple loops. The total across all loops is num_frame_pairs.
+
+        Every image type but ``.pivraw`` counts pairs from ``num_images`` with
+        the stride formula. A ``.pivraw`` run pairs its cameras by trigger
+        (:meth:`pivraw_alignment`), so its count is the aligned pairs, capped
+        by the stride formula on ``num_images``: ``num_images`` keeps its
+        meaning of a processing subset (the first aligned pairs, at most as
+        many as that many frames of a clean run give).
+
+        Raises
+        ------
+        PivrawError
+            ``.pivraw``: a run cannot be aligned, the pairing does not suit it,
+            or the source paths' runs align different numbers of pairs.
         """
+        stride_pairs = self._stride_pair_count()
+        if self.image_type != "pivraw":
+            return stride_pairs
+        from .image_handling.readers.pivraw_reader import PivrawError
+
+        aligned = {
+            str(source): len(self.pivraw_alignment(source).pairs)
+            for source in self.source_paths
+        }
+        if len(set(aligned.values())) > 1:
+            listed = "; ".join(f"{s}: {n}" for s, n in aligned.items())
+            raise PivrawError(
+                "Every .pivraw run in one config must hold the same number of "
+                f"aligned pairs, since one pair count serves them all ({listed}). "
+                "Process the runs in separate configs."
+            )
+        return min(next(iter(aligned.values())), stride_pairs)
+
+    def _stride_pair_count(self) -> int:
+        """Pairs ``num_images`` frames give under the pairing strides."""
         num_images = self.num_images
         fs = self.frame_stride
         ps = self.pair_stride
@@ -643,6 +679,44 @@ class Config:
             ps = 1
 
         return max(0, (num_images - 1 - fs) // ps + 1)
+
+    def pivraw_alignment(self, source: Optional[Path] = None) -> "PivrawAlignment":
+        """The trigger alignment of one ``.pivraw`` run, with this config's pairing.
+
+        The strides are in recorded frames: a double-frame run takes the
+        skip_frames preset (A with B of each trigger), a time-resolved run pairs
+        trigger t with t + ``frame_stride``, stepped by ``pair_stride``.
+
+        Parameters
+        ----------
+        source : Path, optional
+            The run folder. None means the first source path.
+
+        Raises
+        ------
+        PivrawError
+            ``start_index`` is not 1 or ``num_loops`` is not 1 (an aligned run
+            numbers its own pairs from 1, and each run is aligned on its own),
+            or :func:`align_pivraw_run` refuses the run.
+        """
+        from .image_handling.readers.pivraw_reader import (
+            PivrawError,
+            align_pivraw_run,
+        )
+
+        if self.start_index != 1:
+            raise PivrawError(
+                f"images.start_index is {self.start_index}; a .pivraw run is "
+                "paired by trigger and numbers its pairs from 1, so it must be 1."
+            )
+        if self.num_loops != 1:
+            raise PivrawError(
+                f"images.num_loops is {self.num_loops}; each .pivraw run is "
+                "aligned by trigger on its own, so loops are not supported. List "
+                "the runs as source_paths."
+            )
+        run_dir = Path(source) if source is not None else self.source_paths[0]
+        return align_pivraw_run(run_dir, self.frame_stride, self.pair_stride)
 
     @property
     def num_frame_pairs(self):
@@ -742,10 +816,18 @@ class Config:
             return "sequential"
         return "skip"
 
-    def get_frame_pair_indices(self, pair_number: int) -> tuple:
+    def get_frame_pair_indices(
+        self,
+        pair_number: int,
+        camera: Optional[int] = None,
+        source: Optional[Path] = None,
+    ) -> tuple:
         """Get the file/frame indices for a given pair number.
 
-        Uses the unified stride formula:
+        ``.pivraw`` runs are paired by trigger, and with unequal drops each
+        camera holds pair n at its own file frames: ``camera`` is required, and
+        ``source`` names the run folder (None means the first source path).
+        Every other image type ignores both and uses the unified stride formula:
             pair_start = start_index + (pair_number - 1) * pair_stride
             frame_a = pair_start
             frame_b = pair_start + frame_stride  (or pair_start if frame_stride == 0)
@@ -767,7 +849,20 @@ class Config:
                 pair 1 → (1, 1), pair 2 → (2, 2)
             zero-based time_resolved (si=0, fs=1, ps=1):
                 pair 1 → (0, 1), pair 2 → (1, 2)
+
+        Raises:
+            ValueError: ``.pivraw`` without ``camera``.
+            PivrawError: ``.pivraw`` whose run cannot be aligned, or a pair or
+                camera outside it.
         """
+        if self.image_type == "pivraw":
+            if camera is None:
+                raise ValueError(
+                    "A .pivraw run is paired by trigger, and its file frames "
+                    "differ per camera: pass the camera."
+                )
+            return self.pivraw_alignment(source).file_frames(pair_number, camera)
+
         si = self.start_index
         fs = self.frame_stride
         ps = self.pair_stride

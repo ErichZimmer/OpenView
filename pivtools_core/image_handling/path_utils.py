@@ -748,6 +748,7 @@ def validate_images_generic(
     *,
     diagnosis: "DiagnosisContext",
     scan_cache: Optional[Dict[str, "SourceScan"]] = None,
+    pair_strides: Optional[Tuple[int, int]] = None,
 ) -> Dict[str, Any]:
     """Generic image validation for both PIV and calibration images.
 
@@ -782,6 +783,10 @@ def validate_images_generic(
         One request's source scans keyed by source path, shared by the cameras a
         route validates against the same source so the source is scanned once.
         None scans afresh. Never keep it beyond one request: the disk changes.
+    pair_strides : (int, int), optional
+        ``(frame_stride, pair_stride)`` of the PIV pairing. Required for a
+        ``.pivraw`` source on the PIV page, whose run is paired by trigger
+        here; ignored otherwise.
 
     Returns
     -------
@@ -811,6 +816,9 @@ def validate_images_generic(
         - found: str - What is on disk (or what loaded), one plain sentence
         - suggestions: list - Ranked one-click fixes (``Suggestion`` dicts)
         - streams: list or None - Per-stream table of a ``.set`` recording
+        - pivraw_alignment: dict or None - PIV ``.pivraw`` only: the run's
+          trigger alignment (``PivrawAlignment.report``: pairs, skipped pairs
+          in total and per camera, a summary sentence, notes)
 
         When no pattern can be derived from the folder's files, the reason is
         appended to ``error``.
@@ -818,7 +826,8 @@ def validate_images_generic(
     Raises
     ------
     ValueError
-        When ``diagnosis.image_type`` differs from ``image_type``.
+        When ``diagnosis.image_type`` differs from ``image_type``, or a PIV
+        ``.pivraw`` source is validated without ``pair_strides``.
     """
     from .source_diagnosis import apply_diagnosis
 
@@ -836,6 +845,7 @@ def validate_images_generic(
         zero_based_indexing,
         read_frame_fn,
         calibration=diagnosis.calibration,
+        pair_strides=pair_strides,
     )
     apply_diagnosis(
         result, diagnosis, camera, camera_path, expected_count, scan_cache=scan_cache
@@ -853,12 +863,14 @@ def _validate_core(
     read_frame_fn: Callable[[int], np.ndarray],
     *,
     calibration: bool,
+    pair_strides: Optional[Tuple[int, int]] = None,
 ) -> Dict[str, Any]:
     """The validation body of :func:`validate_images_generic`, before diagnosis.
 
     ``calibration`` selects how a missing-pattern reason is derived (calibration
-    never pairs A/B patterns). Returns the result dict without ``found`` /
-    ``suggestions`` / ``streams``.
+    never pairs A/B patterns) and whether a ``.pivraw`` run is aligned by
+    trigger (PIV only, with ``pair_strides``). Returns the result dict without
+    ``found`` / ``suggestions`` / ``streams``.
     """
     result: Dict[str, Any] = {
         "valid": False,
@@ -872,8 +884,14 @@ def _validate_core(
         "format_detected": None,
         "error": None,
         "detected_start_index": None,  # first frame index among matching files
+        "pivraw_alignment": None,
     }
 
+    if image_type == "pivraw" and not calibration and pair_strides is None:
+        raise ValueError(
+            "pair_strides is required to validate a .pivraw source for PIV: the "
+            "run is paired by trigger with the config's frame and pair strides"
+        )
     if expected_count is None and image_type not in ("lavision_set", "cine", "pivraw"):
         raise ValueError(
             f"expected_count is required for {image_type} images (only containers "
@@ -1055,6 +1073,22 @@ def _validate_core(
         except Exception as e:
             return _container_count_failure(result, pivraw_file, e)
         _check_container_count(result, expected_count)
+
+        # PIV pairs the run's cameras by trigger. A run that cannot be aligned
+        # (a camera offset by a trigger, a flipped A/B phase, a camera with no
+        # frames, ...) fails here with the camera, trigger and reason; read_error
+        # too, so the PIV route does not replace it with "First frame not found".
+        if not calibration:
+            from .readers.pivraw_reader import PivrawError, align_pivraw_run
+
+            try:
+                alignment = align_pivraw_run(camera_path, *pair_strides)
+            except PivrawError as e:
+                result["valid"] = False
+                result["error"] = str(e)
+                result["read_error"] = str(e)
+                return result
+            result["pivraw_alignment"] = alignment.report()
 
         try:
             img = read_frame_fn(1)
