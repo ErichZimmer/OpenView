@@ -85,7 +85,7 @@ def run_correlator(
 ):
     """Run correlate_batch on one pair; returns the single PIVResult."""
     batch = images[None].astype(np.float32)  # (1, 2, H, W)
-    correlator = InstantaneousCorrelatorCPU(config)
+    correlator = InstantaneousCorrelatorCPU(config, camera=1)
     results = correlator.correlate_batch(
         batch, config=config, vector_masks=vector_masks
     )

@@ -147,8 +147,9 @@ class Config:
         if self.data is None:
             self.data = {}
 
-        # Cache for auto-detected image shape
-        self._detected_image_shape = None
+        # Auto-detected (H, W) per camera number. Cameras on one rig can differ
+        # in sensor size or rotation, so there is no single image shape.
+        self._detected_image_shapes: dict[int, tuple[int, int]] = {}
 
         # Cache for auto-computed parameters
         self._auto_compute_cache = None
@@ -778,32 +779,51 @@ class Config:
         else:
             return (pair_start, pair_start + fs)
 
-    @property
-    def image_shape(self):
+    def image_shape_for(self, camera: int) -> tuple[int, int]:
         """
-        Return image shape (H, W), auto-detected from the first image and
-        cached per process.
+        Return camera ``camera``'s image shape (H, W), auto-detected from its
+        first image and cached per camera.
 
-        There is deliberately no config override. A ``shape`` key was read here
-        for years but nothing ever wrote it (the GUI backend stores
-        ``images["image_shape"]`` purely as a /config response cache), and
-        honoring a stored shape that has gone stale would silently break every
-        window-grid computation downstream. Detection reads metadata or one
-        image and is cached, so the override bought nothing.
+        Each camera keeps its own shape: cameras on one rig can differ in
+        sensor size (alk235's five span 3472-3536 rows) or in rotation (a
+        90 degree transformer presents (W, H)). Every reader of the shape --
+        batch buffers, Dask chunk shapes, window grids, masks -- asks for the
+        camera it is working on.
+
+        There is deliberately no config override. Honouring a stored shape
+        that has gone stale would silently break every window-grid
+        computation downstream. Detection reads metadata or one image and is
+        cached, so an override buys nothing.
+
+        Parameters
+        ----------
+        camera : int
+            1-based camera number.
+
+        Returns
+        -------
+        tuple[int, int]
+            (H, W) of this camera's frames as the reader returns them.
         """
-        if self._detected_image_shape is None:
-            self._detected_image_shape = self._detect_image_shape()
-            logging.info("Auto-detected image shape: %s", self._detected_image_shape)
+        if camera not in self._detected_image_shapes:
+            shape = self._detect_image_shape(camera)
+            self._detected_image_shapes[camera] = shape
+            logging.info("Auto-detected image shape for camera %d: %s", camera, shape)
 
-        return self._detected_image_shape
+        return self._detected_image_shapes[camera]
 
-    def _detect_image_shape(self) -> tuple:
+    def _detect_image_shape(self, camera_num: int) -> tuple:
         """
-        Detect image shape by reading the first image (.set uses container
-        index metadata only -- no pixel decode).
+        Detect one camera's image shape by reading its first image (.set uses
+        container index metadata only -- no pixel decode).
 
         Handles all image formats including .set, .im7, .cine, and standard formats.
         For container formats, passes the required camera and image parameters.
+
+        Parameters
+        ----------
+        camera_num : int
+            1-based camera number whose shape is detected.
 
         Returns
         -------
@@ -813,7 +833,6 @@ class Config:
         from .image_handling.load_images import read_image
 
         source_path = self.source_paths[0]
-        camera_num = self.camera_numbers[0]
         image_format = self.image_format
         img_type = self.image_type
 
@@ -1719,7 +1738,7 @@ class Config:
         memory usage and captures exit codes/reasons when workers crash.
         Useful for diagnosing worker failures on HPC clusters.
 
-        Default: True.
+        Default: False (matches the CLI template and the GUI fallback).
         """
         return self.data.get("processing", {}).get("dask_nanny", False)
 

@@ -467,8 +467,9 @@ def test_a_b_pair_of_rotated_streams_reads_at_output_shape(tmp_path):
 
 def test_config_and_time_resolved_read_use_output_shape(tmp_path):
     set_file = _two_streams_one_rotated(tmp_path)
-    cfg = make_set_config(tmp_path, set_file, camera_count=2, camera_numbers=[2])
-    assert cfg.image_shape == (6, 4)
+    cfg = make_set_config(tmp_path, set_file, camera_count=2, camera_numbers=[1, 2])
+    assert cfg.image_shape_for(1) == (4, 6)
+    assert cfg.image_shape_for(2) == (6, 4)
 
     pair = read_pair(1, set_file, 2, cfg)
     assert pair.shape == (2, 6, 4)
@@ -489,7 +490,7 @@ def test_config_shape_of_a_quarter_turn_needs_no_decode(tmp_path):
         transformers=[("rotate-cw-90", "T0", 0)],
     )
     cfg = make_set_config(tmp_path, set_file, camera_count=1, camera_numbers=[1])
-    assert cfg.image_shape == (6, 4)
+    assert cfg.image_shape_for(1) == (6, 4)
 
 
 def test_gui_stream_table_shows_output_shape(tmp_path):

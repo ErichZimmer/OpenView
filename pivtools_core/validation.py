@@ -506,15 +506,19 @@ def validate_memory_for_images(config: Config) -> str:
     Check if configured memory per worker is sufficient for the image
     resolution and batch size.
 
+    Cameras are processed one after another on the same workers, so the
+    largest selected camera sets the requirement.
+
     Returns:
         Warning message string, or empty string if memory is sufficient.
     """
     try:
-        image_shape = config.image_shape  # (H, W) — reads an actual image
+        # (H, W) per camera -- reads an actual image or container metadata
+        shapes = [config.image_shape_for(cam) for cam in config.camera_numbers]
     except Exception:
         return ""  # Can't check if we can't read images
 
-    h, w = image_shape
+    h, w = max(shapes, key=lambda hw: hw[0] * hw[1])
     batch_size = config.batch_size
     memory_limit = config.dask_memory_limit
     megapixels = (h * w) / 1e6

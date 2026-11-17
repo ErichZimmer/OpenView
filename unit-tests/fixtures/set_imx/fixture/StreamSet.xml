@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<StreamCfg>
+    <Version>2</Version>
+    <MinDavisVersion>10.2.0</MinDavisVersion>
+    <ReaderInfo Name="Images_16bit_8Bit" Type="Core.Set.Recording.FrameReader" FilePrefix="Frame0" FormatDescription="LaVision image stream format">
+        <ContentPurpose IsAssociatedToFrames="true" IsAssociatedToEntireImage="false" IsAssociatedToAllImages="false" StartFrame="0" EndFrame="0"/>
+    </ReaderInfo>
+</StreamCfg>

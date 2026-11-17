@@ -97,6 +97,7 @@ def perform_piv_and_save(
     config: Config,
     client: Client,
     output_path: Path,
+    camera: int,
     start_frame: int = 1,
     runs_to_save: Optional[List[int]] = None,
     vector_masks: Optional[List[np.ndarray]] = None,
@@ -134,6 +135,8 @@ def perform_piv_and_save(
         Dask distributed client.
     output_path : Path
         Directory where .mat files will be saved.
+    camera : int
+        1-based camera number whose image shape the correlator cache is built for.
     start_frame : int
         Starting frame number (1-based) for filenames.
     runs_to_save : Optional[List[int]]
@@ -150,7 +153,7 @@ def perform_piv_and_save(
     """
     # Use pre-scattered cache if provided, otherwise create and scatter
     if scattered_cache is None:
-        temp_correlator = make_correlator_backend(config)
+        temp_correlator = make_correlator_backend(config, camera=camera)
         correlator_cache = temp_correlator.get_cache_data()
         scattered_cache = client.scatter(correlator_cache, broadcast=True)
         logging.info("Broadcast correlator cache to all workers")

@@ -11,6 +11,13 @@ on another), not a format constant. A recording without a manifest, or whose
 manifest declares no FrameReader, is refused: streams are never guessed from
 file names.
 
+Frame span: a FrameReader may cover several frame positions of each image
+(``StartFrame..EndFrame``). DaVis 11.4 writes a double-frame camera's A and B
+into one stream file this way, with index header word 2 equal to the span. Each
+covered position becomes its own frame stream over the shared files: frame f of
+image b is entry ``b * span + (f - StartFrame)`` (container-unknowns REPORT §2
+H1-H3).
+
 Strictness: every .ims index header field and FrameReader attribute the reader
 does not decode must hold the value measured on real DaVis recordings, otherwise
 the recording is refused with the field and the value named (see
@@ -22,6 +29,11 @@ ids DaVis 10/11 can write is in ``_DECODER_BITS_PER_PX`` below; ``mono-10p``,
 recognised and refused by name -- their bit or channel order cannot be derived
 from the id alone, and a wrong guess yields a plausible-looking wrong image rather
 than a failure.
+
+Compression: the index header names a codec per stream (``_IMS_CODECS``). A
+"Zlib", "LZ4" or "IMX" entry is decompressed to the packed payload before the
+pixel decoder (``_decompress_entry``), and must come out at exactly the size the
+encoding and geometry need, or the read is refused naming the codec.
 
 Stream transformers: StreamSet.xml binds post-decode transformers to a stream,
 which DaVis applies on read (see ``_CORRECTIONS`` and ``_GEOMETRIES``). Three
@@ -49,6 +61,7 @@ Reference: LaVision DaVis 10.x .set recording format
 import struct
 import threading
 import xml.etree.ElementTree as ET
+import zlib
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -56,7 +69,10 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
+from lz4.block import LZ4BlockError
 
+from .davis_tokens import TokenStreamError, decode_imx_words
+from .im7_reader import _lz4_block_decompress
 from .out_buffer import check_out
 
 # ---------------------------------------------------------------------------
@@ -95,7 +111,11 @@ class StreamTransformer:
 
 @dataclass
 class IMSFrameInfo:
-    """Metadata for one frame stream (one {prefix}-0/1.ims pair plus sidecars).
+    """Metadata for one frame stream: one frame position of every image.
+
+    Usually one {prefix}-0/1.ims pair of its own. When the FrameReader spans
+    several frames, the streams of that span share the pair, and ``entries``
+    holds only this frame's entries, one per image.
 
     ``stored_shape`` is the index header's (H, W), in sensor coordinates: what
     the payload decodes to, before the transformers. Only the decoder and the
@@ -103,7 +123,7 @@ class IMSFrameInfo:
     cameras or reports a shape uses :attr:`shape`.
     """
 
-    frame_idx: int  # 0-based frame-stream index
+    frame_idx: int  # 0-based frame-stream index (the frame position in an image)
     data_path: Path  # {prefix}-1.ims
     index_path: Path  # {prefix}-0.ims
     decoder: str  # DaVis encoding id, e.g. "mono-12p", "raw-16-bit"
@@ -135,16 +155,22 @@ class IMSFrameInfo:
 
 @dataclass(frozen=True)
 class _StreamSource:
-    """Where one frame stream's files live, as StreamSet.xml declares them.
+    """Where one frame stream's entries live, as StreamSet.xml declares them.
 
-    ``frames_per_image`` is the FrameReader's ``EndFrame - StartFrame + 1``,
-    which the index header's word 2 must equal.
+    One per frame position of an image buffer. A FrameReader spanning
+    ``StartFrame..EndFrame`` stores that many frames of each buffer in one
+    stream file (DaVis 11.4 writes A and B this way), so it yields one source
+    per frame, all naming the same files. ``frames_per_image`` is the span
+    ``EndFrame - StartFrame + 1``, which the index header's word 2 must equal;
+    frame ``index`` of buffer ``b`` is entry ``b * frames_per_image +
+    span_offset`` of the file (container-unknowns REPORT §2 H1).
     """
 
     index: int
     prefix: str
     scale_prefix: Optional[str]
     frames_per_image: int
+    span_offset: int
 
 
 @dataclass
@@ -253,8 +279,10 @@ def _parse_ims_index(
 
     Raises:
         ValueError: If the file is shorter than the header, holds a partial
-            entry, or any checked header word or entry field differs from the
-            measured value. The message names the field and the value found.
+            entry, holds an entry count that is not a whole number of images at
+            ``frames_per_image`` frames each, or any checked header word or entry
+            field differs from the measured value. The message names the field
+            and the value found.
     """
     data = index_path.read_bytes()
     where = f"{index_path.name} in {index_path.parent}"
@@ -305,6 +333,16 @@ def _parse_ims_index(
         IMSIndexEntry(*_IMS_ENTRY.unpack_from(data, pos))
         for pos in range(_IMS_HEADER_BYTES, len(data), _IMS_ENTRY.size)
     ]
+    partial = len(entries) % frames_per_image
+    if partial:
+        # lvpyio counts ceil(entries / word2) images and fails reading the last
+        # one (container-unknowns REPORT §2 A1); no real file has a partial image.
+        raise ValueError(
+            f"{where} holds {len(entries)} entries at {frames_per_image} frames per "
+            f"image (header word {_IMS_WORD_FRAMES_PER_IMAGE}), so its last image "
+            f"has only {partial} of its {frames_per_image} frames. The recording "
+            f"is truncated; lvpyio fails reading that image too."
+        )
     foreign = [k for k, e in enumerate(entries) if e.file_no != _IMS_DATA_FILE_NO]
     if foreign:
         k = foreign[0]
@@ -544,12 +582,17 @@ def _load_stream_manifest(set_dir: Path) -> Optional[ET.Element]:
         raise ValueError(f"{stream_xml} is not valid XML: {exc}") from exc
 
 
-def _bound_stream_index(node: ET.Element, what: str, stream_xml: Path) -> int:
-    """The frame-stream index a ReaderInfo/Transformer node is bound to.
+def _bound_frame_span(node: ET.Element, what: str, stream_xml: Path) -> Tuple[int, int]:
+    """The frame positions ``(StartFrame, EndFrame)`` a manifest node is bound to.
 
-    ``ContentPurpose StartFrame``/``EndFrame`` carry the binding. Every failure
+    ``ContentPurpose StartFrame``/``EndFrame`` are frame positions within one
+    image buffer, inclusive (container-unknowns REPORT §2 H1). Every failure
     names the node and what is wrong: a bare ``int()`` traceback or a KeyError
     would be the only unnamed failure in this module.
+
+    Raises:
+        ValueError: If ContentPurpose or either bound is missing, a bound is not
+            an integer, StartFrame is negative, or EndFrame precedes StartFrame.
     """
     purpose = node.find("ContentPurpose")
     if purpose is None:
@@ -557,25 +600,51 @@ def _bound_stream_index(node: ET.Element, what: str, stream_xml: Path) -> int:
             f"{what} in {stream_xml} has no ContentPurpose, so the frame stream "
             f"it applies to is unknown."
         )
-    start, end = purpose.get("StartFrame"), purpose.get("EndFrame")
-    if start is None or end is None or start != end:
+    bounds = []
+    for attr in ("StartFrame", "EndFrame"):
+        text = purpose.get(attr)
+        try:
+            bounds.append(int(text))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"{what} in {stream_xml} gives {attr} '{text}', which is not a "
+                f"frame-stream number. The stream it belongs to cannot be "
+                f"determined."
+            ) from exc
+    start, end = bounds
+    if start < 0:
         raise ValueError(
-            f"{what} in {stream_xml} spans frames {start}..{end}. This reader only "
-            f"handles a declaration bound to exactly one frame stream."
+            f"{what} in {stream_xml} gives StartFrame {start}; frame positions "
+            f"start at 0."
         )
-    try:
-        index = int(start)
-    except ValueError as exc:
+    if end < start:
         raise ValueError(
-            f"{what} in {stream_xml} gives StartFrame '{start}', which is not a "
-            f"frame-stream number. The stream it belongs to cannot be determined."
-        ) from exc
-    if index < 0:
-        raise ValueError(
-            f"{what} in {stream_xml} gives StartFrame {index}; frame-stream "
-            f"indices start at 0."
+            f"{what} in {stream_xml} spans frames {start}..{end}: EndFrame comes "
+            f"before StartFrame, so it is bound to no frame."
         )
-    return index
+    return start, end
+
+
+def _bound_stream_index(node: ET.Element, what: str, stream_xml: Path) -> int:
+    """The one frame position a ScaleReader or Transformer node is bound to.
+
+    Only a FrameReader may span several frames (:func:`_streams_from_manifest`).
+    Every scale file and correction on the surveyed drives is bound to exactly
+    one frame, including on the two recordings whose FrameReader spans A and B
+    (each frame gets its own ``CameraScale{N}``), so a span here is refused
+    rather than applied to every frame on a guess.
+
+    Raises:
+        ValueError: Via :func:`_bound_frame_span`, or if the node spans frames.
+    """
+    start, end = _bound_frame_span(node, what, stream_xml)
+    if start != end:
+        raise ValueError(
+            f"{what} in {stream_xml} spans frames {start}..{end}. Scale files and "
+            f"corrections are read only when bound to exactly one frame; no real "
+            f"recording seen so far binds one to several."
+        )
+    return start
 
 
 def _check_frame_reader(node: ET.Element, prefix: str, stream_xml: Path) -> None:
@@ -612,17 +681,22 @@ def _check_frame_reader(node: ET.Element, prefix: str, stream_xml: Path) -> None
 def _streams_from_manifest(
     set_dir: Path, root: ET.Element, frame_readers: List[ET.Element]
 ) -> List[_StreamSource]:
-    """Frame streams as StreamSet.xml declares them, sorted by stream index.
+    """Frame streams as StreamSet.xml declares them, one per frame position.
+
+    A FrameReader spanning ``StartFrame..EndFrame`` is expanded into one stream
+    per frame it covers. The order is the frame position, not the declaration
+    order: lvpyio returns a reader declared second but bound to frame 0 as the
+    buffer's first frame (container-unknowns REPORT §2 H1).
 
     Callers locate a camera's stream positionally (``(camera-1) * fpc``), so the
-    declared indices must be exactly 0..N-1. DaVis can write a sparse manifest
+    covered positions must be exactly 0..N-1. DaVis can write a sparse manifest
     when a camera is disabled mid-session; a gap is reported as such rather than
     silently shifting every camera after it.
     """
     stream_xml = set_dir / "StreamSet.xml"
 
-    prefixes: dict = {}
-    spans: dict = {}
+    # frame position -> (prefix, StartFrame, EndFrame) of the reader covering it
+    owners: Dict[int, Tuple[str, int, int]] = {}
     for node in frame_readers:
         prefix = (node.get("FilePrefix") or "").strip()
         if not prefix:
@@ -631,18 +705,17 @@ def _streams_from_manifest(
                 f"files cannot be located."
             )
         _check_frame_reader(node, prefix, stream_xml)
-        index = _bound_stream_index(node, f"FrameReader '{prefix}'", stream_xml)
-        purpose = node.find("ContentPurpose")
-        spans[index] = int(purpose.get("EndFrame")) - index + 1
-        if index in prefixes:
-            raise ValueError(
-                f"{stream_xml.name} binds two image streams to frame stream "
-                f"{index}: '{prefixes[index]}' and '{prefix}'. Camera mapping is "
-                f"positional, so this cannot be resolved by choosing one."
-            )
-        prefixes[index] = prefix
+        start, end = _bound_frame_span(node, f"FrameReader '{prefix}'", stream_xml)
+        for frame in range(start, end + 1):
+            if frame in owners:
+                raise ValueError(
+                    f"{stream_xml.name} binds two image streams to frame stream "
+                    f"{frame}: '{owners[frame][0]}' and '{prefix}'. Camera mapping "
+                    f"is positional, so this cannot be resolved by choosing one."
+                )
+            owners[frame] = (prefix, start, end)
 
-    found = sorted(prefixes)
+    found = sorted(owners)
     if found != list(range(len(found))):
         raise ValueError(
             f"{stream_xml.name} declares StartFrames {found}; expected contiguous "
@@ -668,9 +741,10 @@ def _streams_from_manifest(
     return [
         _StreamSource(
             index=i,
-            prefix=prefixes[i],
+            prefix=owners[i][0],
             scale_prefix=scale_prefixes.get(i),
-            frames_per_image=spans[i],
+            frames_per_image=owners[i][2] - owners[i][1] + 1,
+            span_offset=i - owners[i][1],
         )
         for i in found
     ]
@@ -1069,22 +1143,17 @@ def _decode_raw8(raw: bytes, width: int, height: int) -> np.ndarray:
     return np.frombuffer(raw, dtype=np.uint8).astype(np.uint16).reshape(height, width)
 
 
-def _decode_pixels(raw: bytes, decoder: str, width: int, height: int) -> np.ndarray:
-    """Dispatch to the correct pixel decoder, refusing anything unproven.
+def _payload_bytes(decoder: str, width: int, height: int) -> int:
+    """Bytes of one packed frame in encoding ``decoder``, refusing unproven ids.
 
     Args:
-        raw: Pixel bytes for one entry, as stored in Frame{N}-1.ims.
         decoder: Encoding id from Frame{N}-decoder.xml.
         width: Frame width in pixels.
         height: Frame height in pixels.
 
-    Returns:
-        np.ndarray: (height, width) uint16 of raw sensor counts.
-
     Raises:
-        ValueError: If the id is unknown to DaVis 10/11, if it is a known DaVis
-            encoding this reader does not implement, or if the byte count does not
-            match the id's bit depth.
+        ValueError: If the id is unknown to DaVis 10/11, or if it is a known
+            DaVis encoding this reader does not implement.
     """
     implemented = ", ".join(_IMPLEMENTED_DECODERS)
 
@@ -1105,10 +1174,30 @@ def _decode_pixels(raw: bytes, decoder: str, width: int, height: int) -> np.ndar
             f"the PIVTOOLs maintainers. Re-exporting from DaVis as Raw 16 bit is a "
             f"workaround in the meantime."
         )
+    return (width * height * _DECODER_BITS_PER_PX[decoder]) // 8
 
-    bits = _DECODER_BITS_PER_PX[decoder]
-    expected = (width * height * bits) // 8
+
+def _decode_pixels(raw: bytes, decoder: str, width: int, height: int) -> np.ndarray:
+    """Dispatch to the correct pixel decoder, refusing anything unproven.
+
+    Args:
+        raw: Packed pixel bytes for one entry: the stored bytes of an
+            uncompressed entry, or the output of :func:`_decompress_entry`.
+        decoder: Encoding id from Frame{N}-decoder.xml.
+        width: Frame width in pixels.
+        height: Frame height in pixels.
+
+    Returns:
+        np.ndarray: (height, width) uint16 of raw sensor counts.
+
+    Raises:
+        ValueError: If the id is unknown to DaVis 10/11, if it is a known DaVis
+            encoding this reader does not implement, or if the byte count does not
+            match the id's bit depth.
+    """
+    expected = _payload_bytes(decoder, width, height)
     if len(raw) != expected:
+        bits = _DECODER_BITS_PER_PX[decoder]
         raise ValueError(
             f"Pixel data size mismatch for encoding '{decoder}': entry holds "
             f"{len(raw)} bytes but a {width}x{height} frame at {bits} bits/pixel "
@@ -1123,6 +1212,122 @@ def _decode_pixels(raw: bytes, decoder: str, width: int, height: int) -> np.ndar
     if decoder == "raw-16-bit":
         return _decode_raw16(raw, width, height)
     return _decode_raw8(raw, width, height)
+
+
+# ---------------------------------------------------------------------------
+# Entry decompression (index header bytes 24..55)
+# ---------------------------------------------------------------------------
+
+
+def _decompress_entry(
+    stored: bytes, frame_info: IMSFrameInfo, entry_idx: int, expected: int
+) -> Union[bytes, np.ndarray]:
+    """Turn one entry's stored bytes into the packed payload the pixel decoder reads.
+
+    The layouts are the ones lvpyio 1.3.1 opens (container-unknowns REPORT §2
+    C1, C2, C5): Zlib is one bare RFC 1950 stream, LZ4 one bare block with no
+    size prefix, and IMX the DaVis token grammar over the payload's
+    little-endian uint16 words. An uncompressed entry is returned as stored, and
+    :func:`_decode_pixels` checks its size.
+
+    Args:
+        stored: The entry's bytes as stored in {prefix}-1.ims.
+        frame_info: The stream, for its codec and for naming it in a refusal.
+        entry_idx: 0-based entry, for naming it in a refusal.
+        expected: Packed payload bytes the decoder needs (:func:`_payload_bytes`).
+
+    Returns:
+        The packed payload, ``expected`` bytes long.
+
+    Raises:
+        IOError: If the entry does not decompress, decompresses to a size other
+            than ``expected``, or holds bytes after its compressed data. The
+            message names the stream, the entry and the codec.
+    """
+    codec = frame_info.codec
+    if codec in _IMS_UNCOMPRESSED_CODECS:
+        return stored
+
+    where = (
+        f"Frame stream {frame_info.frame_idx} of {frame_info.data_path.parent.name}, "
+        f"entry_no {entry_idx + 1} ({frame_info.data_path.name}), stored with "
+        f"'{codec}' compression"
+    )
+    if codec == "Zlib":
+        return _decompress_zlib(stored, expected, where)
+    if codec == "LZ4":
+        try:
+            return _lz4_block_decompress(stored, expected)
+        except (OSError, LZ4BlockError) as exc:
+            raise IOError(
+                f"{where}: the LZ4 block does not decompress to the {expected} "
+                f"bytes the frame's geometry and encoding need ({exc})"
+            ) from exc
+    if codec == "IMX":
+        return _decompress_imx(stored, expected, where)
+    raise RuntimeError(f"{where}: no decompressor for codec {codec!r}")
+
+
+def _decompress_zlib(stored: bytes, expected: int, where: str) -> bytes:
+    """Decompress one bare zlib stream to exactly ``expected`` bytes.
+
+    ``max_length`` caps the output one byte past ``expected``, so an entry that
+    inflates to more is caught without inflating all of it.
+    """
+    inflater = zlib.decompressobj()
+    try:
+        out = inflater.decompress(stored, expected + 1)
+    except zlib.error as exc:
+        raise IOError(f"{where}: the zlib stream does not decompress ({exc})") from exc
+    if len(out) > expected:
+        raise IOError(
+            f"{where}: the zlib stream decompresses to more than the {expected} "
+            f"bytes the frame's geometry and encoding need"
+        )
+    if not inflater.eof:
+        raise IOError(
+            f"{where}: the zlib stream ends after {len(out)} of {expected} bytes, "
+            f"without its end marker. The entry is truncated."
+        )
+    if len(out) != expected:
+        raise IOError(
+            f"{where}: the zlib stream decompresses to {len(out)} bytes, but the "
+            f"frame's geometry and encoding need {expected}"
+        )
+    if inflater.unused_data:
+        raise IOError(
+            f"{where}: {len(inflater.unused_data)} bytes follow the end of the zlib "
+            f"stream inside the entry. lvpyio's reading of such an entry is "
+            f"unmeasured, so it is refused rather than read on a guess."
+        )
+    return out
+
+
+def _decompress_imx(stored: bytes, expected: int, where: str) -> np.ndarray:
+    """Decode one IMX entry to its ``expected`` packed payload bytes.
+
+    The tokens code the payload's little-endian uint16 words, so a payload with
+    an odd byte count has no measured layout (CU §2 C5: three layouts tried on
+    mono-10p, all failed in lvpyio) and is refused.
+
+    The token kernel takes only a writable uint8 array (one compiled
+    specialisation), so the stored bytes are copied into one.
+
+    Returns:
+        A little-endian byte view of the decoded words.
+    """
+    if expected % 2:
+        raise ValueError(
+            f"{where}: IMX codes the packed payload as 16-bit words, but this "
+            f"frame's geometry and encoding pack it into {expected} bytes, an odd "
+            f"count. How DaVis stores the last byte is unmeasured, so the entry is "
+            f"refused rather than read on a guess."
+        )
+    try:
+        words = decode_imx_words(np.frombuffer(stored, np.uint8).copy(), expected // 2)
+    except TokenStreamError as exc:
+        raise type(exc)(f"{where}: {exc}") from exc
+    return words.astype("<u2", copy=False).view(np.uint8)
 
 
 # ---------------------------------------------------------------------------
@@ -1179,6 +1384,9 @@ def _parse_set(set_path: Union[str, Path]) -> SetInfo:
 
     frames = []
     n_entries = None
+    # A spanning FrameReader yields one source per frame over the same files, so
+    # each index is parsed once: prefix -> (width, height, codec, entries).
+    parsed_indexes: Dict[str, Tuple[int, int, str, List[IMSIndexEntry]]] = {}
 
     for src in sources:
         index_path = set_dir / f"{src.prefix}-0.ims"
@@ -1203,9 +1411,13 @@ def _parse_set(set_path: Union[str, Path]) -> SetInfo:
                     f"from {set_dir}. Copy the complete companion folder."
                 )
 
-        stored_width, stored_height, codec, entries = _parse_ims_index(
-            index_path, src.prefix, src.frames_per_image
-        )
+        if src.prefix not in parsed_indexes:
+            parsed_indexes[src.prefix] = _parse_ims_index(
+                index_path, src.prefix, src.frames_per_image
+            )
+        stored_width, stored_height, codec, file_entries = parsed_indexes[src.prefix]
+        # Frame `index` of buffer b is entry b * span + span_offset of the file.
+        entries = file_entries[src.span_offset :: src.frames_per_image]
         n_ent = len(entries)
         decoder = _read_decoder(decoder_path)
         slope, offset, unit = _read_scales(scales_path)
@@ -1214,8 +1426,10 @@ def _parse_set(set_path: Union[str, Path]) -> SetInfo:
             n_entries = n_ent
         elif n_ent != n_entries:
             raise ValueError(
-                f"{src.prefix} has {n_ent} entries but {sources[0].prefix} "
-                f"has {n_entries}"
+                f"Frame stream {src.index} ('{src.prefix}') holds {n_ent} images "
+                f"but frame stream {sources[0].index} ('{sources[0].prefix}') holds "
+                f"{n_entries}. Every frame stream of a recording holds one frame of "
+                f"each image."
             )
 
         frames.append(
@@ -1330,15 +1544,10 @@ def _read_single_image(
     if entry_idx < 0 or entry_idx >= frame_info.n_entries:
         raise IndexError(f"Entry {entry_idx} out of range [0, {frame_info.n_entries})")
 
-    # Compressed bytes read as raw pixels decode without error whenever the
-    # stored size equals the raw size, so the codec is refused before the read.
-    if frame_info.codec not in _IMS_UNCOMPRESSED_CODECS:
-        raise ValueError(
-            f"Frame stream {frame_info.frame_idx} of "
-            f"{frame_info.data_path.parent.name} is stored with '{frame_info.codec}' "
-            f"compression ({frame_info.index_path.name}, header bytes 24..55), "
-            f"which PIVTOOLs does not decode."
-        )
+    # Refuse an unimplemented encoding before the read; its size is also what a
+    # compressed entry must decompress to.
+    stored_h, stored_w = frame_info.stored_shape
+    expected = _payload_bytes(frame_info.decoder, stored_w, stored_h)
 
     # Refuse before the 37 MB read, not after it. Per stream: a container whose
     # other streams carry only implemented transformers stays readable.
@@ -1366,9 +1575,9 @@ def _read_single_image(
             f"got {len(raw)}. File may be truncated."
         )
 
+    payload = _decompress_entry(raw, frame_info, entry_idx, expected)
     # Decoded in sensor coordinates: the index header's stored shape.
-    stored_h, stored_w = frame_info.stored_shape
-    img = _decode_pixels(raw, frame_info.decoder, stored_w, stored_h)
+    img = _decode_pixels(payload, frame_info.decoder, stored_w, stored_h)
     return _apply_transformers(img, frame_info)
 
 

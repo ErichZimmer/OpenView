@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FrameDecoder>
+    <id>mono-12p</id>
+    <label>Mono12p to 16 bit</label>
+    <minimalDaVisVersion>10.2.0</minimalDaVisVersion>
+</FrameDecoder>

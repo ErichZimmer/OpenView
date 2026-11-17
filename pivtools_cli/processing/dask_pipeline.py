@@ -317,9 +317,7 @@ def _median2d(frame: np.ndarray, size: Tuple[int, int], mode: str) -> np.ndarray
     if size[0] == size[1] and k in (3, 5) and frame.dtype == np.float32:
         r = k // 2
         if mode == "constant":
-            padded = cv2.copyMakeBorder(
-                frame, r, r, r, r, cv2.BORDER_CONSTANT, value=0
-            )
+            padded = cv2.copyMakeBorder(frame, r, r, r, r, cv2.BORDER_CONSTANT, value=0)
         else:
             padded = cv2.copyMakeBorder(frame, r, r, r, r, _CV2_BORDER[mode])
         return np.ascontiguousarray(cv2.medianBlur(padded, k)[r:-r, r:-r])
@@ -632,6 +630,7 @@ def create_filter_pipeline(
 def scatter_immutable_data(
     client: Client,
     config: Config,
+    camera: int,
     vector_masks: Optional[List[np.ndarray]] = None,
     pixel_mask: Optional[np.ndarray] = None,
     ensemble: bool = False,
@@ -645,6 +644,7 @@ def scatter_immutable_data(
     Args:
         client: Dask distributed client
         config: Configuration object
+        camera: 1-based camera number; the cache is built for its image shape
         vector_masks: Pre-computed vector masks per pass
         pixel_mask: Pixel mask for preprocessing
         ensemble: Whether this is ensemble mode
@@ -655,7 +655,7 @@ def scatter_immutable_data(
     logger.info("Scattering immutable data to workers...")
 
     # Create and scatter correlator cache
-    temp_correlator = make_correlator_backend(config, ensemble=ensemble)
+    temp_correlator = make_correlator_backend(config, camera=camera, ensemble=ensemble)
     correlator_cache = temp_correlator.get_cache_data()
     scattered_cache = client.scatter(correlator_cache, broadcast=True)
 
@@ -906,6 +906,8 @@ def correlate_worker_batches(
         )
 
     # Create ONE correlator for all batches
+    # The cache was built on the client for camera_num, so it carries that
+    # camera's image shape; the correlator takes the shape from it.
     correlator = EnsembleCorrelatorCPU(
         config,
         precomputed_cache=cache,

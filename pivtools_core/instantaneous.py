@@ -270,7 +270,7 @@ def run_instantaneous_piv(
     # 2. Scatter immutable data once
     logger.info("Scattering immutable data...")
     scattered = scatter_immutable_data(
-        client, config, vector_masks, pixel_mask, ensemble=False
+        client, config, camera_num, vector_masks, pixel_mask, ensemble=False
     )
 
     # 3. Optional gain-normalisation pre-pass (two extra reads of the data)
@@ -316,7 +316,7 @@ def run_instantaneous_piv(
 
     # Save coordinates
     logger.info("Saving coordinates...")
-    temp_correlator = make_correlator_backend(config)
+    temp_correlator = make_correlator_backend(config, camera=camera_num)
     correlator_cache = temp_correlator.get_cache_data()
     scattered_cache_for_coords = client.scatter(correlator_cache, broadcast=True)
 
@@ -426,7 +426,9 @@ def main():
                 vector_masks = None
                 if config.masking_enabled and mask is not None:
                     logger.info("Computing vector masks...")
-                    vector_masks = compute_vector_mask(mask, config, ensemble=False)
+                    vector_masks = compute_vector_mask(
+                        mask, config, camera_num, ensemble=False
+                    )
                     logger.info(f"  Vector masks: {len(vector_masks)} passes")
 
                 # Get output path
