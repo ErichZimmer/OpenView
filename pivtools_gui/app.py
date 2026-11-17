@@ -979,6 +979,7 @@ def validate_files():
                 "found": BLANK_SOURCE_MESSAGE,
                 "suggestions": [],
                 "streams": None,
+                "warnings": [],
             }
             for camera_num in camera_numbers
         }
@@ -1217,6 +1218,7 @@ def validate_files():
                 "found": validation["found"],
                 "suggestions": validation["suggestions"],
                 "streams": validation["streams"],
+                "warnings": validation["warnings"],
                 "notes": validation["notes"],
                 "pivraw_alignment": validation["pivraw_alignment"],
                 "sample_files": (
@@ -1236,6 +1238,7 @@ def validate_files():
                 "found": None,
                 "suggestions": [],
                 "streams": None,
+                "warnings": [],
             }
             overall_valid = False
 

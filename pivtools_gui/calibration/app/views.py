@@ -946,6 +946,7 @@ def _no_diagnosis(error: str) -> Dict[str, Any]:
         "found": None,
         "suggestions": [],
         "streams": None,
+        "warnings": [],
     }
 
 

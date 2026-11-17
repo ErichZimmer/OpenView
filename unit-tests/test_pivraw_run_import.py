@@ -185,6 +185,11 @@ def test_an_existing_config_and_a_different_rig_dt_are_reported_together(tmp_pat
     assert "0.0005" in conflicts[1] and "0.0002" in conflicts[1]
     assert str(excinfo.value).endswith("Use --force to replace them.")
     assert config_path.read_text() == "paths: {}\n"
+    assert _rig_dt(project / "calibration") == 5e-4
+
+    import_run(run, config_path, force=True)
+    assert Config(path=str(config_path)).image_type == "pivraw"
+    assert _rig_dt(project / "calibration") == 2e-4
 
 
 def test_cameras_that_disagree_on_dt_are_refused(tmp_path):
