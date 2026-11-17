@@ -96,6 +96,70 @@ def test_update_config_saves_and_carries_the_refusal(tmp_path, monkeypatch):
     assert yaml.safe_load(open("config.yaml"))["images"]["num_images"] == 6
 
 
+@pytest.mark.parametrize("mode", ["instantaneous", "ensemble"])
+def test_run_piv_refuses_the_run_and_starts_no_job(tmp_path, monkeypatch, mode):
+    """A null pair count in the config response must never launch a job."""
+    started = []
+
+    class _Runner:
+        def start_piv_job(self, **kwargs):
+            started.append(kwargs)
+            return {"status": "started", "job_id": "x"}
+
+    monkeypatch.setattr(A, "get_runner", lambda: _Runner())
+    client = _client(tmp_path, monkeypatch)
+    r = client.post("/backend/run_piv", json={"mode": mode})
+    assert r.status_code == 400
+    assert REFUSAL in r.get_json()["error"]
+    assert started == []
+
+
+def test_run_piv_starts_a_clean_run(tmp_path, monkeypatch):
+    started = []
+
+    class _Runner:
+        def start_piv_job(self, **kwargs):
+            started.append(kwargs)
+            return {"status": "started", "job_id": "x"}
+
+    monkeypatch.setattr(A, "get_runner", lambda: _Runner())
+    client = _client(tmp_path, monkeypatch, case="df_2cam_clean")
+    r = client.post("/backend/run_piv", json={"mode": "instantaneous"})
+    assert r.status_code == 200
+    assert len(started) == 1
+
+
+@pytest.mark.parametrize(
+    "url, body",
+    [
+        ("/backend/merge_vectors/merge_all", {"base_path_idx": 0}),
+        ("/backend/statistics/calculate", {"cameras": [1]}),
+        ("/backend/video/start_batch", {}),
+        (
+            "/backend/plot/transform_all_frames",
+            {"camera": 1, "frame": 1},
+        ),
+    ],
+)
+def test_vector_job_starts_refuse_the_run_as_400(tmp_path, monkeypatch, url, body):
+    """Job routes on other blueprints read the shared config singleton, so the
+    real app is used with that singleton pointed at the refused run."""
+    import pivtools_core.config as config_module
+
+    _client(tmp_path, monkeypatch)  # builds the run and chdirs to its config
+    monkeypatch.setattr(config_module, "_CONFIG", None)
+    results = tmp_path / "out"
+    results.mkdir()
+    body = dict(body)
+    if url.endswith("calculate"):
+        body["base_paths"] = [str(results)]
+    if url.endswith("transform_all_frames"):
+        body["base_path"] = str(results)
+    r = A.app.test_client().post(url, json=body)
+    assert r.status_code == 400
+    assert REFUSAL in r.get_json()["error"]
+
+
 def test_config_of_a_clean_run_has_its_pairs_and_no_error(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch, case="df_2cam_clean")
     images = client.get("/backend/config").get_json()["images"]

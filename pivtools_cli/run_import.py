@@ -74,6 +74,8 @@ class RunImport:
         calibration_source: The config's calibration source.
         settings_path: The calibration settings holding ``rig.dt``.
         rig_dt: ``rig.dt`` in seconds.
+        settings_created: The settings file did not exist; its image block was
+            created from the acquisition app's calibration layout.
         warnings: Validation warnings (skipped pairs, alignment notes).
     """
 
@@ -85,6 +87,7 @@ class RunImport:
     calibration_source: Path
     settings_path: Path
     rig_dt: float
+    settings_created: bool
     warnings: Tuple[str, ...]
 
     def summary(self) -> str:
@@ -96,6 +99,14 @@ class RunImport:
             f"  calibration source {self.calibration_source}",
             f"  rig.dt {self.rig_dt!r} s in {self.settings_path}",
         ]
+        if self.settings_created:
+            lines.append(
+                f"  created {self.settings_path.name} with image.image_format "
+                f"{APP_CALIBRATION_IMAGE_FORMAT} and image.image_type "
+                f"{APP_CALIBRATION_IMAGE_TYPE}, from the acquisition app's "
+                "calibration layout (calibration/Cam<k>/%05d.tif); check them "
+                "if the calibration images came from elsewhere"
+            )
         lines.extend(f"  warning: {w}" for w in self.warnings)
         return "\n".join(lines)
 
@@ -294,7 +305,8 @@ def import_run(
     cfg, warnings = _write_validated(config_path, data)
 
     partial: Dict[str, Any] = {"rig": {"dt": rig_dt}}
-    if not settings_file.exists():
+    settings_created = not settings_file.exists()
+    if settings_created:
         partial["image"] = {
             "image_format": APP_CALIBRATION_IMAGE_FORMAT,
             "image_type": APP_CALIBRATION_IMAGE_TYPE,
@@ -310,5 +322,6 @@ def import_run(
         calibration_source=calibration_source,
         settings_path=settings_file,
         rig_dt=rig_dt,
+        settings_created=settings_created,
         warnings=warnings,
     )

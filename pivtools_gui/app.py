@@ -1683,6 +1683,13 @@ def run_piv():
     active_paths = data.get("active_paths")  # List of path indices to process
     mode = data.get("mode", "instantaneous")  # PIV mode: instantaneous or ensemble
 
+    # A .pivraw run is paired by trigger before any job starts: a run the reader
+    # refuses raises PivrawError here (400 with its message, errors.py), so the
+    # null pair count /config reports can never launch a job.
+    cfg = get_config()
+    if cfg.image_type == "pivraw":
+        cfg.num_frame_pairs
+
     # Get the runner and start the job
     runner = get_runner()
     result = runner.start_piv_job(

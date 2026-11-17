@@ -116,13 +116,21 @@ def test_new_calibration_settings_load_with_the_app_layout(tmp_path):
     assert settings["image"]["image_type"] == "standard"
 
 
+def test_the_summary_says_the_image_block_came_from_the_app_layout(tmp_path):
+    _project, run = _project_run(tmp_path, "df_2cam_clean")
+    summary = import_run(run, tmp_path / "config.yaml").summary()
+    assert "created" in summary and "acquisition app's calibration layout" in summary
+    assert "%05d.tif" in summary and "standard" in summary
+
+
 def test_existing_calibration_settings_keep_their_image_block(tmp_path):
     project, run = _project_run(tmp_path, "df_2cam_clean")
     source = project / "calibration"
     cs.save_settings(
         source, {"image": {"image_format": "cal_%03d.tif", "image_type": "standard"}}
     )
-    import_run(run, tmp_path / "config.yaml")
+    result = import_run(run, tmp_path / "config.yaml")
+    assert "calibration layout" not in result.summary()
     settings = cs.load_settings(source)
     assert settings["image"]["image_format"] == "cal_%03d.tif"
     assert settings["rig"]["dt"] == 2e-4
