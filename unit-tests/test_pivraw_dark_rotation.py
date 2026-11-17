@@ -40,6 +40,7 @@ from fixtures.pivraw import (  # noqa: E402
     DROP,
     contract_cases,
     copy_case,
+    edit_sidecar,
     expected_frames,
     write_piv_config,
 )
@@ -51,10 +52,13 @@ from pivtools_core.image_handling.path_utils import (  # noqa: E402
 from pivtools_core.image_handling.readers import pivraw_reader  # noqa: E402
 from pivtools_core.image_handling.readers.pivraw_reader import (  # noqa: E402
     PivrawError,
+    align_pivraw_run,
+    clear_alignment_cache,
     clear_header_cache,
     get_pivraw_image_shape,
     pivraw_dark_note,
     read_pivraw_pair,
+    read_pivraw_run_file,
     read_pivraw_single,
 )
 from pivtools_core.validation import validate_config  # noqa: E402
@@ -66,8 +70,10 @@ DARK_CASES = [case for case, spec in CASES.items() if "dark" in spec]
 @pytest.fixture(autouse=True)
 def _clean_header_cache():
     clear_header_cache()
+    clear_alignment_cache()
     yield
     clear_header_cache()
+    clear_alignment_cache()
 
 
 def _dark_subtracted(case: str, camera: int) -> np.ndarray:
@@ -182,7 +188,16 @@ def _dark_folder_missing(run: Path) -> None:
     shutil.rmtree(run / "dark")
 
 
+def _dark_of_another_camera(run: Path) -> None:
+    """Same geometry and slot, but the dark sidecar names another camera."""
+    edit_sidecar(run / "dark", 1, camera_serial="SIM9")
+
+
 _DARK_REFUSALS = {
+    "another camera's dark": (
+        _dark_of_another_camera,
+        r"does not match camera 1 .*camera_serial 'SIM9' \(camera 'SIM1'\)",
+    ),
     "foreign geometry": (
         _foreign_geometry,
         r"does not match camera 1 .*width 8 \(camera 16\).*pixel_format "
@@ -435,6 +450,68 @@ def test_duplicate_slot_is_refused(tmp_path):
     path.write_text(yaml.safe_dump(data), encoding="utf-8")
     with pytest.raises(PivrawError, match=r"slot 1 is listed twice"):
         get_pivraw_image_shape(run / "Camera1.pivraw")
+
+
+# ---------------------------------------------------------------------------
+# One run.yaml loader for the alignment (P2) and the decode path (P3)
+# ---------------------------------------------------------------------------
+
+
+def test_run_file_carries_what_alignment_and_decode_need():
+    run = read_pivraw_run_file(CONTRACT_DIR / "df_2cam_dark")
+    assert run.path == CONTRACT_DIR / "df_2cam_dark" / "run.yaml"
+    assert run.requested_triggers == 2 and run.trigger == "daq"
+    assert run.dark_id == "dark_20261117_120000"
+    assert run.view_rotations == {1: "none", 2: "none"}
+
+
+def test_run_yaml_is_parsed_once_for_alignment_and_decode(tmp_path, monkeypatch):
+    run = copy_case(tmp_path, "df_2cam_dark")
+    calls = []
+    real = pivraw_reader.yaml.safe_load
+
+    def counting(text):
+        calls.append(1)
+        return real(text)
+
+    monkeypatch.setattr(pivraw_reader.yaml, "safe_load", counting)
+    align_pivraw_run(run, 1, 2)
+    read_pivraw_single(run / "Camera1.pivraw", 1)
+    read_pivraw_single(run / "Camera2.pivraw", 2)
+    assert len(calls) == 1
+
+
+def test_alignment_applies_the_decode_rules_for_run_yaml(tmp_path):
+    run = copy_case(tmp_path, "df_2cam_dark")
+    _edit_run_yaml(run, dark=DROP)
+    with pytest.raises(PivrawError, match=r"no 'dark' key"):
+        align_pivraw_run(run, 1, 2)
+
+
+@pytest.mark.parametrize(
+    "changes, message",
+    [
+        ({"trigger": "manual"}, r"trigger must be one of \('software', 'daq'\)"),
+        ({"trigger": DROP}, r"trigger is missing"),
+    ],
+)
+def test_decode_applies_the_alignment_rules_for_run_yaml(tmp_path, changes, message):
+    run = copy_case(tmp_path, "df_2cam_dark")
+    _edit_run_yaml(run, **changes)
+    with pytest.raises(PivrawError, match=message):
+        read_pivraw_single(run / "Camera1.pivraw", 1)
+
+
+def test_decode_refuses_a_bad_record_n(tmp_path):
+    run = copy_case(tmp_path, "df_2cam_dark")
+    path = run / "run.yaml"
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    data["config"]["record"]["n"] = 0
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    with pytest.raises(
+        PivrawError, match=r"config.record.n must be a positive integer"
+    ):
+        read_pivraw_single(run / "Camera1.pivraw", 1)
 
 
 def test_missing_run_yaml_is_refused(tmp_path):
