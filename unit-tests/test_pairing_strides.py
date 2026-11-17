@@ -211,3 +211,62 @@ def test_pair_count_honours_pair_stride(tmp_path, strides, pairs):
     cfg = _config(tmp_path, tmp_path, images)
 
     assert cfg.num_frame_pairs == pairs
+
+
+# The GUI routes. A refused stride is a config the user fixes, like a .pivraw run
+# the reader refuses: the config routes still answer (the GUI loads the config on
+# mount and could not reach the strides otherwise) with the refusal in
+# images.pairing_error, and the routes that read pairs answer 400 with its text.
+CINE_PRE_PAIRED_REFUSAL = "images.frame_stride is 0 (pre-paired), but a .cine"
+
+
+def _gui_client(tmp_path, monkeypatch, cfg):
+    from flask import Flask
+
+    from pivtools_gui import app as gui_app
+    from pivtools_gui.errors import register_json_error_handlers
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(gui_app, "get_config", lambda: cfg)
+    monkeypatch.setattr(gui_app, "reload_config", lambda: None)
+    app = Flask(__name__)
+    app.register_blueprint(gui_app.api_bp)
+    register_json_error_handlers(app)
+    return app.test_client()
+
+
+def test_config_route_loads_and_carries_the_stride_refusal(
+    tmp_path, monkeypatch, cine_stand_in
+):
+    client = _gui_client(
+        tmp_path, monkeypatch, _cine_config(tmp_path, _strides(1, 0, 1))
+    )
+
+    r = client.get("/backend/config")
+
+    assert r.status_code == 200
+    images = r.get_json()["images"]
+    assert images["num_frame_pairs"] is None
+    assert images["per_loop_frame_pairs"] is None
+    assert CINE_PRE_PAIRED_REFUSAL in images["pairing_error"]
+
+
+@pytest.mark.parametrize(
+    "route",
+    [
+        "/backend/preview_frame_pairs?count=3",
+        "/backend/get_frame_pair?camera=1&idx=1&source_path_idx=0",
+    ],
+    ids=["pair preview", "frame pair"],
+)
+def test_pair_routes_answer_the_stride_refusal_as_400(
+    tmp_path, monkeypatch, cine_stand_in, route
+):
+    client = _gui_client(
+        tmp_path, monkeypatch, _cine_config(tmp_path, _strides(1, 0, 1))
+    )
+
+    r = client.get(route)
+
+    assert r.status_code == 400
+    assert CINE_PRE_PAIRED_REFUSAL in r.get_json()["error"]

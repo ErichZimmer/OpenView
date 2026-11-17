@@ -132,6 +132,16 @@ class CalibrationSourceError(ValueError):
     """
 
 
+class PairingStrideError(ValueError):
+    """The pairing strides cannot be read from this image type: the user fixes the config.
+
+    Raised by :meth:`Config.get_frame_pair_indices` and the pair counts, naming
+    the key and the fix. The GUI treats it as it treats a ``.pivraw`` run the
+    reader refuses: the config routes carry it in ``images.pairing_error`` and
+    the routes that read pairs answer HTTP 400 with its message.
+    """
+
+
 # Image types read by PIVTOOLs' own readers. Every refusal they make is a
 # ValueError (PivrawError, SetConfigError and SetPairingError,
 # CameraIdentityError, AttrFormatError, a blocked camera, the strict-header
@@ -653,7 +663,7 @@ class Config:
 
         Raises
         ------
-        ValueError
+        PairingStrideError
             Every other image type: the strides cannot be read from this image
             type (:meth:`_require_strides_suit_source`).
         PivrawError
@@ -712,7 +722,7 @@ class Config:
 
         Raises
         ------
-        ValueError
+        PairingStrideError
             ``frame_stride`` is negative, ``pair_stride`` is below 1 (every pair
             would read the same or earlier frames), ``start_index`` is below 1
             on a ``.set`` or ``.cine``, or ``frame_stride`` is 0 on a ``.cine``
@@ -721,24 +731,24 @@ class Config:
         """
         fs, ps, si = self.frame_stride, self.pair_stride, self.start_index
         if fs < 0:
-            raise ValueError(
+            raise PairingStrideError(
                 f"images.frame_stride is {fs}; it is the frames from A to B of "
                 "a pair, so it must be 0 (pre-paired) or more."
             )
         if ps < 1:
-            raise ValueError(
+            raise PairingStrideError(
                 f"images.pair_stride is {ps}; it is the frames from one pair's "
                 "A to the next pair's A, so it must be 1 or more."
             )
         ext = self._ONE_BASED_IMAGE_TYPES.get(self.image_type)
         if ext is not None and si < 1:
-            raise ValueError(
+            raise PairingStrideError(
                 f"images.start_index is {si}, but a {ext} numbers its frames "
                 "from 1, so there is no frame 0. Set start_index to 1 (or to "
                 "the first frame to process)."
             )
         if self.image_type == "cine" and fs == 0:
-            raise ValueError(
+            raise PairingStrideError(
                 "images.frame_stride is 0 (pre-paired), but a .cine holds one "
                 "frame per image, so there is no A+B entry. Set frame_stride 1 "
                 "(pair_stride 1 overlapping, 2 for consecutive pairs)."
@@ -944,8 +954,9 @@ class Config:
                 pair 1 → (0, 1), pair 2 → (1, 2)
 
         Raises:
-            ValueError: ``.pivraw`` without ``camera``, or strides the image
-                type cannot be read with (:meth:`_require_strides_suit_source`).
+            ValueError: ``.pivraw`` without ``camera``.
+            PairingStrideError: Strides the image type cannot be read with
+                (:meth:`_require_strides_suit_source`).
             PivrawError: ``.pivraw`` whose run cannot be aligned, or a pair or
                 camera outside it.
         """
