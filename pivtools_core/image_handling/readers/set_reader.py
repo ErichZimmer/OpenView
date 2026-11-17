@@ -646,7 +646,7 @@ def _decode_mono10p(raw: bytes, width: int, height: int) -> np.ndarray:
 
 
 def _decode_mono12p(raw: bytes, width: int, height: int) -> np.ndarray:
-    """Decode Mono12Packed (GigE Vision) bytes to uint16 array.
+    """Decode PFNC Mono12p (LSB-first) bytes to a uint16 array.
 
     Packing: 2 pixels in 3 bytes.
         pixel0 = byte0 | (byte1 & 0x0F) << 8

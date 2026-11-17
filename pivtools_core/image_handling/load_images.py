@@ -54,13 +54,15 @@ def read_single_frame(
     - lavision_set: All cameras/frames in one .set container
     - lavision_im7: Per-frame .im7 files (or multi-frame)
     - cine: Phantom .cine video containers
+    - pivraw: PIVTOOLS Acquisition run containers (one .pivraw per camera)
     - standard: Individual image files (.tif, .png, .jpg, etc.)
 
     Every container dispatches to that format's genuine single-frame reader
-    (``read_set_frame`` / ``read_cine_single`` / ``read_lavision_im7`` with
-    ``frames=1``). Asking a *pair* reader for one frame via a keyword used to be
-    the mechanism here, and it silently failed in two different ways: the .cine
-    pair reader accepted ``frames=1`` and ignored it (returning a (2,H,W) pair
+    (``read_set_frame`` / ``read_cine_single`` / ``read_pivraw_single`` /
+    ``read_lavision_im7`` with ``frames=1``). Asking a *pair* reader for one
+    frame via a keyword used to be the mechanism here, and it silently failed in
+    two different ways: the .cine pair reader accepted ``frames=1`` and ignored
+    it (returning a (2,H,W) pair
     that later hit cv2.cvtColor as if it were a colour image), while the .set
     pair reader demanded an ``im_no_b`` no caller supplied and raised. There is
     consequently no shape-guessing left in this function — each branch returns
@@ -70,7 +72,8 @@ def read_single_frame(
         file_path: Path to the image file or container
         camera: Camera number (1-based)
         frame_idx: Frame index within the file/container (1-based)
-        image_type: One of "lavision_set", "lavision_im7", "cine", "standard"
+        image_type: One of "lavision_set", "lavision_im7", "cine", "pivraw",
+            "standard"
         frames_per_camera: How many frames each camera occupies in a
                       multi-camera .im7 buffer, used to locate this camera's
                       slice as ``(camera-1) * frames_per_camera`` (2 for
@@ -88,7 +91,7 @@ def read_single_frame(
     """
     # Container formats need an existence check upfront (one file, many frames).
     # Standard formats skip this — the reader raises on missing files directly.
-    if image_type in ("lavision_set", "lavision_im7", "cine"):
+    if image_type in ("lavision_set", "lavision_im7", "cine", "pivraw"):
         file_path = Path(file_path)
         if not file_path.exists():
             raise FileNotFoundError(f"Image file not found: {file_path}")
@@ -131,6 +134,13 @@ def read_single_frame(
         from .readers.cine_reader import read_cine_single
 
         return read_cine_single(str(file_path), idx=frame_idx)
+
+    elif image_type == "pivraw":
+        # .pivraw run container: ``frame_idx`` is the 1-based frame number in
+        # the file (A and B frames of a double-frame run counted separately).
+        from .readers.pivraw_reader import read_pivraw_single
+
+        return read_pivraw_single(file_path, idx=frame_idx)
 
     else:
         # Standard formats (.tif, .png, .jpg, etc.)
@@ -245,7 +255,7 @@ def read_pair(
        - Organized as: source_dir/B00001.im7 contains all cameras for time instance 1
        - No camera subdirectories
 
-    3. Single-camera video containers (.cine):
+    3. Single-camera video containers (.cine, .pivraw):
        - One video file per camera in source directory
        - Organized as: source_dir/Camera1.cine, source_dir/Camera2.cine
        - Pattern uses %d for camera number (not frame index)
@@ -391,6 +401,20 @@ def read_pair(
         # For pairs, read 2 consecutive frames starting at frame_a_idx
         return _written(read_cine_pair(str(cine_path), idx=frame_a_idx, out=out), out)
 
+    elif image_type == "pivraw":
+        from .readers.pivraw_reader import read_pivraw_pair
+
+        # .pivraw: one run container per camera. Both pairing indices are passed:
+        # the reader honours frame B rather than assuming A + 1, and refuses a
+        # double-frame run read with anything but its recorded (A, B) pairs.
+        pivraw_path = camera_path / (format_str % camera)
+        return _written(
+            read_pivraw_pair(
+                pivraw_path, idx=frame_a_idx, frame_b_idx=frame_b_idx, out=out
+            ),
+            out,
+        )
+
     else:
         # Standard formats: separate files per frame
         if len(config.image_format) == 2:
@@ -493,7 +517,8 @@ def load_images(
 
     Multi-loop support: When config.num_loops > 1, creates batches per loop and
     concatenates them. Each batch reads from a single source (file or directory)
-    using LOCAL pair indices. Works with all image types (.set, .cine, standard).
+    using LOCAL pair indices. Works with all image types (.set, .cine, .pivraw,
+    standard).
     The result is a single dask array spanning all loops.
 
     Args:
@@ -520,8 +545,8 @@ def load_images(
     def _camera_path_from_source(base_source: Path) -> Path:
         if image_type == "lavision_set":
             return base_source  # .set file IS the camera_path
-        elif image_type == "cine":
-            return base_source  # directory containing Camera%d.cine
+        elif image_type in ("cine", "pivraw"):
+            return base_source  # directory containing Camera%d.cine / .pivraw
         elif image_type == "lavision_im7":
             if config.images_use_camera_subfolders:
                 folder = config.get_camera_folder(camera)

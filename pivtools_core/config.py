@@ -404,7 +404,8 @@ class Config:
     @property
     def image_type(self) -> str:
         """
-        Return image type: 'standard', 'cine', 'lavision_set', 'lavision_im7'.
+        Return image type: 'standard', 'cine', 'pivraw', 'lavision_set',
+        'lavision_im7'.
 
         If explicitly set in config, returns that value.
         Otherwise, auto-detects from image_format pattern.
@@ -412,7 +413,7 @@ class Config:
         Returns
         -------
         str
-            One of: 'standard', 'cine', 'lavision_set', 'lavision_im7'
+            One of: 'standard', 'cine', 'pivraw', 'lavision_set', 'lavision_im7'
         """
         explicit_type = self.data.get("images", {}).get("image_type")
         if explicit_type:
@@ -424,6 +425,8 @@ class Config:
         fmt = self.image_format[0].lower()
         if ".cine" in fmt:
             return "cine"
+        elif ".pivraw" in fmt:
+            return "pivraw"
         elif ".set" in fmt or ".ims" in fmt:
             # A bare .ims is one DaVis stream inside a .set recording's data folder.
             return "lavision_set"
@@ -438,6 +441,7 @@ class Config:
 
         Container formats (one file holds many timestamps):
         - cine: Single-camera video container (one file per camera)
+        - pivraw: PIVTOOLS Acquisition run container (one file per camera)
         - lavision_set: Multi-camera container (all cameras in one file)
 
         NOT containers (one file per timestamp):
@@ -452,17 +456,17 @@ class Config:
         if image_type == "lavision_im7" and "%" in image_format:
             return False
 
-        # Only .set and .cine are true multi-timestamp containers
-        return image_type in ("cine", "lavision_set")
+        # Only .set, .cine and .pivraw are true multi-timestamp containers
+        return image_type in ("cine", "pivraw", "lavision_set")
 
     @property
     def is_single_camera_container(self) -> bool:
-        """Return True if container has one camera per file (like .cine).
+        """Return True if container has one camera per file (.cine, .pivraw).
 
-        .cine files contain frames from a single camera. Multi-camera setups
-        have separate .cine files per camera (e.g., Camera1.cine, Camera2.cine).
+        .cine and .pivraw files contain frames from a single camera. Multi-camera
+        setups have one file per camera (e.g., Camera1.cine, Camera2.cine).
         """
-        return self.image_type == "cine"
+        return self.image_type in ("cine", "pivraw")
 
     @property
     def is_multi_camera_container(self) -> bool:
@@ -840,10 +844,10 @@ class Config:
             file_path = camera_path
         elif img_type == "lavision_im7":
             file_path = camera_path / (format_str % start_idx)
-        elif img_type == "cine":
-            # CINE: format uses %d for camera number
-            cine_filename = format_str % camera_num
-            file_path = camera_path / cine_filename
+        elif img_type in ("cine", "pivraw"):
+            # CINE / PIVRAW: format uses %d for camera number
+            container_filename = format_str % camera_num
+            file_path = camera_path / container_filename
         else:
             # Standard files - use first format for shape detection
             file_path = camera_path / (format_str % start_idx)
@@ -908,6 +912,16 @@ class Config:
                             f"requires frame {(camera_num - 1) * fpc}, but "
                             f"{file_path.name} holds only {size_f}."
                         )
+                logging.debug(f"Detected image shape: {shape}")
+                return shape
+            elif img_type == "pivraw":
+                # Shape comes from the sidecar (BayerRG8 halves it) -- no
+                # pixel decode, and no pairing assumption.
+                from .image_handling.readers.pivraw_reader import (
+                    get_pivraw_image_shape,
+                )
+
+                shape = get_pivraw_image_shape(file_path)
                 logging.debug(f"Detected image shape: {shape}")
                 return shape
             elif img_type == "cine":
@@ -2983,7 +2997,7 @@ class Config:
 
         Delegates to ``path_utils.camera_subfolder_name``, the one rule shared
         with calibration images (``path_utils.calibration_camera_folder``):
-        containers (.set, .cine) never use a subfolder, IM7 uses one only when
+        containers (.set, .cine, .pivraw) never use a subfolder, IM7 uses one only when
         ``images.use_camera_subfolders`` is True, a single-camera setup always
         resolves at the source root, and otherwise an explicit
         ``paths.camera_subfolders`` entry wins, else ``Cam{N}``.

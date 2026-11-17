@@ -77,17 +77,20 @@ FAMILY_EXTS: Dict[str, Tuple[str, ...]] = {
     "ims": (".ims",),
     "im7": (".im7",),
     "cine": (".cine",),
+    "pivraw": (".pivraw",),
     "raster": RASTER_EXTENSIONS,  # exactly what the validator globs
 }
 TYPE_FAMILY: Dict[str, str] = {
     "lavision_set": "set",
     "lavision_im7": "im7",
     "cine": "cine",
+    "pivraw": "pivraw",
     "standard": "raster",
 }
 IMAGE_TYPE_LABELS: Dict[str, str] = {
     "standard": "Standard (TIFF/PNG/JPG)",
     "cine": "Phantom CINE",
+    "pivraw": "PIVTOOLS Acquisition (.pivraw)",
     "lavision_set": "LaVision recording (.set + .ims folder)",
     "lavision_im7": "LaVision images (.im7)",
 }
@@ -639,7 +642,7 @@ def loaded_sentence(ctx: DiagnosisContext, result: Mapping[str, Any]) -> Optiona
     fmt = result.get("format_detected")
     if not (result.get("valid") and fmt and "found_count" in result):
         return None
-    unit = {"set": "entries", "cine": "frames"}.get(fmt, f".{fmt}")
+    unit = {"set": "entries", "cine": "frames", "pivraw": "frames"}.get(fmt, f".{fmt}")
     head = _pass_head(ctx.camera_count, result["found_count"], unit)
     size = result.get("image_size")
     if size is None:
@@ -927,10 +930,41 @@ def _streams_suggestion(
 
 # Image family -> image type it selects (inverse of TYPE_FAMILY).
 _FAMILY_TYPE: Dict[str, str] = {family: t for t, family in TYPE_FAMILY.items()}
-# Families a camera subfolder can hold. Container formats (.set, .cine) never use one.
+# Families a camera subfolder can hold. Container formats (.set, .cine, .pivraw)
+# never use one.
 _FOLDER_FAMILIES = ("raster", "im7")
 # Entries read from the nearest existing ancestor when looking for a path_case match.
 _CASE_SCAN_MAX = SCAN_MAX_ENTRIES * SCAN_HARD_STOP_FACTOR
+
+
+def _per_camera_container_pattern(
+    names: Sequence[str],
+    folder: Path,
+    camera_count: int,
+    camera_numbers: Sequence[int],
+    suffix: str,
+) -> Optional[str]:
+    """Filename pattern for one-file-per-camera containers ending in ``suffix``.
+
+    ``resolve_file_path`` formats a ``%`` pattern with the camera number and reads a
+    pattern without ``%`` as one literal file for every camera. So several names that
+    differ by a digit run give a ``%d`` pattern, accepted only when the file it names
+    exists for every selected camera. One file is suggested only for a single
+    camera. Anything else gives None (never a literal for ``camera_count > 1``).
+    """
+    files = sorted(n for n in names if n.lower().endswith(suffix))
+    if len(files) == 1 and camera_count == 1:
+        return files[0]
+    if len(files) < 2:
+        return None
+    pattern = _suggest_pattern(files).pattern
+    if pattern is None:
+        return None
+    try:
+        paths = [folder / (pattern % camera) for camera in camera_numbers]
+    except (TypeError, ValueError):  # a literal ``%`` in the file name
+        return None
+    return pattern if all(path.exists() for path in paths) else None
 
 
 def cine_pattern(
@@ -939,27 +973,26 @@ def cine_pattern(
     camera_count: int,
     camera_numbers: Sequence[int],
 ) -> Optional[str]:
-    """Filename pattern for ``.cine`` files, or None when none is safe to suggest.
+    """Filename pattern for ``.cine`` files, or None when none is safe to suggest."""
+    return _per_camera_container_pattern(
+        names, folder, camera_count, camera_numbers, ".cine"
+    )
 
-    ``resolve_file_path`` formats a ``%`` pattern with the camera number and reads a
-    pattern without ``%`` as one literal file for every camera. So several names that
-    differ by a digit run give a ``%d`` pattern, accepted only when the file it names
-    exists for every selected camera. One ``.cine`` is suggested only for a single
-    camera. Anything else gives None (never a literal for ``camera_count > 1``).
+
+def pivraw_pattern(
+    names: Sequence[str],
+    folder: Path,
+    camera_count: int,
+    camera_numbers: Sequence[int],
+) -> Optional[str]:
+    """Filename pattern for ``.pivraw`` files, or None when none is safe to suggest.
+
+    Only names ending in ``.pivraw`` count, so the ``.pivraw.json`` / ``.pivraw.idx``
+    sidecars beside each container never shape the pattern.
     """
-    cines = sorted(n for n in names if n.lower().endswith(".cine"))
-    if len(cines) == 1 and camera_count == 1:
-        return cines[0]
-    if len(cines) < 2:
-        return None
-    pattern = _suggest_pattern(cines).pattern
-    if pattern is None:
-        return None
-    try:
-        files = [folder / (pattern % camera) for camera in camera_numbers]
-    except (TypeError, ValueError):  # a literal ``%`` in the file name
-        return None
-    return pattern if all(file.exists() for file in files) else None
+    return _per_camera_container_pattern(
+        names, folder, camera_count, camera_numbers, ".pivraw"
+    )
 
 
 def format_apply(
@@ -967,8 +1000,8 @@ def format_apply(
 ) -> Optional[Dict[str, Any]]:
     """The ``image_format`` (and A/B ``pairing_preset``) fragment for real file names.
 
-    Standard on Setup tries an A/B pair first. Standard on calibration, IM7 and CINE
-    use a single pattern. None when no pattern can be derived from ``names``.
+    Standard on Setup tries an A/B pair first. Standard on calibration, IM7, CINE and
+    PIVRAW use a single pattern. None when no pattern can be derived from ``names``.
     """
     if not names:
         return None
@@ -987,6 +1020,8 @@ def format_apply(
         pattern = _suggest_pattern(list(names), "im7").pattern
     elif image_type == "cine":
         pattern = cine_pattern(names, folder, ctx.camera_count, ctx.camera_numbers)
+    elif image_type == "pivraw":
+        pattern = pivraw_pattern(names, folder, ctx.camera_count, ctx.camera_numbers)
     else:
         return None
     return None if pattern is None else {"image_format": [pattern]}
@@ -1144,7 +1179,7 @@ def rule_picked_file(inp: RuleInput) -> List[Suggestion]:
                 {"image_type": "lavision_set"},
             )
         ]
-    if family not in _FOLDER_FAMILIES and family != "cine":
+    if family not in _FOLDER_FAMILIES and family not in ("cine", "pivraw"):
         return []  # ``.ims`` belongs to set_companion; anything else is not an image
     folder = scan.path.parent
     image_type = _FAMILY_TYPE[family]
@@ -1446,7 +1481,8 @@ def rule_pattern(inp: RuleInput) -> List[Suggestion]:
 
     Fires when the folder holds files of the configured family and none matches
     ``format_to_glob(primary)``, or the primary pattern is empty. The suggestion is
-    the pattern (or A/B pair, or CINE ``%d`` pattern) derived from the real names.
+    the pattern (or A/B pair, or CINE / PIVRAW ``%d`` pattern) derived from the real
+    names.
     """
     ctx = inp.ctx
     if ctx.image_type == "lavision_set":

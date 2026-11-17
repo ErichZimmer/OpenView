@@ -42,10 +42,13 @@ def list_supported_formats() -> List[str]:
 
 
 # Import CINE reader for Phantom high-speed cameras
-from .cine_reader import read_cine_pair
+from .cine_reader import read_cine_pair  # noqa: E402
 
 # Import LaVision readers after functions are defined to avoid circular imports
-from .lavision_reader import read_lavision_ims_pair, read_lavision_pair
+from .lavision_reader import read_lavision_ims_pair, read_lavision_pair  # noqa: E402
+
+# Import PIVTOOLS Acquisition run-container reader
+from .pivraw_reader import read_pivraw_pair  # noqa: E402
 
 # Register only lowercase variants for robustness
 register_reader([".tiff", ".tif"], read_tiff)
@@ -55,3 +58,4 @@ register_reader([".raw", ".cr2", ".nef", ".arw"], read_raw)
 register_reader([".im7"], read_lavision_pair)
 register_reader([".set"], read_lavision_ims_pair)
 register_reader([".cine"], read_cine_pair)
+register_reader([".pivraw"], read_pivraw_pair)

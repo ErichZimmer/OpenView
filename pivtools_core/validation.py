@@ -88,13 +88,13 @@ def validate_config(config: Config) -> Tuple[bool, str, List[str]]:
     for camera_num in camera_numbers:
         # Determine camera path
         format_str = config.image_format[0]
-        if image_type in ("lavision_set", "lavision_im7", "cine"):
+        if image_type in ("lavision_set", "lavision_im7", "cine", "pivraw"):
             camera_path = source_path
         else:
             folder = config.get_camera_folder(camera_num)
             camera_path = source_path / folder if folder else source_path
 
-        # Use the canonical validator (handles .set, .cine, .im7, standard)
+        # Use the canonical validator (handles .set, .cine, .pivraw, .im7, standard)
         read_frame = create_piv_frame_reader(camera_path, camera_num, config)
 
         result = validate_images_generic(
