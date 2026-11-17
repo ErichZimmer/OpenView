@@ -820,8 +820,8 @@ def validate_images_generic(
         - warnings: list - What should look like a warning, not a fact (a
           ``.set`` that DaVis marked ``SetIsSuspicious``)
         - pivraw_alignment: dict or None - PIV ``.pivraw`` only: the run's
-          trigger alignment (``PivrawAlignment.report``: pairs, skipped pairs
-          in total and per camera, a summary sentence, notes)
+          trigger alignment (``PivrawAlignment.report``: pairs, triggers
+          requested, a summary sentence, notes)
 
         When no pattern can be derived from the folder's files, the reason is
         appended to ``error``.
@@ -1079,17 +1079,16 @@ def _validate_core(
             result["found_count"] = get_pivraw_frame_count(pivraw_file)
         except Exception as e:
             return _container_count_failure(result, pivraw_file, e)
-        # No per-camera count check against num_images: cameras of one run hold
-        # different frame counts after unequal drops, and the run import sets
-        # num_images to the largest. The pairs come from the trigger alignment,
-        # and the pair count is min(aligned pairs, the num_images cap)
+        # No per-camera count check against num_images: the trigger alignment
+        # below refuses a run in which a selected camera lost any frame, and
+        # the pair count is min(aligned pairs, the num_images cap)
         # (Config.per_loop_frame_pairs), so no num_images can read past a
         # camera's frames. found_count stays for display.
         result["valid"] = True
 
         # PIV pairs the run's cameras by trigger. A run that cannot be aligned
         # (a camera offset by a trigger, a flipped A/B phase, a camera with no
-        # frames, ...) fails here with the camera, trigger and reason; read_error
+        # frames, a dropped frame, ...) fails here with the camera, trigger and reason; read_error
         # too, so the PIV route does not replace it with "First frame not found".
         if not calibration:
             from .readers.pivraw_reader import PivrawError, align_pivraw_run

@@ -75,12 +75,12 @@ def later_loop_findings(config: Config, base_source: Path, camera: int) -> List[
 def _pivraw_pairing_findings(config: Config, warnings: List[str]) -> List[str]:
     """The trigger pairing of a ``.pivraw`` config, reported for every active run.
 
-    Appends to ``warnings``, per active source path: the skipped pairs per
-    camera and the alignment notes (unprovable A/B phase, unaccounted
-    triggers), each led by the run folder, and a camera in the run that is not
-    selected but would refuse it if it were; then a ``num_images`` cap that
-    bites. Returns the errors: a run that cannot be paired (named by the
-    reader), or active runs that align different pair counts.
+    Appends to ``warnings``, per active source path: the alignment notes
+    (unprovable A/B phase), each led by the run folder, and a camera in the
+    run that is not selected but would refuse it if it were; then a
+    ``num_images`` cap that bites. Returns the errors: a run that cannot be
+    paired or lost a frame (named by the reader), or active runs that align
+    different pair counts.
     """
     from pivtools_core.image_handling.readers.pivraw_reader import PivrawError
 
@@ -90,8 +90,6 @@ def _pivraw_pairing_findings(config: Config, warnings: List[str]) -> List[str]:
     except PivrawError as e:
         return [str(e)]
     for alignment in alignments:
-        if alignment.skipped_incomplete:
-            warnings.append(f"{alignment.run_dir}: {alignment.summary}")
         warnings.extend(f"{alignment.run_dir}: {note}" for note in alignment.notes)
         warnings.extend(_unselected_camera_notes(config, alignment))
     # num_frame_pairs refuses runs that align different pair counts, so one
