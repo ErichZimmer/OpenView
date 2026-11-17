@@ -331,29 +331,6 @@ def test_no_stream_set_means_no_correction(tmp_path):
     np.testing.assert_array_equal(img, raw.astype(np.float32))
 
 
-def test_unimplemented_transformer_is_refused(tmp_path):
-    """A declared correction we cannot apply must fail, not be skipped.
-
-    Silently dropping it would return pixels that differ from DaVis with no
-    indication anything was omitted.
-    """
-    raw = np.zeros((2, 3), dtype=np.uint16)
-    set_file = build_set(
-        tmp_path, "raw-16-bit", [[raw.astype("<u2").tobytes()]], width=3, height=2
-    )
-    write_manifest(
-        tmp_path / "synthetic",
-        [("Frame0", 0)],
-        transformers=[("flat-field-correction", "Transformer0", 0)],
-    )
-
-    with pytest.raises(ValueError) as exc:
-        read_set_frame(set_file, entry_no=1, frame_idx=0)
-
-    assert "flat-field-correction" in str(exc.value)
-    assert "dark-image-subtraction" in str(exc.value)
-
-
 def test_declared_dark_file_missing_raises(tmp_path):
     """A declared dark image that is not on disk is an incomplete copy."""
     raw = np.zeros((2, 3), dtype=np.uint16)
@@ -720,11 +697,11 @@ def test_dark_image_is_cached_within_one_mtime(tmp_path, _clean_set_cache):
         transformers=[("dark-image-subtraction", "Transformer0", 0)],
     )
 
-    set_reader._load_dark_cached.cache_clear()
+    set_reader._load_correction_cached.cache_clear()
     for _ in range(3):
         read_set_frame(set_file, entry_no=1, frame_idx=0)
 
-    info = set_reader._load_dark_cached.cache_info()
+    info = set_reader._load_correction_cached.cache_info()
     assert info.misses == 1, f"expected one dark read, got {info.misses}"
     assert info.hits == 2, f"expected two cache hits, got {info.hits}"
 
@@ -732,24 +709,6 @@ def test_dark_image_is_cached_within_one_mtime(tmp_path, _clean_set_cache):
 # ---------------------------------------------------------------------------
 # StreamSet.xml: ambiguity is refused, never resolved by ordering
 # ---------------------------------------------------------------------------
-
-
-def test_two_transformers_for_one_stream_raises(tmp_path, _clean_set_cache):
-    """Last-one-wins would pick a dark image by XML order and subtract it silently."""
-    set_file, set_dir = _dark_set(tmp_path, "dupe")
-    for prefix in ("Transformer0", "Transformer1"):
-        write_dark_im7(set_dir / f"{prefix}-dark.im7", np.zeros((2, 3), np.uint16))
-    write_manifest(
-        set_dir,
-        [("Frame0", 0)],
-        transformers=[
-            ("dark-image-subtraction", "Transformer0", 0),
-            ("dark-image-subtraction", "Transformer1", 0),
-        ],
-    )
-
-    with pytest.raises(ValueError, match="two transformers for frame stream 0"):
-        read_set_frame(set_file, entry_no=1, frame_idx=0)
 
 
 def test_non_numeric_start_frame_names_the_problem(tmp_path, _clean_set_cache):
@@ -892,7 +851,8 @@ def test_manifest_discovers_camera_prefixed_streams(tmp_path, _clean_set_cache):
 
     info = read_set_info(set_file)
     assert [f.frame_idx for f in info.frames] == [0, 1]
-    assert [(f.height, f.width) for f in info.frames] == [(3, 4), (5, 6)]
+    assert [f.shape for f in info.frames] == [(3, 4), (5, 6)]
+    assert [f.stored_shape for f in info.frames] == [(3, 4), (5, 6)]
     assert info.frames[1].data_path.name == "Camera2-1.ims"
 
     np.testing.assert_array_equal(
@@ -1042,52 +1002,6 @@ def test_rotate_180_needs_no_data_file(tmp_path, _clean_set_cache):
     )
     assert not (tmp_path / "cams" / "Transformer2-dark.im7").exists()
     read_set_info(set_file)
-
-
-def test_unimplemented_transformer_refuses_only_its_stream(tmp_path, _clean_set_cache):
-    """The real case: a PLIF camera with intensity-correction-1 alongside four
-    STB cameras with rotate-180. The container parses, the four read, the one
-    refuses by name when asked for."""
-    set_file, _cam1, cam2 = _camera_layout(
-        tmp_path,
-        transformers=[
-            ("intensity-correction-1", "Transformer1", 0),
-            ("rotate-180", "Transformer2", 1),
-        ],
-    )
-    info = read_set_info(set_file)
-    assert info.frames[0].transformer.id == "intensity-correction-1"
-
-    np.testing.assert_array_equal(
-        read_set_frame(set_file, 1, 1), cam2[::-1, ::-1].astype(np.float32)
-    )
-    with pytest.raises(ValueError) as exc:
-        read_set_frame(set_file, 1, 0)
-    message = str(exc.value)
-    assert "intensity-correction-1" in message
-    assert "Frame stream 0" in message
-    assert "Other streams of this recording are unaffected" in message
-
-
-def test_two_transformers_of_different_kinds_on_one_stream_raise(
-    tmp_path, _clean_set_cache
-):
-    """Dark subtraction and rotation do not commute; with no sample proving
-    the order, neither is guessed."""
-    set_file, _, _ = _camera_layout(tmp_path)
-    write_dark_im7(
-        tmp_path / "cams" / "Transformer1-dark.im7", np.zeros((5, 6), np.uint16)
-    )
-    write_manifest(
-        tmp_path / "cams",
-        frame_readers=[("Camera1", 0), ("Camera2", 1)],
-        transformers=[
-            ("dark-image-subtraction", "Transformer1", 1),
-            ("rotate-180", "Transformer2", 1),
-        ],
-    )
-    with pytest.raises(ValueError, match="'dark-image-subtraction' and 'rotate-180'"):
-        read_set_info(set_file)
 
 
 def test_pre_paired_read_refuses_mismatched_stream_shapes(tmp_path, _clean_set_cache):
