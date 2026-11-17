@@ -12,6 +12,7 @@ from pivtools_cli.piv.save_results import (
     save_corr_plane_dump,
     save_piv_result_distributed,
 )
+from pivtools_cli.processing.unique_scatter import scatter_unique
 from pivtools_core.config import Config
 
 
@@ -155,12 +156,12 @@ def perform_piv_and_save(
     if scattered_cache is None:
         temp_correlator = make_correlator_backend(config, camera=camera)
         correlator_cache = temp_correlator.get_cache_data()
-        scattered_cache = client.scatter(correlator_cache, broadcast=True)
+        scattered_cache = scatter_unique(client, correlator_cache, broadcast=True)
         logging.info("Broadcast correlator cache to all workers")
 
     # Use pre-scattered masks if provided, otherwise scatter if needed
     if scattered_masks is None and vector_masks is not None:
-        scattered_masks = client.scatter(vector_masks, broadcast=True)
+        scattered_masks = scatter_unique(client, vector_masks, broadcast=True)
         total_mask_size = sum(m.nbytes for m in vector_masks) / 1024
         logging.info(
             f"Broadcast vector masks to all workers ({total_mask_size:.1f} KB)"

@@ -10,10 +10,9 @@ The acquisition app records each run to ``<project>/<run name>/`` (one
 facts, every one read through the strict ``.pivraw`` reader: the cameras, the
 pairing preset of the run's mode, the image count, and the trigger alignment,
 which must succeed before anything is written. It also writes ``rig.dt`` into
-the calibration source's ``settings.yaml``. The ``pivtools_config.yaml`` the
-recorder leaves in the run folder is not read: it names the recording
-machine's folder and counts images by position, not by trigger (pivraw-contract
-REPORT section 2.3).
+the calibration source's ``settings.yaml``. This is the only way a run becomes
+a PIVTOOLs config: the recorder writes no config of its own into the run folder
+(pivtools-acquisition ``docs/CONTRACTS.md`` section 4).
 """
 
 from __future__ import annotations
