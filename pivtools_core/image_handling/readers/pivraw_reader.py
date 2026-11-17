@@ -1183,7 +1183,7 @@ def clear_alignment_cache() -> None:
     _alignment_cache.clear()
 
 
-def _run_cameras(run_dir: Path) -> Tuple[int, ...]:
+def run_cameras(run_dir: Path) -> Tuple[int, ...]:
     """Slots of the ``Camera<k>.pivraw`` files in ``run_dir``, ascending."""
     try:
         names = [p.name for p in run_dir.iterdir()]
@@ -1369,7 +1369,7 @@ def align_pivraw_run(
         PivrawAlignmentError: The run cannot be aligned; ``reason`` says why.
     """
     run_dir = Path(run_dir)
-    slots = _run_cameras(run_dir)
+    slots = run_cameras(run_dir)
     key = (str(run_dir), int(frame_stride), int(pair_stride))
     stamp = _run_stamp(run_dir, slots)
     cached = _alignment_cache.get(key)

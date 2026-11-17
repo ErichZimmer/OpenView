@@ -20,6 +20,7 @@ from loguru import logger
 from werkzeug.exceptions import HTTPException, InternalServerError
 
 from pivtools_core.config import CalibrationSourceError
+from pivtools_core.image_handling.readers.pivraw_reader import PivrawError
 
 API_PREFIX = "/backend/"
 
@@ -33,8 +34,10 @@ def register_json_error_handlers(app: Flask) -> None:
 
     ``HTTPException`` is registered first so ``abort()``, 404 and 405 keep their
     status code. An unset or blank calibration source is a configuration error the
-    user fixes, so it is a 400 with its plain message. Everything else becomes a
-    500 whose traceback goes to the loguru log, not to the browser.
+    user fixes, so it is a 400 with its plain message. So is a ``.pivraw`` run the
+    reader refuses (a run that cannot be paired by trigger, or a pairing that does
+    not suit it): the message names the camera and the reason. Everything else
+    becomes a 500 whose traceback goes to the loguru log, not to the browser.
     """
 
     @app.errorhandler(HTTPException)
@@ -45,6 +48,12 @@ def register_json_error_handlers(app: Flask) -> None:
 
     @app.errorhandler(CalibrationSourceError)
     def _calibration_source(exc: CalibrationSourceError):
+        if not _is_api_request():
+            return InternalServerError(original_exception=exc)
+        return jsonify({"success": False, "error": str(exc)}), 400
+
+    @app.errorhandler(PivrawError)
+    def _pivraw(exc: PivrawError):
         if not _is_api_request():
             return InternalServerError(original_exception=exc)
         return jsonify({"success": False, "error": str(exc)}), 400
