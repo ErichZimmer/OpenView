@@ -58,6 +58,12 @@ PACK_LZ4 = 20
 # Image_Header_7 version. Of 34,509 real .im7 headers on four drives (drive
 # survey, 2026-11-16) every one is version 0 or 1, and all 10 version-1 files
 # are pack 20 with 8 frames (DaVis "Subtract sliding minimum" output).
+# A version-0 file may carry one DaVis mask, which this reader neither applies
+# nor checks: footer int64 slot 5 (the last 256 bytes) points just past the
+# attribute records to an int32 2, an int32 size and a zlib stream of H x W uint8
+# (1 = valid). Measured on all 10 real ones, single-frame pack-1 calibration
+# images under F:\DAVIS_BFS\gF_Ramp_experiment\Properties, 24-53 % masked, equal
+# to lvpyio's frame.masks[0] (D3, 2026-11-17). Whether to refuse them is open.
 IM7_VERSION_BUFFER = 0
 # Version 1, pack 20, measured byte for byte on the real files (D3, 2026-11-17):
 # per frame an int64 compressed size and one LZ4 block; a table of size_f int64
@@ -895,6 +901,7 @@ def _read_im7_internal(filepath: Path) -> tuple:
 
         attr_at = f.tell()
         scales = _read_attributes(f, filepath.name, header.pack_type)
+        # Version-0 DaVis masks are not applied (see IM7_VERSION_BUFFER).
         if header.version == IM7_VERSION_PER_FRAME:
             _check_masks_per_frame(f, header, filepath.name, attr_at)
 
@@ -1146,6 +1153,7 @@ def read_im7_camera(
         # Read attributes for intensity scale
         attr_at = f.tell()
         scales = _read_attributes(f, filepath.name, header.pack_type)
+        # Version-0 DaVis masks are not applied (see IM7_VERSION_BUFFER).
         if header.version == IM7_VERSION_PER_FRAME:
             _check_masks_per_frame(f, header, filepath.name, attr_at)
 
