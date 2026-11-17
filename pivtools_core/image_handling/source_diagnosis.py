@@ -605,11 +605,11 @@ def _labelled_cameras_text(cameras: Sequence[LabelledCamera]) -> str:
 
 
 def recording_notes(info: SetInfo) -> str:
-    """Where a ``.set`` recording's cameras come from, and DaVis's own warning.
+    """Where a ``.set`` recording's cameras come from, as facts for ``found``.
 
     Partial labels (DaVis 11.4 writes the camera keys on a leading run of
-    images only) are counted, and ``SetIsSuspicious`` is reported as a warning,
-    not a refusal (decided 17 Nov).
+    images only) are counted. DaVis's own warning is not a fact about the
+    cameras: :func:`recording_warnings` reports it.
     """
     notes: List[str] = []
     if info.cameras is not None:
@@ -634,13 +634,22 @@ def recording_notes(info: SetInfo) -> str:
             "No camera labels: the recording has no .attr files, so cameras are "
             "matched to streams by shape."
         )
-    if info.suspicious_flag is not None and info.suspicious_flag != "0":
-        notes.append(
-            f"DaVis marked this recording as suspicious (SetIsSuspicious = "
-            f"{info.suspicious_flag} in {info.set_dir.name}.set) without saying "
-            f"why; check its images before processing."
-        )
     return " ".join(notes)
+
+
+def recording_warnings(info: SetInfo) -> List[str]:
+    """What DaVis itself warns about a ``.set`` recording, one sentence each.
+
+    ``SetIsSuspicious`` set to anything but 0 is a warning, not a refusal
+    (decided 17 Nov): DaVis does not say why, so the user checks the images.
+    """
+    if info.suspicious_flag is None or info.suspicious_flag == "0":
+        return []
+    return [
+        f"DaVis marked this recording as suspicious (SetIsSuspicious = "
+        f"{info.suspicious_flag} in {info.set_dir.name}.set) without saying "
+        f"why; check its images before processing."
+    ]
 
 
 def set_stream_infos(set_path: Path, camera_count: int) -> List[StreamInfo]:
@@ -1781,7 +1790,11 @@ def apply_diagnosis(
     *,
     scan_cache: Optional[Dict[str, SourceScan]] = None,
 ) -> None:
-    """Add ``found``, ``suggestions`` and ``streams`` to a validation result in place.
+    """Add ``found``, ``suggestions``, ``streams`` and ``warnings`` to a validation result.
+
+    ``warnings`` (always a list) holds what should look like a warning rather
+    than a fact: today DaVis's ``SetIsSuspicious`` flag of a ``.set`` whose
+    stream table was read (:func:`recording_warnings`); empty otherwise.
 
     The core ``error`` is never touched. A passing source that is not a ``.set``
     recording is not scanned: ``found`` says what loaded and no rule runs on a pass
@@ -1794,9 +1807,10 @@ def apply_diagnosis(
     if result["valid"] and not _targets_set_file(ctx):
         loaded = loaded_sentence(ctx, result)
         if loaded is not None:
-            result.update(found=loaded, suggestions=[], streams=None)
+            result.update(found=loaded, suggestions=[], streams=None, warnings=[])
             return
     streams: Optional[List[StreamInfo]] = None
+    warnings: List[str] = []
     try:
         scan = _scan_once(ctx.source_path, scan_cache)
         streams_error: Optional[str] = None
@@ -1811,10 +1825,15 @@ def apply_diagnosis(
             except Exception as exc:  # any unreadable recording: ``found`` says why
                 logger.exception("Could not read the streams of %s", scan.path)
                 streams_error = str(exc)
+        if streams:
+            # The stream table was just read from the same cached SetInfo.
+            warnings = recording_warnings(read_set_info(scan.path))
         found = found_for(scan, ctx, result, streams, streams_error)
     except Exception as exc:
         logger.exception("Source diagnosis of %s failed", ctx.source_path)
-        result.update(found=_unfinished(exc), suggestions=[], streams=streams)
+        result.update(
+            found=_unfinished(exc), suggestions=[], streams=streams, warnings=[]
+        )
         return
     try:
         suggestions = diagnose(
@@ -1834,6 +1853,7 @@ def apply_diagnosis(
     result["found"] = found
     result["suggestions"] = suggestions
     result["streams"] = streams
+    result["warnings"] = warnings
 
 
 def piv_diagnosis_context(cfg: "Config", source_path_idx: int) -> DiagnosisContext:

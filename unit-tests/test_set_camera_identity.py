@@ -20,7 +20,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from fixtures.diagnosis import _inp, make_ctx
+from fixtures.diagnosis import _inp, make_ctx, piv_route_response
 from fixtures.lavision import (  # noqa: F401
     build_raw16_set,
     camera_keys,
@@ -47,6 +47,7 @@ from pivtools_core.image_handling.readers.set_reader import (
 )
 from pivtools_core.image_handling.source_diagnosis import (
     found_for,
+    recording_warnings,
     rule_set_streams,
     scan_sentence,
     scan_source,
@@ -651,15 +652,45 @@ def test_found_line_names_the_labelled_cameras(clean_set_cache):
     assert "labels on" not in text and "suspicious" not in text
 
 
-def test_found_line_reports_partial_labels_and_the_suspicious_flag(clean_set_cache):
+SUSPICIOUS_145749 = (
+    "DaVis marked this recording as suspicious (SetIsSuspicious = 1 in "
+    "Recording_Date=261030_Time=145749.set) without saying why; check its "
+    "images before processing."
+)
+
+
+def test_found_line_reports_partial_labels_but_not_the_suspicious_flag(
+    clean_set_cache,
+):
+    """``found`` holds facts; DaVis's warning goes in ``warnings``, so it can look like one."""
     text = _found(REC_145749, camera_count=1)
     assert "1 camera from the recording's own labels: Camera 1 (Imager CX-25" in text
     assert "Camera labels on 1 of 2 images; every labelled image agrees." in text
-    assert (
-        "DaVis marked this recording as suspicious (SetIsSuspicious = 1 in "
-        "Recording_Date=261030_Time=145749.set) without saying why; check its "
-        "images before processing."
-    ) in text
+    assert "suspicious" not in text
+
+
+def test_the_suspicious_flag_is_a_warning(clean_set_cache):
+    assert recording_warnings(read_set_info(REC_145749)) == [SUSPICIOUS_145749]
+    assert recording_warnings(read_set_info(NTNU)) == []
+
+
+def test_validate_files_reports_the_suspicious_flag_as_a_warning(
+    tmp_path, monkeypatch, clean_set_cache
+):
+    body = piv_route_response(
+        tmp_path,
+        monkeypatch,
+        paths={"source_paths": [str(REC_145749)]},
+        images={
+            "image_type": "lavision_set",
+            "image_format": ["data.set"],
+            "pairing_preset": "pre_paired",
+            "frame_stride": 0,
+        },
+    ).get_json()
+    cam = body["details"]["camera_1"]
+    assert cam["warnings"] == [SUSPICIOUS_145749]
+    assert "suspicious" not in cam["found"]
 
 
 def test_found_line_says_when_cameras_come_from_shapes(tmp_path, clean_set_cache):

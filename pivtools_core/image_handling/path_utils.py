@@ -819,6 +819,8 @@ def validate_images_generic(
         - found: str - What is on disk (or what loaded), one plain sentence
         - suggestions: list - Ranked one-click fixes (``Suggestion`` dicts)
         - streams: list or None - Per-stream table of a ``.set`` recording
+        - warnings: list - What should look like a warning, not a fact (a
+          ``.set`` that DaVis marked ``SetIsSuspicious``)
         - pivraw_alignment: dict or None - PIV ``.pivraw`` only: the run's
           trigger alignment (``PivrawAlignment.report``: pairs, skipped pairs
           in total and per camera, a summary sentence, notes)
@@ -873,7 +875,7 @@ def _validate_core(
     ``calibration`` selects how a missing-pattern reason is derived (calibration
     never pairs A/B patterns) and whether a ``.pivraw`` run is aligned by
     trigger (PIV only, with ``pair_strides``). Returns the result dict without
-    ``found`` / ``suggestions`` / ``streams``.
+    ``found`` / ``suggestions`` / ``streams`` / ``warnings``.
     """
     result: Dict[str, Any] = {
         "valid": False,

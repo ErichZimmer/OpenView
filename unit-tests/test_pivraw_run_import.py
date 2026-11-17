@@ -16,7 +16,7 @@ import yaml
 from fixtures.pivraw import contract_cases, copy_case, edit_sidecar
 
 from pivtools_cli import cli
-from pivtools_cli.run_import import import_run
+from pivtools_cli.run_import import RunImportConflict, import_run
 from pivtools_core import calibration_settings as cs
 from pivtools_core.config import Config
 from pivtools_core.image_handling.readers.pivraw_reader import (
@@ -142,9 +142,10 @@ def test_a_different_rig_dt_in_existing_settings_is_refused(tmp_path):
     source = project / "calibration"
     cs.save_settings(source, {"rig": {"dt": 5e-4}})
     config_path = tmp_path / "config.yaml"
-    with pytest.raises(ValueError, match=r"rig\.dt") as excinfo:
+    with pytest.raises(RunImportConflict, match=r"rig\.dt") as excinfo:
         import_run(run, config_path)
     assert "0.0005" in str(excinfo.value) and "0.0002" in str(excinfo.value)
+    assert len(excinfo.value.conflicts) == 1
     assert not config_path.exists()
     assert _rig_dt(source) == 5e-4
 
@@ -168,6 +169,27 @@ def test_an_existing_config_needs_force(tmp_path):
     assert config_path.read_text() == "paths: {}\n"
     import_run(run, config_path, force=True)
     assert Config(path=str(config_path)).image_type == "pivraw"
+
+
+def test_an_existing_config_and_a_different_rig_dt_are_reported_together(tmp_path):
+    """force replaces both, so the user must see both before choosing it."""
+    project, run = _project_run(tmp_path, "df_2cam_clean")
+    cs.save_settings(project / "calibration", {"rig": {"dt": 5e-4}})
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("paths: {}\n")
+    with pytest.raises(RunImportConflict) as excinfo:
+        import_run(run, config_path)
+    conflicts = excinfo.value.conflicts
+    assert len(conflicts) == 2
+    assert "already exists" in conflicts[0]
+    assert "0.0005" in conflicts[1] and "0.0002" in conflicts[1]
+    assert str(excinfo.value).endswith("Use --force to replace them.")
+    assert config_path.read_text() == "paths: {}\n"
+    assert _rig_dt(project / "calibration") == 5e-4
+
+    import_run(run, config_path, force=True)
+    assert Config(path=str(config_path)).image_type == "pivraw"
+    assert _rig_dt(project / "calibration") == 2e-4
 
 
 def test_cameras_that_disagree_on_dt_are_refused(tmp_path):

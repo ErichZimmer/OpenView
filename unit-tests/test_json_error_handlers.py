@@ -11,9 +11,17 @@ from __future__ import annotations
 import pytest
 from flask import Flask, abort
 
+from pivtools_core.image_handling.readers.set_reader import SetPairingError
 from pivtools_gui.errors import register_json_error_handlers
 
 _MISSING = r"E:\bailey_calibration\Calibration\Cam3\cal_001.tif"
+# The reader's text for a single-frame camera selected for A/B pairing (set_reader.py).
+_SINGLE_FRAME = (
+    "Camera 3 of rec.set, Camera 3 (Imager sCMOS CLHS, Camera.ImagerSCMOS5MCLHS: "
+    "61008639, single frame) on stream 4, is a single-frame camera, so it has no "
+    "A/B pairs. Deselect camera 3 in the PIV camera selection, or process it "
+    "time-resolved."
+)
 
 
 @pytest.fixture()
@@ -28,6 +36,10 @@ def client():
     @app.route("/backend/gone")
     def _gone():
         abort(404, description="job not found")
+
+    @app.route("/backend/single_frame_pair")
+    def _single_frame_pair():
+        raise SetPairingError(_SINGLE_FRAME)
 
     @app.route("/spa/boom")
     def _spa_boom():
@@ -69,6 +81,13 @@ def test_unknown_api_route_is_json_404(client):
         "success": False,
         "error": "no such backend route: /backend/no_such_route",
     }
+
+
+def test_a_set_pairing_refusal_is_a_400_with_its_own_text(client):
+    """A camera selection the recording cannot pair is the user's to fix, not a crash."""
+    res = client.get("/backend/single_frame_pair")
+    assert res.status_code == 400
+    assert res.get_json() == {"success": False, "error": _SINGLE_FRAME}
 
 
 def test_paths_outside_api_keep_flask_defaults(client):

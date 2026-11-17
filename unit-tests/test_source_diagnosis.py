@@ -1328,7 +1328,8 @@ def test_validate_images_generic_adds_diagnosis_on_every_branch(tmp_path):
             _fake_frame,
             diagnosis=make_ctx(tmp_path, image_format=(fmt,)),
         )
-        assert {"found", "suggestions", "streams"} <= set(result)
+        assert {"found", "suggestions", "streams", "warnings"} <= set(result)
+        assert result["warnings"] == []
         assert not any(k.startswith("suggest") and k != "suggestions" for k in result)
 
 
@@ -1351,6 +1352,21 @@ def test_apply_diagnosis_reports_an_unfinished_diagnosis(tmp_path, monkeypatch):
     assert result["found"].endswith(
         "Could not finish the diagnosis: Permission denied."
     )
+    assert result["warnings"] == []
+
+
+def test_apply_diagnosis_of_a_passing_folder_has_no_warnings(tmp_path):
+    """The early "what loaded" branch returns before any scan, and still has the key."""
+    touch(tmp_path, ["B00001.tif"])
+    result = {
+        "valid": True,
+        "error": None,
+        "found_count": 1,
+        "format_detected": "tif",
+        "detected_start_index": 1,
+    }
+    apply_diagnosis(result, make_ctx(tmp_path), 1, tmp_path, 1)
+    assert result["warnings"] == []
 
 
 def test_single_pattern_role_suggestion_replaces_only_its_index(tmp_path):
@@ -1525,6 +1541,63 @@ def test_validate_files_flat_files_suggest_one_camera(tmp_path, monkeypatch):
     ).get_json()
     applies = [s["apply"] for s in body["details"]["camera_1"]["suggestions"]]
     assert {"camera_count": 1, "camera_numbers": [1]} in applies
+
+
+DIAGNOSIS_KEYS = {"found", "suggestions", "streams", "warnings"}
+
+
+def test_validate_files_blank_source_detail_carries_every_diagnosis_key(
+    tmp_path, monkeypatch
+):
+    body = piv_route_response(
+        tmp_path, monkeypatch, paths={"source_paths": [""]}
+    ).get_json()
+    cam = body["details"]["camera_1"]
+    assert DIAGNOSIS_KEYS <= set(cam)
+    assert cam["warnings"] == []
+
+
+def test_validate_files_camera_exception_detail_carries_every_diagnosis_key(
+    tmp_path, monkeypatch
+):
+    import pivtools_gui.app as gui_app
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("reader exploded")
+
+    monkeypatch.setattr(gui_app, "validate_images_generic", boom)
+    touch(tmp_path / "src", ["B00001_A.tif", "B00001_B.tif"])
+    body = piv_route_response(
+        tmp_path, monkeypatch, paths={"source_paths": [str(tmp_path / "src")]}
+    ).get_json()
+    cam = body["details"]["camera_1"]
+    assert cam["error"] == "reader exploded"
+    assert DIAGNOSIS_KEYS <= set(cam)
+    assert cam["warnings"] == []
+
+
+def test_validate_files_full_detail_carries_every_diagnosis_key(tmp_path, monkeypatch):
+    touch(tmp_path / "src", ["B00001_A.tif", "B00001_B.tif"])
+    body = piv_route_response(
+        tmp_path, monkeypatch, paths={"source_paths": [str(tmp_path / "src")]}
+    ).get_json()
+    cam = body["details"]["camera_1"]
+    assert DIAGNOSIS_KEYS <= set(cam)
+    assert cam["warnings"] == []
+
+
+def test_calibration_validate_failure_carries_every_diagnosis_key(
+    tmp_path, monkeypatch
+):
+    """No settings sidecar yet: the route's own short answer, not apply_diagnosis."""
+    out = (
+        calibration_client(tmp_path / "no_settings", monkeypatch)
+        .post("/calibration/validate", json={"camera": 1, "source_path_idx": 0})
+        .get_json()
+    )
+    assert out["valid"] is False
+    assert DIAGNOSIS_KEYS <= set(out)
+    assert out["warnings"] == []
 
 
 @pytest.mark.parametrize("idx", [3, -1, "0"])
