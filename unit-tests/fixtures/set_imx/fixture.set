@@ -1,0 +1,15 @@
+// set file <fixture.set> created by DaVis
+
+#GROUP Sets
+SetType = 4352;
+SetGroups = "";
+SetTime = "2026-10-14T14:55:09+01:00";
+SetComments = "";
+SetStart = 1;
+SetInc = 1;
+SetEnd = 0;
+SetSourceSet = "";
+SetTitle = "";
+SetViewCallback = "";
+SetLoadCallback = "";
+SetIdentifier = "StreamSet";

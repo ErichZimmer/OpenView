@@ -82,6 +82,7 @@ def build_set(
     prefixes=None,
     shapes=None,
     manifest=True,
+    codec=b"",
 ):
     """Write a minimal .set container and return the path to the .set file.
 
@@ -102,6 +103,8 @@ def build_set(
             Real recordings carry a different shape per camera.
         manifest: when True, write a StreamSet.xml declaring stream k under its
             prefix at StartFrame k. The reader finds streams only through it.
+        codec: compression name written into every stream's index header. The
+            entry payloads are written as given, so the caller compresses them.
 
     Returns:
         Path: the .set file (its companion directory sits alongside).
@@ -124,7 +127,7 @@ def build_set(
             if declared_sizes is None
             else declared_sizes[stream_idx]
         )
-        (set_dir / f"{prefix}-0.ims").write_bytes(ims_index(w, h, sizes))
+        (set_dir / f"{prefix}-0.ims").write_bytes(ims_index(w, h, sizes, codec=codec))
         (set_dir / f"{prefix}-1.ims").write_bytes(b"".join(entries))
 
         if write_decoder_xml:
