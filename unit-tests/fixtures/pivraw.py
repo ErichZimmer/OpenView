@@ -1,7 +1,7 @@
 """PIVTOOLS Acquisition run folders (``.pivraw``) for reader tests.
 
 Every run comes from the committed contract fixtures in ``pivraw_contract/``:
-runs the real recorder wrote (pivtools-acquisition ``549d313``, see that
+runs the real recorder wrote (pivtools-acquisition ``7210202``, see that
 folder's README), with every frame decoded by the acquisition package in
 ``expected_arrays.npz`` and the per-case truth in ``expected.json``. Tests copy
 a case into a temporary folder and change one thing at a time, so no test
@@ -17,6 +17,9 @@ import numpy as np
 import yaml
 
 CONTRACT_DIR = Path(__file__).resolve().parent / "pivraw_contract"
+# The recorder's .idx record (MANIFEST.json idx_record "<qQq"), spelled out here
+# so the helpers do not lean on the reader under test.
+IDX_DTYPE = np.dtype([("host_ns", "<i8"), ("frame_id", "<u8"), ("camera_ns", "<i8")])
 # Sentinel for ``edit_sidecar``: remove the field from the sidecar.
 DROP = object()
 
@@ -60,6 +63,31 @@ def edit_sidecar(run: Path, camera: int, **changes: Any) -> Path:
             sidecar[key] = value
     side.write_text(json.dumps(sidecar, indent=2), encoding="utf-8")
     return run / f"Camera{camera}.pivraw"
+
+
+def edit_index(run: Path, camera: int, **columns: Any) -> np.ndarray:
+    """Replace columns (``host_ns``, ``frame_id``, ``camera_ns``) of ``Camera{camera}.pivraw.idx``.
+
+    Each value is a sequence with one entry per record. Returns the new records.
+    """
+    idx = run / f"Camera{camera}.pivraw.idx"
+    records = np.fromfile(idx, dtype=IDX_DTYPE)
+    for name, values in columns.items():
+        records[name] = np.asarray(values, dtype=records.dtype[name])
+    records.tofile(idx)
+    return records
+
+
+def edit_run_yaml(run: Path, **changes: Any) -> None:
+    """Set top-level keys of ``run.yaml``; ``record_n`` sets ``config.record.n``."""
+    path = run / "run.yaml"
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    for key, value in changes.items():
+        if key == "record_n":
+            data["config"]["record"]["n"] = value
+        else:
+            data[key] = value
+    path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
 
 
 def write_piv_config(
