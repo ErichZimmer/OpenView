@@ -370,8 +370,9 @@ def test_missing_correction_file_is_refused_at_parse(tid, tmp_path):
     "tid", ["rotate-45", "horizontal-mirror", "flat-field-correction"]
 )
 def test_unknown_id_refuses_the_whole_recording(tid, tmp_path):
-    """No camera labels yet (D7): an unknown id makes every camera's stream
-    mapping uncertain, so nothing is read. The correctly spelled
+    """Without camera labels, an unknown id makes every camera's stream
+    mapping uncertain, so nothing is read (with labels it blocks only its
+    camera: test_set_camera_identity.py). The correctly spelled
     'horizontal-mirror' is unknown: lvpyio opens 0 buffers for it."""
     frame = np.zeros((3, 5), np.uint16)
     set_file = build_set(
