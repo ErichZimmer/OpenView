@@ -135,6 +135,7 @@ def validate_config(config: Config) -> Tuple[bool, str, List[str]]:
             pair_strides=(config.frame_stride, config.pair_stride),
         )
 
+        warnings.extend(f"Camera {camera_num}: {note}" for note in result["notes"])
         if result["error"]:
             errors.append(f"Camera {camera_num}: {result['error']}")
         elif result["valid"] and image_type != "pivraw":

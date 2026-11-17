@@ -7,7 +7,10 @@ config:
     model: cx25
     slots:
     - slot: 1
-      serial: null
+      serial: SIM1
+      view_rotation: none
+    - slot: 2
+      serial: SIM2
       view_rotation: none
   timing:
     light: led
@@ -30,8 +33,8 @@ config:
 pattern:
   mode: double_frame
   rate_hz: 25.0
-started_at: '2026-11-17T15:05:59.041788+00:00'
-stopped_at: '2026-11-17T15:05:59.174912+00:00'
+started_at: '2026-11-17T15:43:08.379410+00:00'
+stopped_at: '2026-11-17T15:43:08.514222+00:00'
 trigger: daq
 simulated: true
 dark: null

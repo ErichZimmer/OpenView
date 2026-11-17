@@ -1209,6 +1209,7 @@ def validate_files():
                 "found": validation["found"],
                 "suggestions": validation["suggestions"],
                 "streams": validation["streams"],
+                "notes": validation["notes"],
                 "pivraw_alignment": validation["pivraw_alignment"],
                 "sample_files": (
                     []
