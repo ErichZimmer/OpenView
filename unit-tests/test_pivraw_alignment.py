@@ -204,6 +204,18 @@ def test_fewer_triggers_requested_than_recorded_is_refused(tmp_path):
         assert word in message, message
 
 
+@pytest.mark.parametrize("suffix", [".json", ".idx"])
+def test_a_missing_camera_file_is_refused_by_name(tmp_path, suffix):
+    """A run folder missing Camera2's sidecar or index: a PivrawError naming
+    the file, which every route answers as 400, not a bare FileNotFoundError."""
+    run = copy_case(tmp_path, "df_2cam_clean")
+    missing = run / f"Camera2.pivraw{suffix}"
+    missing.unlink()
+    with pytest.raises(PivrawError) as info:
+        align_pivraw_run(run, 1, 2)
+    assert str(missing) in str(info.value)
+
+
 def test_missing_run_yaml_is_refused(tmp_path):
     run = copy_case(tmp_path, "df_2cam_clean")
     (run / "run.yaml").unlink()

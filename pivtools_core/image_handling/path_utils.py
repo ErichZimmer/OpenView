@@ -1078,7 +1078,13 @@ def _validate_core(
             result["found_count"] = get_pivraw_frame_count(pivraw_file)
         except Exception as e:
             return _container_count_failure(result, pivraw_file, e)
-        _check_container_count(result, expected_count)
+        # No per-camera count check against num_images: cameras of one run hold
+        # different frame counts after unequal drops, and the run import sets
+        # num_images to the largest. The pairs come from the trigger alignment,
+        # and the pair count is min(aligned pairs, the num_images cap)
+        # (Config.per_loop_frame_pairs), so no num_images can read past a
+        # camera's frames. found_count stays for display.
+        result["valid"] = True
 
         # PIV pairs the run's cameras by trigger. A run that cannot be aligned
         # (a camera offset by a trigger, a flipped A/B phase, a camera with no

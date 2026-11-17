@@ -13,7 +13,7 @@ import sys
 
 import pytest
 import yaml
-from fixtures.pivraw import contract_cases, copy_case, edit_sidecar
+from fixtures.pivraw import contract_cases, copy_case, edit_index, edit_sidecar
 
 from pivtools_cli import cli
 from pivtools_cli.run_import import RunImportConflict, import_run
@@ -23,6 +23,7 @@ from pivtools_core.image_handling.readers.pivraw_reader import (
     PivrawAlignmentError,
     PivrawError,
     clear_alignment_cache,
+    read_pivraw_header,
 )
 from pivtools_core.validation import validate_config
 
@@ -95,6 +96,47 @@ def test_one_camera_time_resolved_run_points_at_cam1(tmp_path):
     source = project / "calibration" / "Cam1"
     assert cfg.data["calibration"]["calibration_sources"] == [str(source)]
     assert _rig_dt(source) == 0.04
+
+
+def test_a_run_with_unequal_drops_imports_and_validates(tmp_path):
+    """P2's stand-in for camera 2 dropping pair 2 (test_pivraw_alignment
+    ``_cam2_dropped_pair_2``): camera 1 holds 6 frames, camera 2 holds 4, and
+    2 pairs are complete on both. num_images is the larger count, so a check
+    that every camera holds num_images frames would refuse the run; the
+    alignment decides instead."""
+    from pivtools_core.image_handling.load_images import create_piv_frame_reader
+    from pivtools_core.image_handling.path_utils import validate_images_generic
+    from pivtools_core.image_handling.source_diagnosis import piv_diagnosis_context
+
+    project = tmp_path / "project"
+    project.mkdir()
+    run = copy_case(project, "df_2cam_missed_trigger_cam2", "cam2_dropped_pair_2")
+    edit_index(run, 2, frame_id=[5000, 5001, 5004, 5005])
+    edit_sidecar(run, 2, missing_indices=[2, 3], dropped_pairs=1)
+    counts = [read_pivraw_header(run / f"Camera{c}.pivraw").n_frames for c in (1, 2)]
+    assert counts[0] != counts[1]
+    config_path = tmp_path / "config.yaml"
+    import_run(run, config_path)
+
+    cfg = Config(path=str(config_path))
+    assert cfg.num_images == max(counts)
+    ok, error, _warnings = validate_config(cfg)
+    assert ok, error
+    assert cfg.num_frame_pairs == 2
+    for camera in (1, 2):
+        result = validate_images_generic(
+            run,
+            camera,
+            cfg.image_format[0],
+            "pivraw",
+            cfg.num_images,
+            False,
+            read_frame_fn=create_piv_frame_reader(run, camera, cfg),
+            diagnosis=piv_diagnosis_context(cfg, 0),
+            pair_strides=(cfg.frame_stride, cfg.pair_stride),
+        )
+        assert result["valid"] is True, result["error"]
+        assert result["found_count"] == counts[camera - 1]
 
 
 def test_a_run_that_cannot_align_is_refused_and_nothing_is_written(tmp_path):
@@ -199,7 +241,7 @@ def _failing_save(source, partial):
 def test_a_settings_write_failure_leaves_the_config_unchanged(tmp_path, monkeypatch):
     """The settings are written before the config is moved into place, so a
     settings write that fails leaves the old config as it was."""
-    _project, run = _project_run(tmp_path, "df_2cam_clean")
+    project, run = _project_run(tmp_path, "df_2cam_clean")
     config_path = tmp_path / "config.yaml"
     config_path.write_text("paths: {}\n")
     monkeypatch.setattr(cs, "save_settings", _failing_save)
@@ -207,6 +249,9 @@ def test_a_settings_write_failure_leaves_the_config_unchanged(tmp_path, monkeypa
         import_run(run, config_path, force=True)
     assert config_path.read_text() == "paths: {}\n"
     assert [p.name for p in tmp_path.iterdir()] == ["config.yaml", "project"]
+    # Validating the staged config made the results folder; a refused import
+    # leaves none behind.
+    assert sorted(p.name for p in project.iterdir()) == ["df_2cam_clean"]
 
 
 @pytest.mark.parametrize("text", ["- a\n- b\n", "rig: {dt: [\n"])

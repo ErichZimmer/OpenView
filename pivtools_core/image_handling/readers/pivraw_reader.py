@@ -544,10 +544,24 @@ def _stamp(raw_path: Path) -> Tuple[int, ...]:
     """mtime and size of the data, sidecar and index files (missing index -> -1).
 
     The sidecar is rewritten at stop and by ``pivtools-acq recover``, which also
-    truncates the data and index files, so all three take part.
+    truncates the data and index files, so all three take part. A missing index
+    is stamped -1 here and refused by name when the header is read.
+
+    Raises:
+        PivrawError: The data file or its sidecar is missing, naming it.
     """
-    raw = raw_path.stat()
-    side = sidecar_path(raw_path).stat()
+    try:
+        raw = raw_path.stat()
+    except FileNotFoundError as exc:
+        raise PivrawError(f"PIVRAW file not found: {raw_path}") from exc
+    side_path = sidecar_path(raw_path)
+    try:
+        side = side_path.stat()
+    except FileNotFoundError as exc:
+        raise PivrawError(
+            f"PIVRAW sidecar not found: {side_path} (for {raw_path}). Every "
+            "recorded camera has one; the run folder is incomplete."
+        ) from exc
     try:
         idx = index_path(raw_path).stat()
         idx_stamp: Tuple[int, int] = (idx.st_mtime_ns, idx.st_size)
@@ -560,16 +574,14 @@ def read_pivraw_header(file_path: PathLike) -> PivrawHeader:
     """The validated header of one camera's ``.pivraw``, cached by file stamps.
 
     Raises:
-        FileNotFoundError: The ``.pivraw`` or its ``.json`` sidecar is missing.
-        PivrawError: The sidecar or files do not satisfy the format.
+        FileNotFoundError: The ``.pivraw`` is missing.
+        PivrawError: Its ``.json`` sidecar is missing (:func:`_stamp`), or the
+            sidecar or files do not satisfy the format.
     """
     raw_path = Path(file_path)
     if not raw_path.is_file():
         raise FileNotFoundError(f"PIVRAW file not found: {raw_path}")
     side = sidecar_path(raw_path)
-    if not side.is_file():
-        raise FileNotFoundError(f"PIVRAW sidecar not found: {side} (for {raw_path})")
-
     stamp = _stamp(raw_path)
     key = str(raw_path)
     cached = _header_cache.get(key)
