@@ -41,6 +41,7 @@ from pivtools_core.image_handling.load_images import (
 )
 from pivtools_core.image_handling.path_utils import (
     build_piv_camera_path,
+    camera_path_for,
     validate_images_generic,
 )
 from pivtools_core.image_handling.readers.pivraw_reader import PivrawError
@@ -182,11 +183,6 @@ def _log_cache_contents():
             logger.debug(f"Cache: {raw_str}")
 
 
-def cam_folder_key(camera, cfg):
-    """Get camera folder using config to respect custom subfolders."""
-    return cfg.get_camera_folder(camera_number(camera))
-
-
 def make_raw_cache_key(
     source_path_idx: int,
     camera: int,
@@ -200,21 +196,12 @@ def make_raw_cache_key(
     The image settings are in it (CLAUDE.md gotcha 6): the type and format
     decide the files read, and the pairing settings decide which recorded
     frames pair ``idx`` is (time_resolved pair 2 is frames 2 and 3,
-    skip_frames pair 2 is frames 3 and 4).
+    skip_frames pair 2 is frames 3 and 4). The camera path carries
+    ``use_camera_subfolders`` and the subfolder names.
     """
-    image_type = cfg.image_type
-    # For .set files, source_path IS the .set file; for others, may need camera folder
-    if image_type in ("lavision_set", "lavision_im7"):
-        source_path = cfg.source_paths[source_path_idx]
-    else:
-        folder = cfg.get_camera_folder(camera)
-        source_path = (
-            cfg.source_paths[source_path_idx] / folder
-            if folder
-            else cfg.source_paths[source_path_idx]
-        )
+    source_path = build_piv_camera_path(cfg, source_path_idx, camera)
     images = (
-        image_type,
+        cfg.image_type,
         tuple(cfg.image_format),
         cfg.pairing_preset,
         cfg.frame_stride,
@@ -227,32 +214,21 @@ def make_raw_cache_key(
 
 def cache_key(source_path_idx, camera, cfg):
     """Generate cache key for processed images (no frame index - stores dict of frames)."""
-    image_type = cfg.image_type
-    # For .set files, source_path IS the .set file; for others, may need camera folder
-    if image_type in ("lavision_set", "lavision_im7"):
-        source_path = cfg.source_paths[source_path_idx]
-    else:
-        folder = cfg.get_camera_folder(camera_number(camera))
-        source_path = (
-            cfg.source_paths[source_path_idx] / folder
-            if folder
-            else cfg.source_paths[source_path_idx]
-        )
+    source_path = build_piv_camera_path(cfg, source_path_idx, camera_number(camera))
     return (str(source_path), str(camera))
 
 
 def _resolve_loop_read(cfg, source_path_idx, pair_idx, camera):
-    """Resolve multi-loop pair to (source_path, local_pair_idx) for read_pair.
+    """Resolve a global pair to (camera path, local pair) for read_pair.
 
-    For single-loop, returns the normal source_path and original pair_idx.
-    For multi-loop, resolves the global pair to the correct loop source
-    and local pair index within that loop.
+    For single-loop, the configured source and ``pair_idx`` itself. For
+    multi-loop, the loop's source and the pair's index within that loop.
 
-    Always operates on the raw cfg.source_paths entry (before camera folder),
-    so get_loop_source_path modifies the correct path component.
+    The loop is resolved on the raw cfg.source_paths entry (before the camera
+    folder), so get_loop_source_path renames the right path component; the
+    camera folder is then added by the one rule, ``camera_path_for``.
     """
     base_source = cfg.source_paths[source_path_idx]
-    image_type = cfg.image_type
 
     if cfg.num_loops > 1:
         loop_idx, local_pair = cfg.resolve_loop_for_pair(pair_idx)
@@ -261,12 +237,7 @@ def _resolve_loop_read(cfg, source_path_idx, pair_idx, camera):
         effective_base = base_source
         local_pair = pair_idx
 
-    # Derive camera-specific path
-    if image_type in ("lavision_set", "lavision_im7", "cine", "pivraw"):
-        return effective_base, local_pair
-    folder = cfg.get_camera_folder(camera)
-    source = effective_base / folder if folder else effective_base
-    return source, local_pair
+    return camera_path_for(cfg, effective_base, camera), local_pair
 
 
 def get_cached_pair(frame, typ, camera, source_path_idx, cfg, auto_limits=False):
@@ -323,11 +294,15 @@ def _preload_surrounding_frames(
     Loads 'window' frames forward from current_idx, encoded with the manual
     'display_bounds' or, when None, the auto window (see
     encode_display_frame). Thread-safe.
+
+    It runs on a background thread after the request has answered, so a pair
+    that will not read cannot reach the user in a response. It is reported as
+    one warning per run in the server log instead, naming the camera, how many
+    pairs failed, and the first failure's pair and reason.
     """
     import time as time_module
 
     try:
-        cfg.image_format[0]
         num_pairs = cfg.num_frame_pairs
 
         # Calculate range to preload: current_idx through current_idx + window - 1
@@ -335,6 +310,8 @@ def _preload_surrounding_frames(
         end_idx = min(num_pairs, current_idx + window - 1)
 
         preloaded = 0
+        attempted = 0
+        failures = []  # (pair, exception) per pair that would not read
         for idx in range(start_idx, end_idx + 1):
 
             # Use consistent cache key function
@@ -347,6 +324,7 @@ def _preload_surrounding_frames(
                 if cache_key_tuple in raw_image_cache:
                     continue  # Already cached
 
+            attempted += 1
             try:
                 # Multi-loop: resolve global pair index to loop-specific source
                 resolved_source, local_idx = _resolve_loop_read(
@@ -377,17 +355,23 @@ def _preload_surrounding_frames(
                         FRAME_1_KEYS.add(cache_key_tuple)
                 preloaded += 1
             except Exception as e:
-                logger.debug(f"Failed to preload frame {idx}: {e}")
-                continue
+                failures.append((idx, e))
 
         manage_cache_size()
+        if failures:
+            first_idx, first_error = failures[0]
+            logger.warning(
+                f"Preload: {len(failures)} of {attempted} pairs for camera "
+                f"{camera} could not be read; first, pair {first_idx}: "
+                f"{type(first_error).__name__}: {first_error}"
+            )
         if preloaded > 0:
             logger.debug(
                 f"Preloaded {preloaded} {img_format} frames for camera {camera}"
             )
             _log_cache_contents()
     except Exception as e:
-        logger.debug(f"Error in background preload: {e}")
+        logger.warning(f"Preload for camera {camera} stopped: {e}")
 
 
 # --- Endpoints ---
@@ -419,20 +403,11 @@ def get_frame_pair():
         source_path_idx, camera, idx, img_format, display_bounds, cfg
     )
 
-    # Determine source path for reading (if cache miss)
     if not cfg.image_format:
         return jsonify({"error": "No image format configured"}), 400
-    cfg.image_format[0]
-    image_type = cfg.image_type
-    if image_type in ("lavision_set", "lavision_im7"):
-        source_path = cfg.source_paths[source_path_idx]
-    else:
-        folder = cfg.get_camera_folder(camera)
-        source_path = (
-            cfg.source_paths[source_path_idx] / folder
-            if folder
-            else cfg.source_paths[source_path_idx]
-        )
+    # The path the errors below name: this camera's path in the configured
+    # source, replaced by the loop's own once the pair is resolved.
+    source_path = build_piv_camera_path(cfg, source_path_idx, camera)
 
     # Thread-safe cache check
     hit_response = None
@@ -454,10 +429,8 @@ def get_frame_pair():
 
     try:
         # Multi-loop: resolve global pair index to loop-specific source and local index
-        resolved_source, local_idx = _resolve_loop_read(
-            cfg, source_path_idx, idx, camera
-        )
-        pair = read_pair(local_idx, resolved_source, camera, cfg)
+        source_path, local_idx = _resolve_loop_read(cfg, source_path_idx, idx, camera)
+        pair = read_pair(local_idx, source_path, camera, cfg)
     except FileNotFoundError as e:
         # Provide detailed error with search path and patterns
         image_format = cfg.image_format
@@ -947,6 +920,37 @@ def get_status():
     return jsonify({"processing": processing})
 
 
+def _later_loop_findings(
+    cfg: Config, source_path_idx: int, camera: int, pairs_per_loop: int
+) -> list[str]:
+    """Loops 1..N-1 of a looped recording, each read through its own source.
+
+    Loop 0 is the configured source, which ``/validate_files`` checks in full.
+    Every later loop must exist, and its first and last pair must read from
+    its own camera path, as the pipeline (``load_images``) will read them.
+
+    Returns:
+        One sentence per problem, each naming the loop and its source.
+    """
+    findings: list[str] = []
+    base_source = cfg.source_paths[source_path_idx]
+    for loop_idx in range(1, cfg.num_loops):
+        loop_source = cfg.get_loop_source_path(base_source, loop_idx)
+        if not loop_source.exists():
+            findings.append(f"Loop {loop_idx} source not found: {loop_source.name}")
+            continue
+        camera_path = camera_path_for(cfg, loop_source, camera)
+        for which, pair in (("first", 1), ("last", pairs_per_loop)):
+            try:
+                read_pair(pair, camera_path, camera, cfg)
+            except Exception as e:
+                findings.append(
+                    f"Loop {loop_idx} ({loop_source.name}): {which} pair "
+                    f"({pair}) could not be read: {e}"
+                )
+    return findings
+
+
 @api_bp.route("/validate_files", methods=["POST"])
 def validate_files():
     """
@@ -1018,7 +1022,9 @@ def validate_files():
             camera_path = build_piv_camera_path(cfg, source_path_idx, camera_num)
             image_type = cfg.image_type
             num_images = cfg.num_images
-            num_pairs = cfg.num_frame_pairs
+            # The configured source is loop 0 of a looped recording: its last
+            # pair is the last of one loop, not of all of them.
+            num_pairs = cfg.per_loop_frame_pairs
 
             # Get all patterns (may be single pattern or A/B patterns)
             patterns = (
@@ -1150,16 +1156,9 @@ def validate_files():
                     detected_start, cfg.start_index
                 )
 
-            # Multi-loop validation: check all loop sources exist
-            loop_errors = []
-            if cfg.num_loops > 1:
-                base_source = cfg.source_paths[source_path_idx]
-                for loop_idx in range(cfg.num_loops):
-                    loop_path = cfg.get_loop_source_path(base_source, loop_idx)
-                    if not loop_path.exists():
-                        loop_errors.append(
-                            f"Loop {loop_idx} source not found: {loop_path.name}"
-                        )
+            loop_errors = _later_loop_findings(
+                cfg, source_path_idx, camera_num, num_pairs
+            )
 
             # `found_count` is the real int count for standard/im7/.set/.cine; a
             # container whose count cannot be read fails validation with the

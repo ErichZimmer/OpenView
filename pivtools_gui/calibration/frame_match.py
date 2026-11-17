@@ -53,6 +53,7 @@ from pivtools_core.calibration_settings import try_load_settings
 from pivtools_core.config import Config
 from pivtools_core.image_handling.path_utils import (
     build_calibration_camera_path,
+    camera_path_for,
     format_to_glob,
     glob_images,
 )
@@ -254,8 +255,7 @@ def _piv_camera(full_cfg: Config, source: Path, camera: int) -> _PivCamera:
             kind=DAVIS, where=source.name, geometry=geometry, identity=identity
         )
     if image_type == "standard":
-        folder = full_cfg.get_camera_folder(camera)
-        note_path = folder_note_path(source / folder if folder else source)
+        note_path = folder_note_path(camera_path_for(full_cfg, source, camera))
         if note_path.is_file():
             note = read_image_note(note_path)
             return _PivCamera(

@@ -18,6 +18,7 @@ from pivtools_core.fft_sizes import (
 )
 from pivtools_core.image_handling.load_images import create_piv_frame_reader
 from pivtools_core.image_handling.path_utils import (
+    camera_path_for,
     format_to_glob,
     validate_images_generic,
 )
@@ -151,13 +152,8 @@ def validate_config(config: Config) -> Tuple[bool, str, List[str]]:
     diagnosis = piv_diagnosis_context(config, 0)
 
     for camera_num in camera_numbers:
-        # Determine camera path
         format_str = config.image_format[0]
-        if image_type in ("lavision_set", "lavision_im7", "cine", "pivraw"):
-            camera_path = source_path
-        else:
-            folder = config.get_camera_folder(camera_num)
-            camera_path = source_path / folder if folder else source_path
+        camera_path = camera_path_for(config, source_path, camera_num)
 
         # Use the canonical validator (handles .set, .cine, .pivraw, .im7, standard)
         read_frame = create_piv_frame_reader(camera_path, camera_num, config)
