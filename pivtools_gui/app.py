@@ -10,13 +10,21 @@ import threading
 import time
 import webbrowser
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 import dask
 import dask.array as da
 import numpy as np
 from dask import config as dask_config
-from flask import Blueprint, Flask, abort, jsonify, request, send_from_directory
+from flask import (
+    Blueprint,
+    Flask,
+    Response,
+    abort,
+    jsonify,
+    request,
+    send_from_directory,
+)
 from flask_compress import Compress
 from flask_cors import CORS
 from loguru import logger
@@ -187,7 +195,13 @@ def make_raw_cache_key(
     display_bounds: tuple[float, float] | None,
     cfg,
 ) -> tuple:
-    """Generate consistent cache key for raw images. Include all parameters that affect output."""
+    """Generate consistent cache key for raw images. Include all parameters that affect output.
+
+    The image settings are in it (CLAUDE.md gotcha 6): the type and format
+    decide the files read, and the pairing settings decide which recorded
+    frames pair ``idx`` is (time_resolved pair 2 is frames 2 and 3,
+    skip_frames pair 2 is frames 3 and 4).
+    """
     image_type = cfg.image_type
     # For .set files, source_path IS the .set file; for others, may need camera folder
     if image_type in ("lavision_set", "lavision_im7"):
@@ -199,7 +213,16 @@ def make_raw_cache_key(
             if folder
             else cfg.source_paths[source_path_idx]
         )
-    return (str(source_path), camera, idx, img_format, display_bounds)
+    images = (
+        image_type,
+        tuple(cfg.image_format),
+        cfg.pairing_preset,
+        cfg.frame_stride,
+        cfg.pair_stride,
+        cfg.start_index,
+        cfg.num_images,
+    )
+    return (str(source_path), camera, idx, img_format, images, display_bounds)
 
 
 def cache_key(source_path_idx, camera, cfg):
@@ -505,7 +528,7 @@ def clear_raw_cache():
     with cache_lock:
         if exclude_camera is not None:
             cam = camera_number(exclude_camera)
-            # Cache key is (source_path, camera, idx, img_format, display_bounds) — camera is index 1
+            # Cache key is make_raw_cache_key's (source_path, camera, idx, ...) — camera is index 1
             keys_to_remove = [k for k in raw_image_cache if k[1] != cam]
         else:
             keys_to_remove = list(raw_image_cache.keys())
@@ -1287,7 +1310,7 @@ def _normalize_dict_keys(obj):
     return obj
 
 
-def _frame_pair_counts(cfg) -> dict:
+def _frame_pair_counts(cfg: Config) -> dict:
     """``num_frame_pairs`` and ``per_loop_frame_pairs`` for a config response.
 
     A ``.pivraw`` run the reader refuses has no pair count. The two config
@@ -1328,7 +1351,8 @@ def config_endpoint():
     return jsonify(config_data)
 
 
-def _bad_request(message: str):
+def _bad_request(message: str) -> Tuple[Response, int]:
+    """A 400 answer in the backend's JSON error envelope (``errors.py``)."""
     return jsonify({"success": False, "error": message}), 400
 
 
@@ -1346,8 +1370,10 @@ def import_run_endpoint():
     replace something (always the config itself, since the GUI has one, plus a
     different ``rig.dt``): ``error`` lists every conflict, and the GUI asks
     before posting again with ``force``. 400 for a malformed request, a run
-    the reader refuses (``PivrawError``, via ``errors.py``) or a config that
-    does not validate; nothing is written then.
+    the reader refuses (``PivrawError``, via ``errors.py``), a malformed
+    calibration ``settings.yaml`` or a config that does not validate; nothing
+    is written then. 500 naming the file when a file cannot be read or
+    written; the config is unchanged, so the server is not reloaded.
     """
     global raw_image_cache, processed_store, FRAME_1_KEYS
     data = request.get_json(silent=True) or {}
@@ -1378,7 +1404,22 @@ def import_run_endpoint():
     except PivrawError:
         raise  # errors.py answers 400 with the reader's message
     except ValueError as e:
+        # Includes CalibrationSettingsError: a malformed settings.yaml, named.
         return _bad_request(str(e))
+    except OSError as e:
+        # import_run moves the config into place last, so it is unchanged.
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": (
+                        f"The run import failed on {e.filename or 'a file'}: "
+                        f"{e.strerror or e}. config.yaml is unchanged."
+                    ),
+                }
+            ),
+            500,
+        )
 
     with cache_lock:
         raw_image_cache.clear()
@@ -1755,7 +1796,7 @@ def run_piv():
     # null pair count /config reports can never launch a job.
     cfg = get_config()
     if cfg.image_type == "pivraw":
-        cfg.num_frame_pairs
+        cfg.require_frame_pairs()
 
     # Get the runner and start the job
     runner = get_runner()
@@ -2368,8 +2409,9 @@ def memory_check():
     It is a warning, not a gate — validate_config treats it the same way.
 
     Returns {"warning": str | None}. Reads one image per selected camera via
-    Config.image_shape_for and estimates for the largest; None when no image
-    can be read, because there is nothing to estimate yet.
+    Config.image_shape_for and estimates for the largest; None when nothing is
+    configured yet (``validate_memory_for_images``). A camera whose size cannot
+    be read is named in the warning.
     """
     cfg = get_config()
     return jsonify({"warning": validate_memory_for_images(cfg) or None})

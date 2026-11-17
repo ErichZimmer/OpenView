@@ -46,7 +46,7 @@ from .path_utils import (
     start_index_explains_failure,
     start_index_hint_message,
 )
-from .readers.davis_attr import LabelledCamera
+from .readers.davis_attr import LabelledCamera, camera_list_text, streams_text
 from .readers.set_reader import (
     SetInfo,
     read_set_info,
@@ -592,19 +592,6 @@ def streams_sentence(set_name: str, streams: Sequence[StreamInfo]) -> str:
     return f"{set_name}: {_plural(len(streams), 'stream')} \u2014 {', '.join(items)}."
 
 
-def _streams_text(streams: Sequence[int]) -> str:
-    """``stream 4`` / ``streams 0\u20131``."""
-    if len(streams) == 1:
-        return f"stream {streams[0]}"
-    return f"streams {streams[0]}\u2013{streams[-1]}"
-
-
-def _labelled_cameras_text(cameras: Sequence[LabelledCamera]) -> str:
-    """``4 cameras from the recording's own labels: Camera 1 (...) on streams 0\u20131; ...``."""
-    listing = "; ".join(f"{c.describe()} on {_streams_text(c.frames)}" for c in cameras)
-    return f"{_cameras(len(cameras))} from the recording's own labels: {listing}."
-
-
 def recording_notes(info: SetInfo) -> str:
     """Where a ``.set`` recording's cameras come from, as facts for ``found``.
 
@@ -614,7 +601,10 @@ def recording_notes(info: SetInfo) -> str:
     """
     notes: List[str] = []
     if info.cameras is not None:
-        notes.append(_labelled_cameras_text(info.cameras))
+        notes.append(
+            f"{_cameras(len(info.cameras))} from the recording's own labels: "
+            f"{camera_list_text(info.cameras)}."
+        )
         counts = {c.labelled_images for c in info.cameras}
         if counts != {info.n_entries}:
             if len(counts) == 1:
@@ -1000,7 +990,7 @@ def _labelled_suggestions(
     message = (
         f"{_cameras(k)} by the recording's own camera labels: "
         + "; ".join(
-            f"{c.number} = {c.describe()}, {_streams_text(c.frames)}" for c in cameras
+            f"{c.number} = {c.describe()}, {streams_text(c.frames)}" for c in cameras
         )
         + f". Set {_cameras(k)} and process {noun} {_and_join(process)}."
     )

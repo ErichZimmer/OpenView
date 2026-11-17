@@ -46,8 +46,8 @@ from pivtools_core.image_handling.readers import set_reader  # noqa: E402
 from pivtools_core.image_handling.readers.set_reader import (  # noqa: E402
     _IMPLEMENTED_DECODERS,
     _decode_mono10p,
-    _decode_mono12p,
     clear_set_info_cache,
+    decode_mono12p,
     read_set_frame,
     read_set_info,
     read_set_pair,
@@ -73,7 +73,7 @@ def test_raw16_round_trips(tmp_path):
 def test_raw8_widens_without_rescaling(tmp_path):
     """'raw-8-bit' widens to 16-bit but keeps raw counts: 200 stays 200, not 51200.
 
-    Matches _decode_mono12p, which returns 0-4095 despite its DaVis label also
+    Matches decode_mono12p, which returns 0-4095 despite its DaVis label also
     reading "to 16 bit". Intensity thresholds must mean the same thing whichever
     encoding a recording used.
     """
@@ -395,7 +395,7 @@ def test_dark_shape_mismatch_raises(tmp_path):
 
 
 def _decode_mono12p_byte_planes(raw, width, height):
-    """The byte-plane implementation _decode_mono12p replaced (git f052f2b).
+    """The byte-plane implementation decode_mono12p replaced (git f052f2b).
 
     Kept here as the reference. The rewrite is a memory-access change only, so any
     divergence from this is a bug in the rewrite, not a deliberate difference.
@@ -428,7 +428,7 @@ def test_mono12p_matches_byte_plane_reference_on_bit_patterns(name):
     raw = _BIT_PATTERNS[name]
     n_px = (len(raw) // 3) * 2
     expected = _decode_mono12p_byte_planes(raw, n_px, 1)
-    np.testing.assert_array_equal(_decode_mono12p(raw, n_px, 1), expected)
+    np.testing.assert_array_equal(decode_mono12p(raw, n_px, 1), expected)
 
 
 def test_mono12p_matches_byte_plane_reference_on_random_frame():
@@ -437,7 +437,7 @@ def test_mono12p_matches_byte_plane_reference_on_random_frame():
     rng = np.random.default_rng(0)
     raw = rng.integers(0, 256, size=(width * height * 3) // 2, dtype=np.uint8).tobytes()
     expected = _decode_mono12p_byte_planes(raw, width, height)
-    got = _decode_mono12p(raw, width, height)
+    got = decode_mono12p(raw, width, height)
     np.testing.assert_array_equal(got, expected)
     assert got.dtype == np.uint16
     assert got.flags.c_contiguous
@@ -450,12 +450,12 @@ def test_mono12p_odd_pixel_count_raises():
     The pair-wise form would otherwise drop the trailing pixel silently.
     """
     with pytest.raises(ValueError, match="even number of pixels"):
-        _decode_mono12p(b"\x00" * 9, 3, 1)
+        decode_mono12p(b"\x00" * 9, 3, 1)
 
 
 def test_mono12p_short_buffer_raises_rather_than_decoding_garbage():
     with pytest.raises((ValueError, TypeError)):
-        _decode_mono12p(b"\x00" * 5, 4, 1)  # 4 px needs 6 bytes
+        decode_mono12p(b"\x00" * 5, 4, 1)  # 4 px needs 6 bytes
 
 
 # ---------------------------------------------------------------------------

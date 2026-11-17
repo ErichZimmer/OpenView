@@ -25,7 +25,7 @@ import numpy as np
 import scipy.io
 import yaml
 
-from pivtools_core.config import CALIBRATION_ACTIVE_METHODS
+from pivtools_core.config import CALIBRATION_ACTIVE_METHODS, Config
 from pivtools_core.paths import get_data_paths
 from pivtools_gui.utils.worker_pool import (
     get_max_workers,
@@ -311,7 +311,12 @@ def plan_apply_units(
     return units
 
 
-def _check_frames(full_cfg, source, units, base_indices: Optional[List[int]]) -> None:
+def _check_frames(
+    full_cfg: Config,
+    source: Path,
+    units: List[Dict],
+    base_indices: Optional[List[int]],
+) -> None:
     """Refuse the plan unless the calibration's pixel frame is the PIV images'.
 
     Stores the check's warnings in each unit's ``frame_warnings``.

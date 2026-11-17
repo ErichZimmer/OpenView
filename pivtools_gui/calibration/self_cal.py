@@ -30,6 +30,7 @@ from typing import List, Optional, Tuple
 import cv2
 import numpy as np
 
+from pivtools_core.config import Config
 from pivtools_gui.stereo_reconstruction.self_calibration import (
     PinholeCamera,
     SelfCalibrationResult,
@@ -134,7 +135,7 @@ def _to_pair_gray(pair: np.ndarray) -> np.ndarray:
 
 
 def check_self_cal_frames(
-    config,
+    config: Config,
     calibration_source: Path,
     base_path_idx: int,
     cam1: int,
@@ -163,7 +164,7 @@ def check_self_cal_frames(
             f"base_path_idx {base_path_idx} has no PIV source path "
             f"({len(sources)} configured)"
         )
-    int(config.num_frame_pairs)
+    config.require_frame_pairs()
     return check_calibration_frames(
         config,
         calibration_source,

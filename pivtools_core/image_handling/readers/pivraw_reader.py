@@ -24,7 +24,7 @@ Layout facts the reader relies on:
   indices and ``missing_indices`` are disjoint and together fill
   ``[0, span)``, the span rounded up to a whole pair for double-frame.
 * Mono12p is the PFNC LSB-first packing (two pixels in three bytes), the layout
-  ``set_reader._decode_mono12p`` already decodes, so that decoder is reused.
+  ``set_reader.decode_mono12p`` already decodes, so that decoder is reused.
 * BayerRG8 becomes a 2x2 superpixel sum R+G+G+B at half resolution, with no
   demosaicing (decision 2026-10-26). The sum of four 8-bit photosites is at most
   1020, exact in float32.
@@ -73,7 +73,7 @@ import numpy as np
 import yaml
 
 from .out_buffer import check_out
-from .set_reader import _decode_mono12p
+from .set_reader import decode_mono12p
 
 PathLike = Union[str, Path]
 
@@ -90,7 +90,10 @@ INDEX_RECORD_BYTES = INDEX_DTYPE.itemsize
 # Frames start on 4096-byte boundaries so the recorder can write with direct I/O.
 STRIDE_ALIGNMENT = 4096
 # The recorder names camera k's files Camera<k>.pivraw; the sidecar's slot must be k.
+# PIVRAW_IMAGE_FORMAT is also the config's images.image_format for a run.
+PIVRAW_IMAGE_FORMAT = "Camera%d.pivraw"
 _DATA_NAME = re.compile(r"^Camera(\d+)\.pivraw$")
+
 # The run description beside the camera files (CONTRACTS section 4).
 RUN_FILE = "run.yaml"
 # run.yaml ``trigger``: what fired the cameras.
@@ -142,6 +145,11 @@ REQUIRED_FIELDS = (
     "format",
     "format_version",
 )
+
+
+def pivraw_file_name(slot: int) -> str:
+    """``Camera<slot>.pivraw``: the recorder's data file of camera ``slot``."""
+    return PIVRAW_IMAGE_FORMAT % slot
 
 
 class PivrawError(ValueError):
@@ -280,7 +288,10 @@ def _listed(values: np.ndarray) -> str:
 
 
 def _frames_per_trigger(mode: str) -> int:
-    """Frames one trigger fires: A and B for double-frame, one for time-resolved."""
+    """Frames one trigger fires: A and B for double-frame, one for time-resolved.
+
+    Also the frame count of an in-run dark, which is one trigger.
+    """
     return 2 if mode == DOUBLE_FRAME else 1
 
 
@@ -414,7 +425,7 @@ def _parse_sidecar(raw_path: Path, sidecar: Any) -> PivrawHeader:
         raise PivrawError(
             f"{where}: sidecar slot {slot} does not match the file name "
             f"{raw_path.name}; the recorder names camera {slot}'s file "
-            f"Camera{slot}.pivraw."
+            f"{pivraw_file_name(slot)}."
         )
     width = _int_field(sidecar, "width", where, 1)
     height = _int_field(sidecar, "height", where, 1)
@@ -780,11 +791,6 @@ def read_pivraw_run_file(run_dir: PathLike) -> PivrawRunFile:
     return parsed
 
 
-def _frames_per_dark(mode: str) -> int:
-    """A dark is one trigger: frames A and B (double-frame) or one frame."""
-    return 2 if mode == DOUBLE_FRAME else 1
-
-
 def _check_dark(header: PivrawHeader, run: PivrawRunFile) -> PivrawHeader:
     """The validated header of ``header``'s in-run dark.
 
@@ -812,11 +818,11 @@ def _check_dark(header: PivrawHeader, run: PivrawRunFile) -> PivrawHeader:
             "subtracted only from frames of the camera it was taken with, in its "
             "own slot, geometry and pixel format."
         )
-    if dark.n_frames != _frames_per_dark(dark.mode):
+    if dark.n_frames != _frames_per_trigger(dark.mode):
         raise PivrawError(
             f"{dark_raw}: the in-run dark {run.dark_id} holds {dark.n_frames} "
             f"frames; a {dark.mode} dark is one trigger, "
-            f"{_frames_per_dark(dark.mode)} frame(s)."
+            f"{_frames_per_trigger(dark.mode)} frame(s)."
         )
     return dark
 
@@ -886,7 +892,7 @@ def _sensor_pixels(header: PivrawHeader, idx: int) -> np.ndarray:
             f"{header.bytes_per_frame} bytes at offset {offset})."
         )
     if header.pixel_format == MONO12P:
-        return _decode_mono12p(raw, header.width, header.height)
+        return decode_mono12p(raw, header.width, header.height)
     return raw.reshape(header.height, header.width)
 
 
@@ -1035,8 +1041,13 @@ TRIGGER_TOL_FRAC = 0.25
 # REPORT C9). Prototype ``pivraw_align.PHASE_MARGIN``, acquisition
 # ``export.AB_PHASE_MARGIN``.
 AB_PHASE_MARGIN = 0.2
-# Why a run cannot be aligned. The same names as the acquisition app's
+# host_ns and camera_ns are nanoseconds; messages show milliseconds.
+_NS_PER_MS = 1e6
+_NS_PER_S = 1e9
+# Why a run cannot be aligned. The first seven are the acquisition app's
 # ``export.REASONS`` and the fixtures' ``must_raise:<reason>``.
+# ``run_file_count`` is this reader's own: run.yaml requests fewer triggers
+# than the cameras recorded, so the run.yaml is stale or another run's.
 ALIGNMENT_REASONS = (
     "inconsistent_files",
     "cameras_disagree",
@@ -1045,6 +1056,7 @@ ALIGNMENT_REASONS = (
     "camera_offset",
     "tr_interval",
     "ab_phase",
+    "run_file_count",
 )
 # The one pairing of a double-frame run, in recorded frames: A and B of each
 # trigger (the skip_frames preset).
@@ -1243,16 +1255,16 @@ def _ab_phase_note(run_dir: Path, cam: _CameraTriggers) -> Optional[str]:
     if median_ba <= (1 - AB_PHASE_MARGIN) * median_ab:
         raise PivrawAlignmentError(
             "ab_phase",
-            f"{run_dir}: {name}: A->B {median_ab / 1e6:.2f} ms is longer than "
-            f"B->next A {median_ba / 1e6:.2f} ms on the camera clock: each file "
+            f"{run_dir}: {name}: A->B {median_ab / _NS_PER_MS:.2f} ms is longer than "
+            f"B->next A {median_ba / _NS_PER_MS:.2f} ms on the camera clock: each file "
             "pair is B of one trigger and A of the next (the run's first frame "
             f"was lost). {_RERECORD}",
         )
     if median_ab <= (1 - AB_PHASE_MARGIN) * median_ba:
         return None
     return (
-        f"{name}: A/B phase not provable (A->B {median_ab / 1e6:.2f} ms and "
-        f"B->next A {median_ba / 1e6:.2f} ms on the camera clock are within "
+        f"{name}: A/B phase not provable (A->B {median_ab / _NS_PER_MS:.2f} ms and "
+        f"B->next A {median_ba / _NS_PER_MS:.2f} ms on the camera clock are within "
         f"{AB_PHASE_MARGIN:.0%} of each other); pairs are read as recorded."
     )
 
@@ -1293,7 +1305,7 @@ def _check_tr_spacing(
         raise PivrawAlignmentError(
             "tr_interval",
             f"{run_dir}: {name} run triggers {pair.run_triggers}: frames "
-            f"{dt / 1e6:.1f} ms apart, expected {expected / 1e6:.1f} ms. {why}",
+            f"{dt / _NS_PER_MS:.1f} ms apart, expected {expected / _NS_PER_MS:.1f} ms. {why}",
         )
 
 
@@ -1331,7 +1343,7 @@ def _run_stamp(run_dir: Path, slots: Tuple[int, ...]) -> Tuple[Any, ...]:
     except FileNotFoundError:
         run_stamp = (-1, -1)
     return (slots, run_stamp) + tuple(
-        _stamp(run_dir / f"Camera{s}.pivraw") for s in slots
+        _stamp(run_dir / pivraw_file_name(s)) for s in slots
     )
 
 
@@ -1356,6 +1368,8 @@ def align_pivraw_run(
        time-resolved, the two frames of a pair are their triggers apart in host
        time; (c) double-frame, each camera's A/B phase on its own clock.
     4. Triggers run.yaml requested that no camera accounts for become a note.
+       Fewer requested than the cameras account for is refused: the run.yaml
+       is stale or another run's.
 
     Args:
         run_dir: The run folder (``Camera<k>.pivraw`` files and ``run.yaml``).
@@ -1376,7 +1390,7 @@ def align_pivraw_run(
     if cached is not None and cached[0] == stamp:
         return cached[1]
 
-    headers = {s: read_pivraw_header(run_dir / f"Camera{s}.pivraw") for s in slots}
+    headers = {s: read_pivraw_header(run_dir / pivraw_file_name(s)) for s in slots}
     run_file = read_pivraw_run_file(run_dir)
     requested, trigger_source = run_file.requested_triggers, run_file.trigger
     modes = {h.mode for h in headers.values()}
@@ -1389,7 +1403,7 @@ def align_pivraw_run(
         )
     mode, rate = modes.pop(), rates.pop()
     _check_pairing(run_dir, mode, frame_stride, pair_stride)
-    period_ns = 1e9 / rate
+    period_ns = _NS_PER_S / rate
     cams = {s: _camera_triggers(h) for s, h in headers.items()}
     empty = [f"Camera{s}" for s, c in cams.items() if not c.position]
     if empty:
@@ -1451,7 +1465,7 @@ def align_pivraw_run(
             raise PivrawAlignmentError(
                 "camera_offset",
                 f"{run_dir}: Camera{cam.slot} run trigger "
-                f"{pairs[k].run_triggers[0]} arrives {offsets[k] / 1e6:+.1f} ms "
+                f"{pairs[k].run_triggers[0]} arrives {offsets[k] / _NS_PER_MS:+.1f} ms "
                 f"({offsets[k] / period_ns:+.2f} periods) from Camera{ref.slot} "
                 "in host time: its frame ids count from a different trigger "
                 "(first frame(s) lost, or a trigger ignored), and the files "
@@ -1468,6 +1482,15 @@ def align_pivraw_run(
         else:
             _check_tr_spacing(run_dir, cam, pairs_t, period_ns, trigger_source)
     unaccounted = requested - (last + 1)
+    if unaccounted < 0:
+        raise PivrawAlignmentError(
+            "run_file_count",
+            f"{run_dir}: run.yaml requested {requested} trigger(s) but the "
+            f"cameras account for {last + 1}: a camera cannot record a trigger "
+            "that was never requested, so this run.yaml is stale or belongs to "
+            "another run. Put the run's own run.yaml back beside its "
+            "Camera<k>.pivraw files.",
+        )
     if unaccounted > 0:
         notes.append(
             f"run.yaml requested {requested} trigger(s) and the cameras account "
@@ -1475,16 +1498,11 @@ def align_pivraw_run(
             "first or after the last delivered frame (the files cannot say "
             "which end)."
         )
-    elif unaccounted < 0:
-        notes.append(
-            f"run.yaml requested {requested} trigger(s) but the cameras account "
-            f"for {last + 1}."
-        )
 
     alignment = PivrawAlignment(
         run_dir=run_dir,
         mode=mode,
-        period_s=period_ns / 1e9,
+        period_s=period_ns / _NS_PER_S,
         cameras=slots,
         pairs=pairs_t,
         skipped_incomplete=skipped,

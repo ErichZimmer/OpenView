@@ -21,7 +21,7 @@ import os
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Optional, Sequence, Tuple
 
 import yaml
 
@@ -31,16 +31,15 @@ from pivtools_core.config import Config
 from pivtools_core.image_handling.readers.pivraw_reader import (
     DOUBLE_FRAME,
     DOUBLE_FRAME_STRIDES,
+    PIVRAW_IMAGE_FORMAT,
     PivrawError,
     align_pivraw_run,
+    pivraw_file_name,
     read_pivraw_header,
     run_cameras,
 )
 from pivtools_core.validation import validate_config
 
-# The recorder's data file per camera slot (CONTRACTS section 1); the reader
-# takes the slot from the name.
-PIVRAW_IMAGE_FORMAT = "Camera%d.pivraw"
 # Pairing preset per recorded mode, as (preset, frame_stride, pair_stride) in
 # recorded frames. A double-frame run pairs A with B of each trigger (the only
 # pairing the reader accepts for it); a time-resolved run pairs each trigger
@@ -158,21 +157,17 @@ def _calibration_source(project: Path, cameras: Tuple[int, ...]) -> Path:
 def _stored_rig_dt(source: Path) -> Optional[float]:
     """``rig.dt`` of an existing settings file, None when the file or value is absent.
 
-    Read raw, not through :func:`calibration_settings.load_settings`, which
-    refuses a file still missing its image block.
+    Read as stored (:func:`calibration_settings.read_stored_settings`), not
+    through ``load_settings``, which refuses a file still missing its image
+    block.
 
     Raises:
-        ValueError: The settings file is not a YAML mapping.
+        OSError: The settings file cannot be read.
+        calibration_settings.CalibrationSettingsError: It is not a YAML mapping.
     """
-    path = cs.settings_path(source)
-    if not path.exists():
+    stored = cs.read_stored_settings(source)
+    if stored is None:
         return None
-    stored = yaml.safe_load(path.read_text(encoding="utf-8"))
-    if not isinstance(stored, dict):
-        raise ValueError(
-            f"Calibration settings {path} is not a YAML mapping; the file is "
-            "corrupt. Fix or delete it, then import the run again."
-        )
     return (stored.get("rig") or {}).get("dt")
 
 
@@ -215,16 +210,25 @@ def _build_config(
 
 
 def _write_validated(
-    config_path: Path, data: Dict[str, Any]
-) -> Tuple[Config, Tuple[str, ...]]:
-    """Write ``data`` to ``config_path`` only if it validates.
+    config_path: Path,
+    data: Dict[str, Any],
+    before_commit: Callable[[], None],
+) -> Tuple[int, Tuple[str, ...]]:
+    """Write ``data`` to ``config_path`` only if it validates and ``before_commit`` succeeds.
 
-    The config is staged beside the target, validated with the processing
-    checks, and moved into place; a refused config leaves no file. Returns the
-    written config and the validation warnings.
+    The config is staged beside the target and validated with the processing
+    checks. Then ``before_commit`` runs (the calibration settings write), and
+    only then is the staged file moved into place, as the last step. Any
+    failure before the move leaves ``config_path`` as it was and no staged
+    file behind.
+
+    Returns:
+        The config's frame-pair count and the validation warnings.
 
     Raises:
         ValueError: Validation failed; the message is the validation errors.
+        Whatever ``before_commit`` raises, and ``OSError`` from the staging or
+        the move.
     """
     fd, tmp_path = tempfile.mkstemp(
         prefix=config_path.name + ".", suffix=".tmp", dir=config_path.parent
@@ -232,14 +236,17 @@ def _write_validated(
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
-        ok, error, warnings = validate_config(Config(path=tmp_path))
+        staged = Config(path=tmp_path)
+        ok, error, warnings = validate_config(staged)
         if not ok:
             raise ValueError(f"The imported config does not validate:\n{error}")
+        n_pairs = staged.num_frame_pairs
+        before_commit()
         os.replace(tmp_path, config_path)
     finally:
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
-    return Config(path=str(config_path)), tuple(warnings)
+    return n_pairs, tuple(warnings)
 
 
 def import_run(
@@ -251,7 +258,9 @@ def import_run(
     """Write ``config_path`` for the ``.pivraw`` run in ``run_dir``.
 
     Nothing is written unless the run aligns by trigger, the cameras agree on
-    ``dt_s``, and the config validates.
+    ``dt_s``, and the config validates. The calibration settings are written
+    before the config is moved into place, so a failed settings write leaves
+    the config as it was.
 
     - Source path: ``run_dir`` (absolute). Output: ``base_path``, by default
       ``<project>/results/<run name>`` with ``<project>`` the run's parent.
@@ -278,14 +287,17 @@ def import_run(
         RunImportConflict: ``force`` is False and ``config_path`` exists, or
             the calibration settings hold a different ``rig.dt``; it names
             every such conflict.
+        calibration_settings.CalibrationSettingsError: The calibration
+            settings file is malformed; nothing is written.
         ValueError: The config does not validate.
+        OSError: A file cannot be read or written; the config is unchanged.
     """
     run_dir = Path(os.path.abspath(run_dir))
     config_path = Path(os.path.abspath(config_path))
     project = run_dir.parent
 
     cameras = run_cameras(run_dir)
-    headers = {s: read_pivraw_header(run_dir / f"Camera{s}.pivraw") for s in cameras}
+    headers = {s: read_pivraw_header(run_dir / pivraw_file_name(s)) for s in cameras}
     first_mode = headers[cameras[0]].mode
     _preset, frame_stride, pair_stride = PAIRING[first_mode]
     alignment = align_pivraw_run(run_dir, frame_stride, pair_stride)
@@ -319,8 +331,6 @@ def import_run(
         alignment.mode,
         calibration_source,
     )
-    cfg, warnings = _write_validated(config_path, data)
-
     partial: Dict[str, Any] = {"rig": {"dt": rig_dt}}
     settings_created = not settings_file.exists()
     if settings_created:
@@ -328,14 +338,16 @@ def import_run(
             "image_format": APP_CALIBRATION_IMAGE_FORMAT,
             "image_type": APP_CALIBRATION_IMAGE_TYPE,
         }
-    cs.save_settings(calibration_source, partial)
+    n_pairs, warnings = _write_validated(
+        config_path, data, lambda: cs.save_settings(calibration_source, partial)
+    )
 
     return RunImport(
         config_path=config_path,
         run_dir=run_dir,
         cameras=cameras,
         mode=alignment.mode,
-        n_pairs=cfg.num_frame_pairs,
+        n_pairs=n_pairs,
         calibration_source=calibration_source,
         settings_path=settings_file,
         rig_dt=rig_dt,

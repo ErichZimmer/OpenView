@@ -192,6 +192,37 @@ def test_an_existing_config_and_a_different_rig_dt_are_reported_together(tmp_pat
     assert _rig_dt(project / "calibration") == 2e-4
 
 
+def _failing_save(source, partial):
+    raise PermissionError(13, "Permission denied", str(cs.settings_path(source)))
+
+
+def test_a_settings_write_failure_leaves_the_config_unchanged(tmp_path, monkeypatch):
+    """The settings are written before the config is moved into place, so a
+    settings write that fails leaves the old config as it was."""
+    _project, run = _project_run(tmp_path, "df_2cam_clean")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("paths: {}\n")
+    monkeypatch.setattr(cs, "save_settings", _failing_save)
+    with pytest.raises(PermissionError):
+        import_run(run, config_path, force=True)
+    assert config_path.read_text() == "paths: {}\n"
+    assert [p.name for p in tmp_path.iterdir()] == ["config.yaml", "project"]
+
+
+@pytest.mark.parametrize("text", ["- a\n- b\n", "rig: {dt: [\n"])
+def test_malformed_calibration_settings_are_refused_by_name(tmp_path, text):
+    project, run = _project_run(tmp_path, "df_2cam_clean")
+    path = cs.settings_path(project / "calibration")
+    path.parent.mkdir(parents=True)
+    path.write_text(text, encoding="utf-8")
+    config_path = tmp_path / "config.yaml"
+    with pytest.raises(cs.CalibrationSettingsError) as excinfo:
+        import_run(run, config_path)
+    assert str(path) in str(excinfo.value)
+    assert not config_path.exists()
+    assert path.read_text(encoding="utf-8") == text
+
+
 def test_cameras_that_disagree_on_dt_are_refused(tmp_path):
     _project, run = _project_run(tmp_path, "df_2cam_clean")
     edit_sidecar(run, 2, dt_s=3e-4)
@@ -219,6 +250,17 @@ def test_cli_writes_the_config_in_the_working_directory(tmp_path, monkeypatch):
     work.mkdir()
     _cli(monkeypatch, work, "init", "--from-run", str(run))
     assert Config(path=str(work / "config.yaml")).source_paths == [run]
+
+
+def test_cli_base_path_without_from_run_is_refused(tmp_path, monkeypatch, capsys):
+    """--base-path only means something for an imported run; argparse refuses
+    it alone (exit 2) before any config is written."""
+    with pytest.raises(SystemExit) as excinfo:
+        _cli(monkeypatch, tmp_path, "init", "--base-path", str(tmp_path / "out"))
+    assert excinfo.value.code == 2
+    err = capsys.readouterr().err
+    assert "--base-path" in err and "--from-run" in err
+    assert not (tmp_path / "config.yaml").exists()
 
 
 def test_cli_refusal_exits_non_zero_with_the_reason(tmp_path, monkeypatch, capsys):

@@ -24,6 +24,9 @@ from pivtools_core.image_handling.readers.pivraw_reader import PivrawError
 from pivtools_core.image_handling.readers.set_reader import SetConfigError
 
 API_PREFIX = "/backend/"
+# Errors the user fixes in the configuration or the data: answered 400 with
+# their own message (register_json_error_handlers).
+BAD_INPUT_ERRORS = (CalibrationSourceError, PivrawError, SetConfigError)
 
 
 def _is_api_request() -> bool:
@@ -50,23 +53,13 @@ def register_json_error_handlers(app: Flask) -> None:
             return exc
         return jsonify({"success": False, "error": exc.description}), exc.code
 
-    @app.errorhandler(CalibrationSourceError)
-    def _calibration_source(exc: CalibrationSourceError):
+    def _bad_input(exc: Exception):
         if not _is_api_request():
             return InternalServerError(original_exception=exc)
         return jsonify({"success": False, "error": str(exc)}), 400
 
-    @app.errorhandler(PivrawError)
-    def _pivraw(exc: PivrawError):
-        if not _is_api_request():
-            return InternalServerError(original_exception=exc)
-        return jsonify({"success": False, "error": str(exc)}), 400
-
-    @app.errorhandler(SetConfigError)
-    def _set_config(exc: SetConfigError):
-        if not _is_api_request():
-            return InternalServerError(original_exception=exc)
-        return jsonify({"success": False, "error": str(exc)}), 400
+    for error_type in BAD_INPUT_ERRORS:
+        app.register_error_handler(error_type, _bad_input)
 
     @app.errorhandler(Exception)
     def _unhandled(exc: Exception):

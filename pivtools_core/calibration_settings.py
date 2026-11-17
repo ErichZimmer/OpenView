@@ -52,6 +52,15 @@ SETTINGS_FILENAME = "settings.yaml"
 PathLike = Union[str, Path]
 
 
+class CalibrationSettingsError(ValueError):
+    """A calibration ``settings.yaml`` that cannot be used as it stands.
+
+    Not YAML, not a mapping, a stale schema, or a required key missing. The
+    message names the file and the fix. A ``ValueError``, so callers that
+    report bad input catch it with the rest.
+    """
+
+
 # Single-file container formats whose frames all live inside one file. This is
 # the single place to register such a format: a source with one of these
 # suffixes (case-insensitive) is a FILE and gets its own per-stem calibration
@@ -271,7 +280,7 @@ def _missing_message(source: Path, path: Path) -> str:
 def _validate_loaded(data: Dict[str, Any], path: Path) -> None:
     version = data.get("schema_version")
     if version != SCHEMA_VERSION:
-        raise ValueError(
+        raise CalibrationSettingsError(
             f"Calibration settings {path} has schema_version={version!r}, "
             f"expected {SCHEMA_VERSION}. The file is stale — re-save it from "
             "the GUI or re-run init-settings."
@@ -279,7 +288,7 @@ def _validate_loaded(data: Dict[str, Any], path: Path) -> None:
     image = data.get("image") or {}
     for key in ("image_format", "image_type"):
         if not image.get(key):
-            raise ValueError(
+            raise CalibrationSettingsError(
                 f"Calibration settings {path} is missing required "
                 f"'image.{key}'. Set it in the GUI Calibration tab or edit "
                 "the file directly."
@@ -287,6 +296,53 @@ def _validate_loaded(data: Dict[str, Any], path: Path) -> None:
     refuse_non_calibration_type(
         image["image_type"], f"Calibration settings {path}, image.image_type"
     )
+
+
+def _read_mapping(path: Path) -> Dict[str, Any]:
+    """The YAML mapping stored in the settings file ``path``.
+
+    An empty file is an empty mapping.
+
+    Raises:
+        OSError: The file cannot be read.
+        CalibrationSettingsError: It is not YAML, or not a mapping.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            stored = yaml.safe_load(f)
+    except yaml.YAMLError as exc:
+        raise CalibrationSettingsError(
+            f"Calibration settings {path} is not valid YAML ({exc}). Fix or "
+            "delete the file, then re-save it from the GUI or re-run init-settings."
+        ) from exc
+    if stored is None:
+        return {}
+    if not isinstance(stored, dict):
+        raise CalibrationSettingsError(
+            f"Calibration settings {path} is not a YAML mapping; the file is "
+            "corrupt. Fix or delete it, then re-save it from the GUI or re-run "
+            "init-settings."
+        )
+    return stored
+
+
+def read_stored_settings(source: PathLike) -> Optional[Dict[str, Any]]:
+    """The settings file of ``source`` as stored: no defaults, no validation.
+
+    For a caller that needs one stored value of a file that may not yet hold
+    the required image block (the run import reads ``rig.dt``).
+
+    Returns:
+        None when the file does not exist.
+
+    Raises:
+        OSError: The file exists but cannot be read.
+        CalibrationSettingsError: It is not YAML, or not a mapping.
+    """
+    path = settings_path(source)
+    if not path.exists():
+        return None
+    return _read_mapping(path)
 
 
 def try_load_settings(source: PathLike) -> Optional[Dict[str, Any]]:
@@ -326,14 +382,7 @@ def load_settings(source: PathLike) -> Dict[str, Any]:
             merged = copy.deepcopy(cached[1])
             _validate_loaded(merged, path)
             return merged
-        with open(path, "r", encoding="utf-8") as f:
-            stored = yaml.safe_load(f)
-        if not isinstance(stored, dict):
-            raise ValueError(
-                f"Calibration settings {path} is not a YAML mapping — the "
-                "file is corrupt. Re-save it from the GUI or re-run "
-                "init-settings."
-            )
+        stored = _read_mapping(path)
         merged = _deep_merge(default_settings(), stored)
         _validate_loaded(merged, path)
         _CACHE[path] = (stamp, copy.deepcopy(merged))
@@ -354,13 +403,7 @@ def save_settings(source: PathLike, partial: Dict[str, Any]) -> Dict[str, Any]:
     path = settings_path(source)
     with _LOCK:
         if path.exists():
-            with open(path, "r", encoding="utf-8") as f:
-                current = yaml.safe_load(f) or {}
-            if not isinstance(current, dict):
-                raise ValueError(
-                    f"Calibration settings {path} is not a YAML mapping — "
-                    "refusing to merge into a corrupt file."
-                )
+            current = _read_mapping(path)
         else:
             current = default_settings()
         merged = _deep_merge(current, copy.deepcopy(partial))

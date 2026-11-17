@@ -145,6 +145,38 @@ def test_a_different_rig_dt_answers_409_with_both_values(gui):
     assert "0.0005" in error and "0.0002" in error
 
 
+def test_a_settings_write_failure_answers_500_naming_the_file(gui, monkeypatch):
+    client, config_path, project, reloads = gui
+    run = copy_case(project, "df_2cam_clean")
+    path = cs.settings_path(project / "calibration")
+
+    def failing_save(source, partial):
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr(cs, "save_settings", failing_save)
+    before = config_path.read_text()
+    r = _post(client, run_dir=str(run), force=True)
+    assert r.status_code == 500
+    error = r.get_json()["error"]
+    assert str(path) in error and "Permission denied" in error
+    assert config_path.read_text() == before
+    assert reloads == []
+
+
+def test_malformed_calibration_settings_answer_400_naming_the_file(gui):
+    client, config_path, project, reloads = gui
+    run = copy_case(project, "df_2cam_clean")
+    path = cs.settings_path(project / "calibration")
+    path.parent.mkdir(parents=True)
+    path.write_text("- a\n- b\n", encoding="utf-8")
+    before = config_path.read_text()
+    r = _post(client, run_dir=str(run), force=True)
+    assert r.status_code == 400
+    assert str(path) in r.get_json()["error"]
+    assert config_path.read_text() == before
+    assert reloads == []
+
+
 def test_force_replaces_a_different_rig_dt(gui):
     client, _, project, _ = gui
     run = copy_case(project, "df_2cam_clean")

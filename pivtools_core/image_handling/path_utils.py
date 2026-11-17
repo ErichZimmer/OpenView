@@ -83,7 +83,7 @@ def infer_image_type(image_format: str) -> str:
 RASTER_EXTENSIONS: Tuple[str, ...] = (".tif", ".tiff", ".png", ".jpg", ".jpeg")
 
 
-def _glob_images(directory: Path, pattern: str) -> List[Path]:
+def glob_images(directory: Path, pattern: str) -> List[Path]:
     """glob() a directory, excluding dotfiles.
 
     macOS writes AppleDouble sidecar files ("._foo.tif") next to real images on
@@ -98,7 +98,7 @@ def _raster_images(directory: Path) -> List[Path]:
     """Every ``RASTER_EXTENSIONS`` file in ``directory`` (dot-names excluded)."""
     found: List[Path] = []
     for ext in RASTER_EXTENSIONS:
-        found.extend(_glob_images(directory, f"*{ext}"))
+        found.extend(glob_images(directory, f"*{ext}"))
     return found
 
 
@@ -913,7 +913,7 @@ def _validate_core(
         if camera_path.exists() and camera_path.is_dir():
             all_images = []
             if image_type == "lavision_im7":
-                all_images = _glob_images(camera_path, "*.im7")
+                all_images = glob_images(camera_path, "*.im7")
             else:
                 all_images.extend(_raster_images(camera_path))
             if all_images:
@@ -931,7 +931,7 @@ def _validate_core(
             # List sibling .set files (the set_in_folder rule suggests them).
             parent_dir = set_file.parent
             if parent_dir.exists():
-                set_files = _glob_images(parent_dir, "*.set")
+                set_files = glob_images(parent_dir, "*.set")
                 if set_files:
                     result["sample_files"] = [f.name for f in set_files[:5]]
             return result
@@ -1002,7 +1002,7 @@ def _validate_core(
         if not cine_file.exists():
             result["error"] = f"CINE file not found: {cine_file}"
             # List the .cine files present (the pattern rule suggests a pattern).
-            cine_files = _glob_images(camera_path, "*.cine")
+            cine_files = glob_images(camera_path, "*.cine")
             if cine_files:
                 result["sample_files"] = [f.name for f in cine_files[:5]]
             return result
@@ -1055,7 +1055,7 @@ def _validate_core(
         if not pivraw_file.exists():
             result["error"] = f"PIVRAW file not found: {pivraw_file}"
             # List the .pivraw files present (the pattern rule suggests a pattern).
-            pivraw_files = _glob_images(camera_path, "*.pivraw")
+            pivraw_files = glob_images(camera_path, "*.pivraw")
             if pivraw_files:
                 result["sample_files"] = [f.name for f in pivraw_files[:5]]
             return result
@@ -1113,18 +1113,25 @@ def _validate_core(
         note = pivraw_dark_note(pivraw_file)
         if note is not None:
             result["notes"].append(note)
+        # The frame read, so a preview that will not render is cosmetic: the
+        # user reads why there is none, and no size is reported for it.
         try:
-            result["image_size"] = (img.shape[1], img.shape[0])
-            result["first_image_preview"] = _image_to_base64(img)
+            preview = _image_to_base64(img)
         except Exception as e:
-            logging.warning(f"Could not render preview from .pivraw file: {e}")
+            result["notes"].append(
+                f"No preview of {pivraw_file.name} frame 1: it read, but could "
+                f"not be rendered ({type(e).__name__}: {e})."
+            )
+        else:
+            result["image_size"] = (img.shape[1], img.shape[0])
+            result["first_image_preview"] = preview
 
         return result
 
     elif image_type == "lavision_im7":
         # Count .im7 files in directory
         pattern = format_to_glob(image_format)
-        matching_files = sorted(_glob_images(camera_path, pattern))
+        matching_files = sorted(glob_images(camera_path, pattern))
 
         if not matching_files:
             try:
@@ -1137,7 +1144,7 @@ def _validate_core(
             result["error"] = error_msg
 
             # List the .im7 files present (the pattern rule suggests a pattern).
-            im7_files = sorted(_glob_images(camera_path, "*.im7"))
+            im7_files = sorted(glob_images(camera_path, "*.im7"))
             if im7_files:
                 im7_names = [f.name for f in im7_files]
                 _fold_pattern_reason(result, im7_names, image_type, calibration)
@@ -1183,7 +1190,7 @@ def _validate_core(
     else:
         # Standard formats
         pattern = format_to_glob(image_format)
-        matching_files = sorted(_glob_images(camera_path, pattern))
+        matching_files = sorted(glob_images(camera_path, pattern))
 
         if not matching_files:
             try:
@@ -1430,7 +1437,7 @@ def validate_single_pattern(
         if camera_path.exists() and camera_path.is_dir():
             all_images = []
             if image_type == "lavision_im7":
-                all_images = _glob_images(camera_path, "*.im7")
+                all_images = glob_images(camera_path, "*.im7")
             else:
                 all_images.extend(_raster_images(camera_path))
             if all_images:
@@ -1457,7 +1464,7 @@ def validate_single_pattern(
 
     # Convert pattern to glob pattern
     glob_pattern = format_to_glob(pattern)
-    matching_files = sorted(_glob_images(camera_path, glob_pattern))
+    matching_files = sorted(glob_images(camera_path, glob_pattern))
 
     # Calculate the first expected filename
     start_idx = 0 if zero_based_indexing else 1
@@ -1473,7 +1480,7 @@ def validate_single_pattern(
     # Find all image files (for suggestions)
     all_images = []
     if image_type == "lavision_im7":
-        all_images = _glob_images(camera_path, "*.im7")
+        all_images = glob_images(camera_path, "*.im7")
     else:
         all_images.extend(_raster_images(camera_path))
     all_image_names = [f.name for f in sorted(all_images)] if all_images else []

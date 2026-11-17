@@ -191,6 +191,19 @@ def test_unaccounted_triggers_become_a_note(tmp_path):
     )
 
 
+def test_fewer_triggers_requested_than_recorded_is_refused(tmp_path):
+    """run.yaml asks for 1 trigger, the cameras hold 2: the run.yaml is stale
+    or belongs to another run, so the run is refused by name."""
+    run = copy_case(tmp_path, "df_2cam_clean")
+    edit_run_yaml(run, record_n=1)
+    with pytest.raises(PivrawAlignmentError) as info:
+        align_pivraw_run(run, 1, 2)
+    assert info.value.reason == "run_file_count"
+    message = str(info.value)
+    for word in [str(run), "requested 1 trigger(s)", "account for 2", "run.yaml"]:
+        assert word in message, message
+
+
 def test_missing_run_yaml_is_refused(tmp_path):
     run = copy_case(tmp_path, "df_2cam_clean")
     (run / "run.yaml").unlink()
@@ -262,6 +275,29 @@ def test_validation_refuses_a_run_that_cannot_align(tmp_path):
     assert result["pivraw_alignment"] is None
 
 
+def test_a_preview_that_cannot_render_is_a_note_and_leaves_no_size(tmp_path):
+    """Stand-in: a first frame of zero rows, which the preview renderer cannot
+    draw. The user reads why there is no preview, and no size is reported
+    for a frame that was not shown."""
+    run = copy_case(tmp_path, "df_2cam_clean")
+    result = validate_images_generic(
+        camera_path=run,
+        camera=1,
+        image_format="Camera%d.pivraw",
+        image_type="pivraw",
+        expected_count=4,
+        zero_based_indexing=False,
+        read_frame_fn=lambda idx: np.zeros((0, 5)),
+        diagnosis=make_ctx(run, image_type="pivraw", image_format=("Camera%d.pivraw",)),
+        pair_strides=(1, 2),
+    )
+    assert result["valid"] is True, result["error"]
+    assert result["image_size"] is None and result["first_image_preview"] is None
+    assert any(
+        n.startswith("No preview of Camera1.pivraw frame 1:") for n in result["notes"]
+    ), result["notes"]
+
+
 def test_piv_validation_of_a_run_needs_the_strides(tmp_path):
     run = copy_case(tmp_path, "df_2cam_clean")
     with pytest.raises(ValueError, match="pair_strides"):
@@ -290,6 +326,36 @@ def test_validate_config_says_when_num_images_caps_the_pairs(tmp_path):
         "Processing 1 of 2 aligned pairs: images.num_images (2) caps them." in w
         for w in warnings
     ), warnings
+
+
+def test_validate_config_reports_every_runs_findings(tmp_path):
+    """Two runs of 2 aligned pairs each: the first skips a pair and cannot prove
+    Camera2's phase, the second cannot prove Camera1's phase. Both runs'
+    findings reach the warnings, each named by its run."""
+    first = _cam2_dropped_pair_2(tmp_path)
+    second = copy_case(tmp_path, "df_2cam_clean", "second_run")
+    cam = read_pivraw_header(second / "Camera1.pivraw").index["camera_ns"].copy()
+    cam[1] = cam[0] + 20_000_000
+    cam[2] = cam[1] + 20_000_000
+    cam[3] = cam[2] + 20_000_000
+    edit_index(second, 1, camera_ns=cam)
+    cfg = _config_with_base(tmp_path, first, num_images=4)
+    cfg.data["paths"]["source_paths"] = [str(first), str(second)]
+    cfg.data["paths"]["base_paths"] = [str(tmp_path / "o1"), str(tmp_path / "o2")]
+    ok, error, warnings = validate_config(cfg)
+    assert ok, error
+    assert any(
+        w.startswith(f"{first}: 2 pair(s) aligned")
+        and "Camera2 lacks a frame of 1" in w
+        for w in warnings
+    ), warnings
+    assert any(
+        w.startswith(f"{first}: Camera2: A/B phase not provable") for w in warnings
+    ), warnings
+    assert any(
+        w.startswith(f"{second}: Camera1: A/B phase not provable") for w in warnings
+    ), warnings
+    assert not any(w.startswith(f"{second}: 2 pair(s) aligned") for w in warnings)
 
 
 def test_validate_config_refuses_a_run_that_cannot_align(tmp_path):
@@ -368,6 +434,19 @@ def test_config_and_read_pair_follow_the_alignment_per_camera(tmp_path):
     batch = _read_batch(1, 2, run, 2, cfg)
     np.testing.assert_array_equal(batch[0], cam2[0:2])
     np.testing.assert_array_equal(batch[1], cam2[2:4])
+
+
+def test_a_reader_refusal_reaches_shape_detection_unchanged(tmp_path):
+    """The reader's PivrawError is what the caller sees, not a ValueError
+    wrapping it in 'could not read image file' advice."""
+    run = copy_case(tmp_path, "df_2cam_unequal_drops")
+    edit_sidecar(run, 1, dropped_pairs=0)
+    cfg = Config(path=str(write_piv_config(tmp_path, run, 2, 4)))
+    with pytest.raises(PivrawError) as info:
+        cfg.image_shape_for(1)
+    message = str(info.value)
+    assert "dropped_pairs" in message and "missing_indices" in message
+    assert "Could not read" not in message
 
 
 def test_pivraw_pair_indices_need_the_camera(tmp_path):

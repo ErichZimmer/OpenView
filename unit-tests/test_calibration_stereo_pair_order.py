@@ -41,6 +41,9 @@ class _FakeConfig:
     def get_calibration_source(self, idx):
         return self._source
 
+    def require_frame_pairs(self):
+        return self.num_frame_pairs
+
 
 def _save_reversed(source):
     """A pinhole stereo record solved as (2, 1): model1 is Cam2's, model2 Cam1's."""
