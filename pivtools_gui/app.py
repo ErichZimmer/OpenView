@@ -34,6 +34,7 @@ from pivtools_cli.run_import import RunImportConflict, import_run
 from pivtools_core.config import Config, get_config, reload_config
 from pivtools_core.fft_sizes import BUILT_FFT_SIZES, SINGLE_MODE_WINDOW_SIZES
 from pivtools_core.image_handling.load_images import (
+    MaskError,
     create_piv_frame_reader,
     is_colour_pair,
     load_mask_for_camera,
@@ -672,6 +673,11 @@ def filter_images_endpoint():
 
     cfg.image_format[0]
 
+    # Load the mask here, not in the worker thread, so a refused mask (wrong
+    # size, or masking on with no mask file) reaches the browser as a 400
+    # (MaskError, errors.py).
+    mask = load_mask_for_camera(camera, cfg, source_path_idx)
+
     def load_pairs_parallel():
         """Load pairs in parallel using ThreadPoolExecutor."""
         from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -707,28 +713,6 @@ def filter_images_endpoint():
 
             # Compute to numpy array first (required for apply_filters_to_batch)
             batch_np = dask.compute(darr, scheduler="threads")[0]
-
-            # Load mask
-            mask = load_mask_for_camera(camera, cfg, source_path_idx)
-            if mask is not None:
-                logger.info(
-                    f"Preview mask loaded: shape={mask.shape}, dtype={mask.dtype}"
-                )
-                if batch_np.shape[-2:] != mask.shape:
-                    logger.error(
-                        f"Mask shape mismatch! Batch: {batch_np.shape}, Mask: {mask.shape}"
-                    )
-            else:
-                if not cfg.masking_enabled:
-                    logger.info("Masking is DISABLED in config.")
-                else:
-                    expected_path = cfg.get_mask_path(camera, source_path_idx)
-                    logger.info(
-                        f"Masking ENABLED. Expected mask path: {expected_path}. Exists: {expected_path.exists()}"
-                    )
-                logger.info(
-                    "No mask loaded for preview (masking disabled or file not found)"
-                )
 
             # Apply ALL filters (spatial + batch) using unified function
             processed_all = apply_filters_to_batch(
@@ -895,8 +879,8 @@ def filter_single_frame():
 
         return jsonify(response)
 
-    except PivrawError as e:
-        # A .pivraw run the reader refuses: the message names camera and reason.
+    except (PivrawError, MaskError) as e:
+        # A refused .pivraw run or mask: the message names camera and reason.
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         logger.error(f"Error processing single frame: {e}")

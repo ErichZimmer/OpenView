@@ -647,6 +647,58 @@ def load_images(
     return images
 
 
+class MaskError(ValueError):
+    """A pixel mask that cannot be used for a camera's images.
+
+    Raised instead of running unmasked or stretching the mask: a wrong-size
+    mask, a missing or unreadable mask file while masking is on, or an
+    unknown masking mode. The message names the camera and what to do.
+    """
+
+
+def require_mask_fits_camera(
+    mask: np.ndarray, config: Config, camera: int, origin: str
+) -> None:
+    """Refuse a pixel mask whose shape is not ``camera``'s image shape.
+
+    A mask is never resampled onto a camera's pixels: a mask drawn for another
+    camera, or before this camera was rotated, would land on the wrong pixels.
+
+    Parameters
+    ----------
+    mask : np.ndarray
+        Boolean pixel mask, True = masked.
+    config : Config
+        Supplies ``image_shape_for(camera)``.
+    camera : int
+        1-based camera number.
+    origin : str
+        Where the mask came from (its file path), named in the refusal.
+
+    Raises
+    ------
+    MaskError
+        If ``mask.shape`` differs from the camera's (H, W).
+    """
+    image_shape = tuple(config.image_shape_for(camera))
+    if mask.shape == image_shape:
+        return
+    H, W = image_shape
+    shape_text = " x ".join(str(n) for n in mask.shape)
+    message = (
+        f"Camera {camera}'s mask {origin} is {shape_text} pixels (height x width), "
+        f"but camera {camera}'s images are {H} x {W}. A mask is never stretched "
+        f"to fit. Redraw the mask on this camera's images in the Masking tab."
+    )
+    if mask.shape == (W, H):
+        message += (
+            " Its height and width are swapped, which is what a mask drawn before "
+            "this camera was rotated looks like: the camera's images are now "
+            "turned a quarter turn."
+        )
+    raise MaskError(message)
+
+
 def create_rectangular_mask(config: Config, camera: int) -> np.ndarray:
     """
     Create a rectangular edge mask based on config settings.
@@ -682,20 +734,17 @@ def create_rectangular_mask(config: Config, camera: int) -> np.ndarray:
     if right > 0:
         mask[:, -right:] = True
 
-    masked_pixels = np.sum(mask)
-    total_pixels = mask.size
-    mask_fraction = masked_pixels / total_pixels if total_pixels > 0 else 0
-
     logging.debug(
-        "Created rectangular mask: top={}, bottom={}, left={}, right={} "
-        "({}/{:.0f} pixels = {:.1f}%)",
+        "Created rectangular mask for Cam%s: top=%s, bottom=%s, left=%s, right=%s "
+        "(%d/%d pixels = %.1f%%)",
+        camera,
         top,
         bottom,
         left,
         right,
-        masked_pixels,
-        total_pixels,
-        mask_fraction * 100,
+        int(mask.sum()),
+        mask.size,
+        100.0 * mask.mean(),
     )
 
     return mask
@@ -726,8 +775,15 @@ def load_mask_for_camera(
     Returns
     -------
     Optional[np.ndarray]
-        Boolean mask array of shape (H, W) where True = masked region,
-        or None if masking is disabled or mask cannot be loaded
+        Boolean mask of the camera's image shape (H, W), True = masked
+        region, or None when masking is disabled.
+
+    Raises
+    ------
+    MaskError
+        With masking on: the camera's mask file is missing or unreadable, its
+        shape is not the camera's image shape, or the masking mode is unknown.
+        A camera is never run unmasked and a mask is never resampled.
     """
     if not config.masking_enabled:
         logging.debug("Masking is disabled in config")
@@ -742,52 +798,40 @@ def load_mask_for_camera(
 
     # File mode: load from .mat file
     elif mask_mode == "file":
+        mask_path = config.get_mask_path(camera_num, source_path_idx)
+
+        if not mask_path.is_file():
+            raise MaskError(
+                f"Camera {camera_num} has no mask file at {mask_path}, and masking "
+                f"is on (masking.enabled: true, mode: file). Draw and save a mask "
+                f"on this camera's images in the Masking tab, or turn masking off."
+            )
+
+        logging.debug("Loading mask for Cam%s from %s", camera_num, mask_path)
         try:
-            mask_path = config.get_mask_path(camera_num, source_path_idx)
-
-            if not mask_path.exists():
-                logging.warning(
-                    "Mask file not found for Cam%s at %s. Proceeding without mask.",
-                    camera_num,
-                    mask_path,
-                )
-                return None
-
-            logging.debug("Loading mask for Cam%s from %s", camera_num, mask_path)
-            mask, polygons = read_mask_from_mat(str(mask_path))
-
-            # Ensure mask is boolean
-            mask = np.asarray(mask, dtype=bool)
-
-            # Log mask statistics
-            masked_pixels = np.sum(mask)
-            total_pixels = mask.size
-            mask_fraction = masked_pixels / total_pixels if total_pixels > 0 else 0
-
-            logging.debug(
-                "Mask loaded: {}/{} pixels masked ({:.1f}%)",
-                masked_pixels,
-                total_pixels,
-                mask_fraction * 100,
-            )
-
-            return mask
-
-        except Exception as e:
-            logging.error(
-                "Failed to load mask for Cam{}: {}. Proceeding without mask.",
-                camera_num,
-                e,
-            )
-            return None
-
-    else:
-        logging.warning(
-            "Unknown mask mode '{}'. Must be 'file' or 'rectangular'. "
-            "Proceeding without mask.",
-            mask_mode,
+            mask, _polygons = read_mask_from_mat(str(mask_path))
+        except Exception as e:  # scipy.io raises several types for a bad file
+            raise MaskError(
+                f"Camera {camera_num}'s mask file {mask_path} could not be read "
+                f"({type(e).__name__}: {e}). Redraw and save the mask on this "
+                f"camera's images in the Masking tab, or turn masking off."
+            ) from e
+        mask = np.asarray(mask, dtype=bool)
+        require_mask_fits_camera(mask, config, camera_num, str(mask_path))
+        logging.debug(
+            "Mask loaded for Cam%s: %d/%d pixels masked (%.1f%%)",
+            camera_num,
+            int(mask.sum()),
+            mask.size,
+            100.0 * mask.mean(),
         )
-        return None
+        return mask
+
+    raise MaskError(
+        f"masking.mode '{mask_mode}' is not a masking mode. Masking is on, so "
+        f"camera {camera_num} cannot run unmasked. Use one of 'file', "
+        f"'rectangular' (set it in the Masking tab), or turn masking off."
+    )
 
 
 def compute_vector_mask(
@@ -834,6 +878,11 @@ def compute_vector_mask(
         List of binary masks, one per pass. Each mask has shape (n_win_y, n_win_x)
         where True indicates this vector should be masked (set to 0/NaN)
 
+    Raises
+    ------
+    MaskError
+        If ``pixel_mask`` is not the camera's image shape. It is never resized.
+
     Notes
     -----
     The mask threshold (config.mask_threshold) determines the sensitivity:
@@ -854,18 +903,9 @@ def compute_vector_mask(
     logging.debug(f"compute_vector_mask: camera {camera} image shape = ({H}, {W})")
     logging.debug(f"compute_vector_mask: pixel_mask.shape = {pixel_mask.shape}")
 
-    # Validate mask dimensions match the camera's image shape
-    if pixel_mask.shape != (H, W):
-        logging.warning(
-            f"Pixel mask shape {pixel_mask.shape} differs from camera {camera}'s "
-            f"image shape {(H, W)}. "
-            f"Resizing mask to match image dimensions."
-        )
-        from scipy.ndimage import zoom
-
-        zoom_factors = (H / pixel_mask.shape[0], W / pixel_mask.shape[1])
-        # Use order=0 (nearest neighbor) to preserve binary nature of mask
-        pixel_mask = zoom(pixel_mask.astype(np.float32), zoom_factors, order=0) > 0.5
+    require_mask_fits_camera(
+        pixel_mask, config, camera, "(the pixel mask given for the vector grid)"
+    )
 
     vector_masks = []
     threshold = config.mask_threshold
