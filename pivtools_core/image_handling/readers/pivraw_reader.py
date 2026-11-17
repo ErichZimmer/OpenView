@@ -93,6 +93,9 @@ STRIDE_ALIGNMENT = 4096
 _DATA_NAME = re.compile(r"^Camera(\d+)\.pivraw$")
 # The run description beside the camera files (CONTRACTS section 4).
 RUN_FILE = "run.yaml"
+# run.yaml ``trigger``: what fired the cameras.
+SOFTWARE_TRIGGER = "software"
+RUN_TRIGGERS = (SOFTWARE_TRIGGER, "daq")
 # run.yaml's dark key, and the in-run copy of the dark (container.RUN_DARK_DIR):
 # an ordinary run container of one trigger, <run>/dark/Camera<k>.pivraw.
 RUN_DARK_KEY = "dark"
@@ -590,14 +593,21 @@ def get_pivraw_image_shape(file_path: PathLike) -> Tuple[int, int]:
 
 @dataclass(frozen=True)
 class PivrawRunFile:
-    """What a run's ``run.yaml`` says about reading its frames.
+    """A run's ``run.yaml``, validated: everything PIVTOOLs reads from it.
 
+    One parse serves the alignment (:func:`align_pivraw_run`), the decode path
+    (:func:`read_pivraw_camera`) and the run import.
+
+    ``requested_triggers`` is ``config.record.n`` (pairs double-frame, frames
+    time-resolved). ``trigger`` is what fired the cameras (``RUN_TRIGGERS``).
     ``dark_id`` is the in-run dark's id (its folder name), None for a run
     recorded without a dark (``dark: null``). ``view_rotations`` maps each slot
     of ``config.cameras.slots`` to its ``view_rotation``.
     """
 
     path: Path
+    requested_triggers: int
+    trigger: str
     dark_id: Optional[str]
     view_rotations: Dict[int, str]
 
@@ -627,6 +637,31 @@ class PivrawCamera:
 _run_file_cache: Dict[str, Tuple[Tuple[int, int], PivrawRunFile]] = {}
 # {str(dark .pivraw): (stamp, sensor pixels of each dark frame, in file order)}.
 _dark_pixel_cache: Dict[str, Tuple[Tuple[int, ...], Tuple[np.ndarray, ...]]] = {}
+
+
+def _parse_run_record(path: Path, run: Any) -> Tuple[int, str]:
+    """run.yaml's ``config.record.n`` (triggers requested) and ``trigger``.
+
+    Raises:
+        PivrawError: Either key is absent or of the wrong kind.
+    """
+    try:
+        requested = run["config"]["record"]["n"]
+        trigger = run["trigger"]
+    except (KeyError, TypeError) as exc:
+        raise PivrawError(
+            f"{path}: config.record.n or trigger is missing ({exc!r}); not a "
+            "run.yaml the recorder wrote."
+        ) from exc
+    if not _is_int(requested) or requested < 1:
+        raise PivrawError(
+            f"{path}: config.record.n must be a positive integer, got {requested!r}."
+        )
+    if trigger not in RUN_TRIGGERS:
+        raise PivrawError(
+            f"{path}: trigger must be one of {RUN_TRIGGERS}, got {trigger!r}."
+        )
+    return requested, trigger
 
 
 def _parse_run_dark(path: Path, run: Any) -> Optional[str]:
@@ -705,11 +740,17 @@ def _parse_view_rotations(path: Path, run: Any) -> Dict[int, str]:
 
 
 def read_pivraw_run_file(run_dir: PathLike) -> PivrawRunFile:
-    """The parts of ``<run_dir>/run.yaml`` the reader applies, cached by stamp.
+    """``<run_dir>/run.yaml``, validated strictly and cached by its stamp.
+
+    The one run.yaml loader: the alignment, the decode path and the run import
+    all read the run description through it, so each rule holds everywhere.
 
     Raises:
-        PivrawError: run.yaml is missing, unreadable, or its keys are not the
-            recorder's (see :func:`_parse_run_dark`).
+        PivrawError: run.yaml is missing or unreadable; ``config.record.n`` or
+            ``trigger`` is absent or invalid; ``dark`` is absent or not
+            ``null`` / ``{id, path: "dark"}``; or ``config.cameras.slots`` is
+            absent, has an entry without an integer slot and a known
+            ``view_rotation``, or repeats a slot.
     """
     path = Path(run_dir) / RUN_FILE
     try:
@@ -727,8 +768,11 @@ def read_pivraw_run_file(run_dir: PathLike) -> PivrawRunFile:
         run = yaml.safe_load(path.read_text(encoding="utf-8"))
     except (OSError, yaml.YAMLError) as exc:
         raise PivrawError(f"{path}: cannot read the run description ({exc}).") from exc
+    requested, trigger = _parse_run_record(path, run)
     parsed = PivrawRunFile(
         path=path,
+        requested_triggers=requested,
+        trigger=trigger,
         dark_id=_parse_run_dark(path, run),
         view_rotations=_parse_view_rotations(path, run),
     )
@@ -745,8 +789,9 @@ def _check_dark(header: PivrawHeader, run: PivrawRunFile) -> PivrawHeader:
     """The validated header of ``header``'s in-run dark.
 
     Raises:
-        PivrawError: The dark has no file for this camera, or its geometry,
-            pixel format, mode or frame count differ from the camera's.
+        PivrawError: The dark has no file for this camera, or its camera
+            serial, geometry, pixel format, mode or frame count differ from the
+            camera's.
     """
     dark_raw = header.path.parent / RUN_DARK_DIR / header.path.name
     if not dark_raw.is_file():
@@ -757,14 +802,15 @@ def _check_dark(header: PivrawHeader, run: PivrawRunFile) -> PivrawHeader:
     dark = read_pivraw_header(dark_raw)
     differences = [
         f"{name} {getattr(dark, name)!r} (camera {getattr(header, name)!r})"
-        for name in ("width", "height", "pixel_format", "mode")
+        for name in ("camera_serial", "width", "height", "pixel_format", "mode")
         if getattr(dark, name) != getattr(header, name)
     ]
     if differences:
         raise PivrawError(
             f"{dark_raw}: the in-run dark {run.dark_id} does not match camera "
             f"{header.slot} of {header.path}: {', '.join(differences)}. A dark is "
-            "subtracted only from frames of its own slot, geometry and pixel format."
+            "subtracted only from frames of the camera it was taken with, in its "
+            "own slot, geometry and pixel format."
         )
     if dark.n_frames != _frames_per_dark(dark.mode):
         raise PivrawError(
@@ -975,9 +1021,6 @@ def read_pivraw_pair(
 # ``align_run``). Both are held to the outcome of every case in
 # ``pivraw_contract/expected.json``, which keeps the two aligners in agreement.
 
-# run.yaml (RUN_FILE) ``trigger``: what fired the cameras.
-SOFTWARE_TRIGGER = "software"
-RUN_TRIGGERS = (SOFTWARE_TRIGGER, "daq")
 # Fraction of a trigger period two host times may differ by and still be the
 # same trigger. The rig measured its cameras within 0.74 ms of each other at a
 # 200 ms period (pivraw-contract REPORT C8); a quarter period keeps a wide
@@ -1150,40 +1193,6 @@ def _run_cameras(run_dir: Path) -> Tuple[int, ...]:
     if not slots:
         raise PivrawError(f"{run_dir}: no Camera<k>.pivraw file; not a run folder.")
     return tuple(slots)
-
-
-def _read_run_file(run_dir: Path) -> Tuple[int, str]:
-    """run.yaml's ``config.record.n`` (triggers requested) and ``trigger``.
-
-    Raises:
-        PivrawError: run.yaml is missing or unreadable, or either key is absent
-            or of the wrong kind.
-    """
-    path = run_dir / RUN_FILE
-    try:
-        run = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError) as exc:
-        raise PivrawError(
-            f"{path}: cannot read the run description ({exc}). Every recorded "
-            "run holds one; the folder is incomplete."
-        ) from exc
-    try:
-        requested = run["config"]["record"]["n"]
-        trigger = run["trigger"]
-    except (KeyError, TypeError) as exc:
-        raise PivrawError(
-            f"{path}: config.record.n or trigger is missing ({exc!r}); not a "
-            "run.yaml the recorder wrote."
-        ) from exc
-    if not _is_int(requested) or requested < 1:
-        raise PivrawError(
-            f"{path}: config.record.n must be a positive integer, got {requested!r}."
-        )
-    if trigger not in RUN_TRIGGERS:
-        raise PivrawError(
-            f"{path}: trigger must be one of {RUN_TRIGGERS}, got {trigger!r}."
-        )
-    return requested, trigger
 
 
 def _camera_triggers(header: PivrawHeader) -> _CameraTriggers:
@@ -1368,7 +1377,8 @@ def align_pivraw_run(
         return cached[1]
 
     headers = {s: read_pivraw_header(run_dir / f"Camera{s}.pivraw") for s in slots}
-    requested, trigger_source = _read_run_file(run_dir)
+    run_file = read_pivraw_run_file(run_dir)
+    requested, trigger_source = run_file.requested_triggers, run_file.trigger
     modes = {h.mode for h in headers.values()}
     rates = {h.rate_hz for h in headers.values()}
     if len(modes) != 1 or len(rates) != 1:
