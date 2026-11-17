@@ -148,6 +148,19 @@ def test_run_piv_checks_only_the_datasets_the_job_will_process(
     assert len(rig.runner.started) == 1
 
 
+def test_run_piv_refuses_strides_the_image_type_cannot_be_read_with(
+    tmp_path: Path, make_client: Any
+) -> None:
+    """The pairing check runs for every image type, not only .pivraw: a standard
+    TIFF config with a negative frame_stride is refused before launching."""
+    rig = make_client(_make_config(tmp_path, {"enabled": False, "mode": "file"}))
+    rig.cfg.data["images"]["frame_stride"] = -1
+    response = rig.client.post("/backend/run_piv", json={"mode": "instantaneous"})
+    assert response.status_code == 400
+    assert "images.frame_stride is -1" in response.get_json()["error"]
+    assert rig.runner.started == []
+
+
 def _status(rig, camera: Any, basepath_idx: Any = 0):
     return rig.client.get(
         f"/backend/mask_status?basepath_idx={basepath_idx}&camera={camera}"
