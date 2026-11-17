@@ -7,12 +7,14 @@ Supports:
 - Uncompressed float32 and uint16 pixel data (pack_type=0)
 - DaVis token stream, uint16 (pack_type=1), decoded by :mod:`.davis_tokens`
 - Zlib-compressed data (pack_type=2), one block per row or one per frame
-- LZ4 block over the whole buffer (pack_type=20)
+- LZ4 (pack_type=20): header version 0 holds one block over the whole
+  buffer, version 1 one block per frame plus a frame-offset table
 - Intensity scale attributes (slope/offset)
 - Multi-frame files (sizeF > 1)
 
 Fixed 12-bit packed data (pack_type=3) is refused by name, see
-:func:`_unsupported_pack_error`.
+:func:`_unsupported_pack_error`. So is a header version other than 0 or 1, and
+version 1 on any pack type but 20, see :func:`_parse_header`.
 
 Reference: LaVision ReadIM7.h / ReadIM7.cpp (liorshig/readim on GitHub)
 """
@@ -45,11 +47,24 @@ PACK_ZLIB = 2
 # (container-unknowns D4) but no real pack-3 file exists among 34,509 surveyed
 # .im7, so there is nothing to check a decoder against.
 PACK_FIXED_12BIT = 3
-# DaVis 10/11 lossless compression: one LZ4 *block* (not framed) over the whole
-# pixel buffer, prefixed by an int64 little-endian compressed-size. Layout was
+# DaVis 10/11 lossless compression. Header version 0: one LZ4 *block* (not
+# framed) over the whole pixel buffer, prefixed by an int64 little-endian
+# compressed-size (version 1, one block per frame, is described at
+# IM7_VERSION_PER_FRAME). The version-0 layout was
 # reverse-engineered and verified bit-exact against LaVision's own lvpyio on
 # merle + andre-x25 calibration frames (2026-06-12, see the calibration PRD).
 PACK_LZ4 = 20
+
+# Image_Header_7 version. Of 34,509 real .im7 headers on four drives (drive
+# survey, 2026-11-16) every one is version 0 or 1, and all 10 version-1 files
+# are pack 20 with 8 frames (DaVis "Subtract sliding minimum" output).
+IM7_VERSION_BUFFER = 0
+# Version 1, pack 20, measured byte for byte on the real files (D3, 2026-11-17):
+# per frame an int64 compressed size and one LZ4 block; a table of size_f int64
+# frame offsets; the attribute records; then, not read here, per-frame LZ4 mask
+# planes (H x W uint8, all 1 in every real file), a mask-offset table and a
+# 256-byte footer of offsets. lvpyio 1.3.1 agrees bit for bit on all 10 files.
+IM7_VERSION_PER_FRAME = 1
 
 # Extended header record types (int32)
 IEH_END = 0
@@ -99,13 +114,15 @@ class IM7Scales:
     unit: str = ""
 
 
-def _parse_header(raw: bytes) -> IM7Header:
+def _parse_header(raw: bytes, source: str) -> IM7Header:
     """Unpack the 256-byte Image_Header_7.
 
     Parameters
     ----------
     raw : bytes
         Exactly 256 bytes from the start of the .im7 file.
+    source : str
+        File name for error messages.
 
     Returns
     -------
@@ -119,6 +136,9 @@ def _parse_header(raw: bytes) -> IM7Header:
         1. Every byte count the pixel decoders compute is a product of these, so
         a zero or negative one would surface as a division by zero, a negative
         read length or a huge allocation instead of as a damaged header.
+        Also if the version is not 0 or 1, or is 1 on a pack type other than 20:
+        neither has been seen in a real file, and the version decides the pixel
+        layout, so reading on would decode a guess.
     """
     if len(raw) != HEADER_SIZE:
         raise ValueError(f"Header must be {HEADER_SIZE} bytes, got {len(raw)}")
@@ -130,6 +150,21 @@ def _parse_header(raw: bytes) -> IM7Header:
         raise ValueError(
             f"Damaged .im7 header: every dimension must be at least 1, got "
             f"{', '.join(f'{k}={v}' for k, v in bad.items())}"
+        )
+    version, pack_type = values[0], values[1]
+    if version not in (IM7_VERSION_BUFFER, IM7_VERSION_PER_FRAME):
+        raise ValueError(
+            f"{source}: .im7 header version {version} is not read. Known "
+            f"versions are {IM7_VERSION_BUFFER} (every pack type) and "
+            f"{IM7_VERSION_PER_FRAME} (pack_type {PACK_LZ4}, one LZ4 block per "
+            f"frame). Export the images from DaVis again, or report the file."
+        )
+    if version == IM7_VERSION_PER_FRAME and pack_type != PACK_LZ4:
+        raise ValueError(
+            f"{source}: .im7 header version {version} with pack_type "
+            f"{pack_type} is not read. Version {version} has only been seen "
+            f"with pack_type {PACK_LZ4}, so its layout for other pack types is "
+            f"unknown. Export the images from DaVis again, or report the file."
         )
     return IM7Header(
         version=values[0],
@@ -272,13 +307,34 @@ def _lz4_block_decompress(src: bytes, expected_size: int) -> bytes:
     return bytes(out)
 
 
-def _read_pixels_lz4(f, header: IM7Header, frame_range: tuple = None) -> np.ndarray:
-    """Read LZ4-packed pixel data (pack_type=20).
+def _read_pixels_lz4(
+    f, header: IM7Header, source: str, frame_range: Optional[tuple] = None
+) -> np.ndarray:
+    """Read LZ4-packed pixel data (pack_type=20) in the layout its version names.
 
-    The file stores ONE int64 compressed-size then one LZ4 block covering the
-    whole multi-frame pixel buffer, so the full buffer is decompressed and the
-    requested frames sliced out. Leaves ``f`` positioned at the attribute
-    records (the byte after the compressed block).
+    Version 0 holds one LZ4 block over the whole buffer, version 1 one block
+    per frame (see :data:`IM7_VERSION_PER_FRAME`). Either way ``f`` is left at
+    the attribute records.
+
+    Returns
+    -------
+    np.ndarray
+        Shape (end - start, size_z, size_y, size_x) for ``frame_range``
+        (start, end), default every frame.
+    """
+    if header.version == IM7_VERSION_PER_FRAME:
+        return _read_lz4_per_frame(f, header, source, frame_range)
+    return _read_lz4_whole_buffer(f, header, frame_range)
+
+
+def _read_lz4_whole_buffer(
+    f, header: IM7Header, frame_range: Optional[tuple] = None
+) -> np.ndarray:
+    """Version-0 pack 20: one int64 size, then one LZ4 block over every frame.
+
+    The full buffer is decompressed and the requested frames sliced out.
+    Leaves ``f`` positioned at the attribute records (the byte after the
+    compressed block).
     """
     dt = _pixel_dtype(header)
     frame_pixels = header.size_x * header.size_y * header.size_z
@@ -302,6 +358,89 @@ def _read_pixels_lz4(f, header: IM7Header, frame_range: tuple = None) -> np.ndar
         return pixels
     start, end = frame_range
     return pixels[start:end]
+
+
+def _read_lz4_frame_size(f, k: int, n_frames: int, file_size: int, source: str) -> int:
+    """Read and check the int64 compressed size in front of version-1 frame ``k``.
+
+    The size must be positive and the block it announces must fit in the file,
+    so a truncated file fails here by name for a frame that is skipped as well
+    as for one that is decoded.
+    """
+    pos = f.tell()
+    raw = f.read(8)
+    if len(raw) != 8:
+        raise IOError(
+            f"{source}: version-1 LZ4 frame {k} of {n_frames} is cut off: its "
+            f"8-byte size at byte {pos} has {len(raw)} bytes. The file is truncated."
+        )
+    comp_size = struct.unpack("<q", raw)[0]
+    if comp_size <= 0:
+        raise IOError(
+            f"{source}: version-1 LZ4 frame {k} of {n_frames} declares "
+            f"{comp_size} compressed bytes at byte {pos}. The file is damaged."
+        )
+    remaining = file_size - pos - 8
+    if comp_size > remaining:
+        raise IOError(
+            f"{source}: version-1 LZ4 frame {k} of {n_frames} declares "
+            f"{comp_size} compressed bytes at byte {pos}, but only {remaining} "
+            f"remain. The file is truncated."
+        )
+    return comp_size
+
+
+def _read_lz4_per_frame(
+    f, header: IM7Header, source: str, frame_range: Optional[tuple] = None
+) -> np.ndarray:
+    """Version-1 pack 20: one int64 size and one LZ4 block per frame.
+
+    After the last block comes a table of size_f int64 values, the file offset
+    of each frame's size prefix, and then the attribute records. Frames outside
+    ``frame_range`` are skipped by seeking past their blocks, not decoded. The
+    table must equal the offsets the walk found, which checks the layout on
+    every read. Leaves ``f`` positioned at the attribute records.
+
+    The per-frame mask planes and the offset footer DaVis writes after the
+    attribute records (see :data:`IM7_VERSION_PER_FRAME`) are not read.
+    """
+    dt = _pixel_dtype(header)
+    frame_bytes = header.size_x * header.size_y * header.size_z * dt.itemsize
+    n_frames = header.size_f
+    start, end = frame_range if frame_range is not None else (0, n_frames)
+    file_size = os.fstat(f.fileno()).st_size
+
+    pixels = np.empty((end - start, header.size_z, header.size_y, header.size_x), dt)
+    starts = []
+    for k in range(n_frames):
+        starts.append(f.tell())
+        comp_size = _read_lz4_frame_size(f, k, n_frames, file_size, source)
+        if not start <= k < end:
+            f.seek(comp_size, 1)
+            continue
+        try:
+            raw = _lz4_block_decompress(f.read(comp_size), frame_bytes)
+        except IOError as exc:
+            raise IOError(
+                f"{source}: version-1 LZ4 frame {k} of {n_frames}: {exc}"
+            ) from exc
+        pixels[k - start] = np.frombuffer(raw, dtype=dt).reshape(pixels.shape[1:])
+
+    pos = f.tell()
+    table_raw = f.read(8 * n_frames)
+    if len(table_raw) != 8 * n_frames:
+        raise IOError(
+            f"{source}: the version-1 frame-offset table at byte {pos} has "
+            f"{len(table_raw)} of its {8 * n_frames} bytes. The file is truncated."
+        )
+    table = list(struct.unpack(f"<{n_frames}q", table_raw))
+    if table != starts:
+        raise IOError(
+            f"{source}: the version-1 frame-offset table at byte {pos} lists "
+            f"{table}, but the frames start at {starts}. The file is damaged or "
+            f"is a pack-20 layout this reader does not know."
+        )
+    return pixels
 
 
 def _zlib_block_bytes(f, header: IM7Header) -> int:
@@ -631,7 +770,7 @@ def _read_im7_internal(filepath: Path) -> tuple:
             raise IOError(
                 f"File too small for header ({len(raw_header)} < {HEADER_SIZE})"
             )
-        header = _parse_header(raw_header)
+        header = _parse_header(raw_header, filepath.name)
 
         if header.pack_type == PACK_UNCOMPRESSED:
             pixels = _read_pixels_uncompressed(f, header)
@@ -640,7 +779,7 @@ def _read_im7_internal(filepath: Path) -> tuple:
         elif header.pack_type == PACK_ZLIB:
             pixels = _read_pixels_zlib(f, header)
         elif header.pack_type == PACK_LZ4:
-            pixels = _read_pixels_lz4(f, header)
+            pixels = _read_pixels_lz4(f, header, filepath.name)
         else:
             raise _unsupported_pack_error(header, filepath.name)
 
@@ -701,7 +840,7 @@ def get_im7_frame_count(filepath: Union[str, Path]) -> int:
         raise FileNotFoundError(f"File not found: {filepath}")
     with open(filepath, "rb") as f:
         raw_header = f.read(HEADER_SIZE)
-    return _parse_header(raw_header).size_f
+    return _parse_header(raw_header, filepath.name).size_f
 
 
 def get_im7_frame_shape(filepath: Union[str, Path]) -> tuple:
@@ -716,7 +855,7 @@ def get_im7_frame_shape(filepath: Union[str, Path]) -> tuple:
         raise FileNotFoundError(f"File not found: {filepath}")
     with open(filepath, "rb") as f:
         raw_header = f.read(HEADER_SIZE)
-    header = _parse_header(raw_header)
+    header = _parse_header(raw_header, filepath.name)
     return (header.size_y, header.size_x)
 
 
@@ -746,10 +885,11 @@ def read_im7_camera(
         (None) reads the whole camera slice. ``frames=1`` on a double-frame
         buffer reads frame A only: for pack types 0 and 2 that halves the
         bytes decoded (measured 61.3 -> 30.9 ms, 63 -> 32 MB on a 4-camera
-        4872x3248 pack-0 calibration file). Pack types 20 (LZ4, one block for
-        the whole buffer) and 1 (one token stream, sequential) decode every
-        frame of the buffer by format design, so there it narrows only the
-        result.
+        4872x3248 pack-0 calibration file), and version-1 pack 20 (one LZ4
+        block per frame) decodes only the frames returned. Version-0 pack 20
+        (one LZ4 block for the whole buffer) and pack 1 (one token stream,
+        sequential) decode every frame of the buffer by format design, so
+        there it narrows only the result.
     out : np.ndarray, optional
         Destination (n, H, W) float32 C-contiguous buffer, where n is the number
         of frames this call will actually produce AFTER clamping to the file. A
@@ -771,7 +911,7 @@ def read_im7_camera(
     # Parse header first to validate frame range
     with open(filepath, "rb") as f:
         raw_header = f.read(HEADER_SIZE)
-    header = _parse_header(raw_header)
+    header = _parse_header(raw_header, filepath.name)
 
     if frames is not None and frames < 1:
         raise ValueError(f"frames must be >= 1, got {frames}")
@@ -862,8 +1002,9 @@ def read_im7_camera(
             _skip_zlib_blocks(f, (header.size_f - end) * blocks_per_frame)
 
         elif header.pack_type == PACK_LZ4:
-            # One LZ4 block covers the whole buffer; decompress once, slice.
-            frames = _read_pixels_lz4(f, header, (start, end))
+            # Version 0 decompresses the whole buffer and slices; version 1
+            # decodes only this camera's frames and seeks past the others.
+            frames = _read_pixels_lz4(f, header, filepath.name, (start, end))
             for i in range(n_frames):
                 frame = frames[i]
                 result[i] = (
