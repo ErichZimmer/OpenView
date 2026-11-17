@@ -292,7 +292,11 @@ def read_pair(
     """
     format_str = config.image_format[0]
     image_type = config.image_type
-    frame_a_idx, frame_b_idx = config.get_frame_pair_indices(idx)
+    # A .pivraw run is paired by trigger, per camera, and camera_path is its run
+    # folder; every other type pairs by the stride formula alone.
+    frame_a_idx, frame_b_idx = config.get_frame_pair_indices(
+        idx, camera=camera, source=camera_path
+    )
 
     # Handle container formats (single file contains multiple frames/cameras)
     if image_type == "lavision_set":
@@ -404,9 +408,10 @@ def read_pair(
     elif image_type == "pivraw":
         from .readers.pivraw_reader import read_pivraw_pair
 
-        # .pivraw: one run container per camera. Both pairing indices are passed:
-        # the reader honours frame B rather than assuming A + 1, and refuses a
-        # double-frame run read with anything but its recorded (A, B) pairs.
+        # .pivraw: one run container per camera. The pair's file frames on this
+        # camera come from the run's trigger alignment (above), so with unequal
+        # drops pair n is the same trigger on every camera. Both are passed: the
+        # reader honours frame B rather than assuming A + 1.
         pivraw_path = camera_path / (format_str % camera)
         return _written(
             read_pivraw_pair(

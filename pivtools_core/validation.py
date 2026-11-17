@@ -26,6 +26,32 @@ from pivtools_core.image_handling.source_diagnosis import piv_diagnosis_context
 logger = logging.getLogger(__name__)
 
 
+def _pivraw_pairing_findings(config: Config, warnings: List[str]) -> List[str]:
+    """The trigger pairing of a ``.pivraw`` config, reported once per run.
+
+    Appends to ``warnings``: the skipped pairs per camera, the alignment notes
+    (unprovable A/B phase, unaccounted triggers), and a ``num_images`` cap that
+    bites. Returns the errors: a run that cannot be paired (named by the
+    reader), or source paths whose runs align different pair counts.
+    """
+    from pivtools_core.image_handling.readers.pivraw_reader import PivrawError
+
+    try:
+        n_pairs = config.num_frame_pairs
+        alignment = config.pivraw_alignment()
+    except PivrawError as e:
+        return [str(e)]
+    if alignment.skipped_incomplete:
+        warnings.append(f"{alignment.run_dir}: {alignment.summary}")
+    warnings.extend(f"{alignment.run_dir}: {note}" for note in alignment.notes)
+    if n_pairs < len(alignment.pairs):
+        warnings.append(
+            f"Processing {n_pairs} of {len(alignment.pairs)} aligned pairs: "
+            f"images.num_images ({config.num_images}) caps them."
+        )
+    return []
+
+
 def validate_config(config: Config) -> Tuple[bool, str, List[str]]:
     """
     Validate configuration before starting PIV processing.
@@ -106,12 +132,14 @@ def validate_config(config: Config) -> Tuple[bool, str, List[str]]:
             config.start_index == 0,
             read_frame_fn=read_frame,
             diagnosis=diagnosis,
+            pair_strides=(config.frame_stride, config.pair_stride),
         )
 
         if result["error"]:
             errors.append(f"Camera {camera_num}: {result['error']}")
-        elif result["valid"]:
-            # Check for processing subset (found > expected)
+        elif result["valid"] and image_type != "pivraw":
+            # Check for processing subset (found > expected). A .pivraw run is
+            # paired by trigger, so its subset is counted in pairs, below.
             found = result["found_count"]
             if isinstance(found, int) and found > config.num_images:
                 warnings.append(
@@ -148,6 +176,9 @@ def validate_config(config: Config) -> Tuple[bool, str, List[str]]:
                             f"Camera {camera_num}: File indexing mismatch - found files starting at {min_idx}, "
                             f"but start_index is {expected_min}"
                         )
+
+    if image_type == "pivraw" and not errors:
+        errors.extend(_pivraw_pairing_findings(config, warnings))
 
     # Window sizes must be sizes the codelet FFT engine was built for.
     # Fail loud here, at config load, rather than deep in the C hot path.
