@@ -105,12 +105,15 @@ def mask_status():
     off nothing is needed, so ``ok`` is true. A bad index or camera is a 400.
     """
     cfg = _cfg()
+    missing = [k for k in ("basepath_idx", "camera") if request.args.get(k) is None]
+    if missing:
+        return jsonify({"error": f"mask_status needs {' and '.join(missing)}"}), 400
     try:
         basepath_idx = int(request.args["basepath_idx"])
         camera = camera_number(request.args["camera"])
-    except (KeyError, ValueError) as e:
+    except ValueError as e:
         return (
-            jsonify({"error": f"basepath_idx and camera are required integers ({e})"}),
+            jsonify({"error": f"basepath_idx and camera must be integers ({e})"}),
             400,
         )
     if not 0 <= basepath_idx < len(cfg.source_paths):

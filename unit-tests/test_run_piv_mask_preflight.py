@@ -201,12 +201,18 @@ def test_mask_status_is_ok_for_a_fitting_mask_and_with_masking_off(
 
 
 @pytest.mark.parametrize(
-    "query", ["basepath_idx=5&camera=1", "basepath_idx=0&camera=x", "basepath_idx=0"]
+    "query, expected",
+    [
+        ("basepath_idx=5&camera=1", "basepath_idx 5 is out of range"),
+        ("basepath_idx=0&camera=x", "must be integers"),
+        ("basepath_idx=0", "mask_status needs camera"),
+        ("camera=1", "mask_status needs basepath_idx"),
+    ],
 )
 def test_mask_status_rejects_a_bad_request(
-    tmp_path: Path, make_client: Any, query: str
+    tmp_path: Path, make_client: Any, query: str, expected: str
 ) -> None:
     rig = make_client(_make_config(tmp_path, FILE_MASKING))
     response = rig.client.get(f"/backend/mask_status?{query}")
     assert response.status_code == 400
-    assert response.get_json()["error"]
+    assert expected in response.get_json()["error"]
