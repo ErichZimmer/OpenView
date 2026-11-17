@@ -20,7 +20,11 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from fixtures.lavision import build_raw16_set, make_set_config  # noqa: E402
+from fixtures.lavision import (  # noqa: E402
+    build_raw16_set,
+    ims_index,
+    make_set_config,
+)
 
 from pivtools_core.image_handling.load_images import (  # noqa: E402
     _read_batch,
@@ -42,16 +46,10 @@ def _clean_set_cache():
 def _time_resolved_set(tmp_path):
     """One-stream .set with 5 entries of distinct constant frames, and a config
     pairing consecutive entries (frame_stride 1 -> 4 pairs)."""
-    import struct
-
     set_file = build_raw16_set(tmp_path, [(4, 6)], name="batch")
     payloads = [np.full((4, 6), 10 * (k + 1), "<u2").tobytes() for k in range(5)]
-    index = bytearray(1024)
-    struct.pack_into("<i", index, 12, 6)
-    struct.pack_into("<i", index, 16, 4)
-    for k, payload in enumerate(payloads):
-        index += struct.pack("<iqq", 0, k * len(payload), len(payload))
-    (tmp_path / "batch" / "Frame0-0.ims").write_bytes(bytes(index))
+    index = ims_index(6, 4, [len(p) for p in payloads])
+    (tmp_path / "batch" / "Frame0-0.ims").write_bytes(index)
     (tmp_path / "batch" / "Frame0-1.ims").write_bytes(b"".join(payloads))
 
     cfg = make_set_config(tmp_path, set_file, camera_count=1, camera_numbers=[1])

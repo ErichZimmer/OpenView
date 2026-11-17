@@ -7,8 +7,14 @@ No dependency on lvpyio -- works on macOS, Linux, and Windows.
 Stream discovery: StreamSet.xml is the companion folder's manifest. Its
 ReaderInfo nodes name each stream's file prefix and bind it to a frame-stream
 index; the prefix is DaVis's choice per recording ("Frame0".. on one, "Camera1"..
-on another), not a format constant. A recording whose manifest declares no
-streams falls back to the ``Frame{N}`` naming convention.
+on another), not a format constant. A recording without a manifest, or whose
+manifest declares no FrameReader, is refused: streams are never guessed from
+file names.
+
+Strictness: every .ims index header field and FrameReader attribute the reader
+does not decode must hold the value measured on real DaVis recordings, otherwise
+the recording is refused with the field and the value named (see
+``_IMS_REQUIRED_WORDS`` and ``_FRAME_READER_NAME``).
 
 Pixel encodings: DaVis names the encoding in {prefix}-decoder.xml. The full set of
 ids DaVis 10/11 can write is in ``_DECODER_BITS_PER_PX`` below; ``mono-10p``,
@@ -55,9 +61,13 @@ from .out_buffer import check_out
 
 @dataclass
 class IMSIndexEntry:
-    """One entry in a Frame{N}-0.ims index file."""
+    """One 20-byte entry of a {prefix}-0.ims index: where one stored frame lives.
 
-    flag: int
+    ``file_no`` names the data file holding the bytes, ``{prefix}-{file_no}.ims``;
+    ``offset`` is absolute inside that file and ``size`` is the stored size.
+    """
+
+    file_no: int
     offset: int
     size: int
 
@@ -87,6 +97,7 @@ class IMSFrameInfo:
     data_path: Path  # {prefix}-1.ims
     index_path: Path  # {prefix}-0.ims
     decoder: str  # DaVis encoding id, e.g. "mono-12p", "raw-16-bit"
+    codec: str  # compression name from the index header, one of _IMS_CODECS
     width: int
     height: int
     n_entries: int
@@ -99,18 +110,16 @@ class IMSFrameInfo:
 
 @dataclass(frozen=True)
 class _StreamSource:
-    """Where one frame stream's files live, before any of them is opened.
+    """Where one frame stream's files live, as StreamSet.xml declares them.
 
-    ``declared`` is True when the manifest (StreamSet.xml) named this stream,
-    so a missing file is an incomplete copy and must raise. Under the glob
-    fallback the scale file is a naming convention and its absence is
-    legitimately "no scale".
+    ``frames_per_image`` is the FrameReader's ``EndFrame - StartFrame + 1``,
+    which the index header's word 2 must equal.
     """
 
     index: int
     prefix: str
     scale_prefix: Optional[str]
-    declared: bool
+    frames_per_image: int
 
 
 @dataclass
@@ -132,44 +141,162 @@ class SetInfo:
 # ---------------------------------------------------------------------------
 
 
-def _parse_ims_index(index_path: Path) -> Tuple[int, int, int, List[IMSIndexEntry]]:
-    """Parse a Frame{N}-0.ims index file.
+# The {prefix}-0.ims index, as measured on 20 real stream files over four drives
+# and against lvpyio 1.3.1 (container-unknowns REPORT, §1 and §2 A, B, C, G). A
+# 1024-byte header of int32 words, then one 20-byte entry per stored frame.
+_IMS_HEADER_BYTES = 1024
+# File number, offset inside that file, stored size. The file number is unsigned:
+# lvpyio names the data file with it as an unsigned decimal (-1 opens
+# "-4294967295.ims"), so a refusal names the same file lvpyio would open.
+_IMS_ENTRY = struct.Struct("<Iqq")
+_IMS_WORD = struct.Struct("<i")
+_IMS_WORD_FRAMES_PER_IMAGE = 2
+_IMS_WORD_WIDTH = 3
+_IMS_WORD_HEIGHT = 4
 
-    Returns (width, height, n_entries, entries).
+# Header words that hold one measured value on every real stream file. lvpyio
+# reads other values differently or not at all, and no real file shows what
+# DaVis means by them, so any other value is refused with the field named.
+# word: (field name, accepted values, what another value does).
+_IMS_REQUIRED_WORDS: Dict[int, Tuple[str, Tuple[int, ...], str]] = {
+    0: (
+        "version",
+        (1,),
+        "Every real stream file is version 1. lvpyio also opens 2 and 3, but "
+        "what they change is unknown",
+    ),
+    1: (
+        "image count",
+        (0,),
+        "0 means the count is the number of index entries. lvpyio takes a "
+        "non-zero value as the count even where it hides entries or invents "
+        "ones that do not exist",
+    ),
+    5: (
+        "bits per decoded pixel",
+        (16,),
+        "At 8 lvpyio keeps only the low byte of each decoded pixel, and it opens "
+        "no other value",
+    ),
+    # 1 is accepted beside the measured 0 because lvpyio reads both alike; 2 or
+    # more fails or crashes lvpyio (HYPOTHESIS: planes per frame).
+    14: (
+        "planes per frame",
+        (0, 1),
+        "lvpyio fails or crashes on 2 or more",
+    ),
+    15: (
+        "sample type",
+        (0,),
+        "0 is uint16 counts; 1 and 2 are float32 and float64 streams",
+    ),
+}
+
+# Bytes 24..55 name the compression, NUL-terminated and case-sensitive. These
+# are the names lvpyio opens a stream for; it opens none for "zlib", "ZLIB",
+# "lz4" or "None" (container-unknowns REPORT §2 C1). Real files carry "" or
+# "IMX".
+_IMS_CODEC_FIELD = slice(24, 56)
+_IMS_CODECS = ("", "Uncompressed", "Zlib", "LZ4", "IMX")
+_IMS_UNCOMPRESSED_CODECS = ("", "Uncompressed")
+
+# The data file every entry must name. A stream split across {prefix}-1.ims,
+# {prefix}-2.ims, ... is read by lvpyio entry by entry, but no real recording on
+# any surveyed drive has one, and when DaVis writes one is unknown. File number 0
+# names the index itself and is invalid in lvpyio too.
+_IMS_DATA_FILE_NO = 1
+
+
+def _ims_header_word(data: bytes, word: int) -> int:
+    """int32 header word ``word`` of an index file's bytes."""
+    return _IMS_WORD.unpack_from(data, 4 * word)[0]
+
+
+def _parse_ims_index(
+    index_path: Path, prefix: str, frames_per_image: int
+) -> Tuple[int, int, str, List[IMSIndexEntry]]:
+    """Parse a {prefix}-0.ims index file, refusing every unmeasured layout.
+
+    Args:
+        index_path: the index file.
+        prefix: the stream's file prefix, used to name data files in refusals.
+        frames_per_image: the span of the stream's FrameReader
+            (``EndFrame - StartFrame + 1``), which header word 2 must equal.
+
+    Returns:
+        (width, height, codec, entries).
+
+    Raises:
+        ValueError: If the file is shorter than the header, holds a partial
+            entry, or any checked header word or entry field differs from the
+            measured value. The message names the field and the value found.
     """
     data = index_path.read_bytes()
-    if len(data) < 256:
-        raise IOError(f"Index file too small: {index_path}")
+    where = f"{index_path.name} in {index_path.parent}"
+    if len(data) < _IMS_HEADER_BYTES:
+        raise ValueError(
+            f"{where} is {len(data)} bytes, shorter than the {_IMS_HEADER_BYTES}-"
+            f"byte .ims index header. The index is truncated."
+        )
+    stray = (len(data) - _IMS_HEADER_BYTES) % _IMS_ENTRY.size
+    if stray:
+        raise ValueError(
+            f"{where} holds {stray} bytes after the last whole {_IMS_ENTRY.size}-"
+            f"byte entry. The index is truncated or not an .ims index."
+        )
 
-    # Header: 256 bytes. Dimensions at int32 offsets [3] and [4] (12 and 16).
-    width = struct.unpack_from("<i", data, 12)[0]
-    height = struct.unpack_from("<i", data, 16)[0]
+    for word, (name, accepted, why) in _IMS_REQUIRED_WORDS.items():
+        value = _ims_header_word(data, word)
+        if value not in accepted:
+            shown = " or ".join(str(a) for a in accepted)
+            raise ValueError(
+                f"{where}: index header word {word} ({name}) is {value}; PIVTOOLs "
+                f"reads only {shown}. {why}. No real recording seen so far "
+                f"carries this value, so it is refused rather than read on a guess."
+            )
 
-    # Entry table starts at offset 1024 (256 header + 768 padding)
-    # Each entry: int32 flag + int64 offset + int64 size = 20 bytes
-    table_offset = 256 + 768
-    if table_offset > len(data):
-        # Smaller padding — try to detect
-        table_offset = 256
-        # Scan for first non-zero after header
-        for i in range(256, len(data), 4):
-            val = struct.unpack_from("<i", data, i)[0]
-            if val != 0:
-                table_offset = i
-                break
+    word2 = _ims_header_word(data, _IMS_WORD_FRAMES_PER_IMAGE)
+    if word2 != frames_per_image:
+        raise ValueError(
+            f"{where}: index header word {_IMS_WORD_FRAMES_PER_IMAGE} (frames per "
+            f"image) is {word2}, but StreamSet.xml's FrameReader '{prefix}' spans "
+            f"{frames_per_image} frame(s) (EndFrame - StartFrame + 1). The two must "
+            f"agree; lvpyio refuses this as a frame count inconsistency."
+        )
 
-    entry_size = 20
-    n_entries = (len(data) - table_offset) // entry_size
+    codec_bytes = data[_IMS_CODEC_FIELD].split(b"\0", 1)[0]
+    codec = codec_bytes.decode("latin-1")
+    if codec not in _IMS_CODECS:
+        raise ValueError(
+            f"{where}: compression name at index header bytes 24..55 is "
+            f"{codec!r}; PIVTOOLs knows {', '.join(repr(c) for c in _IMS_CODECS)}. "
+            f"Names are case-sensitive, and lvpyio opens no stream for any other."
+        )
 
-    entries = []
-    for i in range(n_entries):
-        pos = table_offset + i * entry_size
-        flag = struct.unpack_from("<i", data, pos)[0]
-        offset = struct.unpack_from("<q", data, pos + 4)[0]
-        size = struct.unpack_from("<q", data, pos + 12)[0]
-        entries.append(IMSIndexEntry(flag=flag, offset=offset, size=size))
+    width = _ims_header_word(data, _IMS_WORD_WIDTH)
+    height = _ims_header_word(data, _IMS_WORD_HEIGHT)
 
-    return width, height, n_entries, entries
+    entries = [
+        IMSIndexEntry(*_IMS_ENTRY.unpack_from(data, pos))
+        for pos in range(_IMS_HEADER_BYTES, len(data), _IMS_ENTRY.size)
+    ]
+    foreign = [k for k, e in enumerate(entries) if e.file_no != _IMS_DATA_FILE_NO]
+    if foreign:
+        k = foreign[0]
+        file_no = entries[k].file_no
+        what = (
+            "file number 0, which names the index itself and is invalid"
+            if file_no == 0
+            else f"data file {prefix}-{file_no}.ims"
+        )
+        raise ValueError(
+            f"{where}: entry {k} ({len(foreign)} of {len(entries)} entries in all) "
+            f"names {what}, not {prefix}-{_IMS_DATA_FILE_NO}.ims. PIVTOOLs reads "
+            f"only streams held in one data file: no real recording seen so far is "
+            f"split across files, so this layout is refused rather than read on a "
+            f"guess."
+        )
+    return width, height, codec, entries
 
 
 # ---------------------------------------------------------------------------
@@ -192,8 +319,8 @@ def _read_decoder(decoder_path: Path) -> str:
     if not decoder_path.exists():
         raise FileNotFoundError(
             f"Pixel encoding unknown: {decoder_path.name} is missing from "
-            f"{decoder_path.parent}. DaVis writes this file with every recording. "
-            f"The encoding will not be guessed -- re-export the recording from DaVis."
+            f"{decoder_path.parent}. The encoding will not be guessed -- copy the "
+            f"complete companion folder, or re-export the recording from DaVis."
         )
     root = ET.parse(decoder_path).getroot()
     id_elem = root.find("id")
@@ -231,6 +358,24 @@ _IMPLEMENTED_TRANSFORMERS = ("dark-image-subtraction", "rotate-180")
 # scale files "FrameScales0" / "CameraScale1" respectively. Both seen in the wild.
 _FRAME_READER_TYPE = "Core.Set.Recording.FrameReader"
 _SCALE_READER_TYPE = "Core.Set.Recording.ScaleReader"
+
+# The FrameReader Name of a LaVision image stream. lvpyio opens a stream only
+# for this exact, case-sensitive Name, and one foreign Name makes it open no
+# image of the whole recording (container-unknowns REPORT §2 F1, F2). It is the
+# only Name on the 24 FrameReaders of the surveyed drives.
+_FRAME_READER_NAME = "Images_16bit_8Bit"
+
+# Reader Names LaVision's own DLL describes for other vendors' camera formats
+# ("Reads Photron MRAW format.", "Reads Vision Research cine X format."), matched
+# case-insensitively so the refusal names the vendor. Upper-cased Name: advice.
+_FOREIGN_READER_NAMES = {
+    "MRAW": "a Photron MRAW stream. PIVTOOLs has no Photron reader; export the "
+    "images from DaVis as .im7 or TIFF",
+    "GRAW": "a Photron GRAW stream. PIVTOOLs has no Photron reader; export the "
+    "images from DaVis as .im7 or TIFF",
+    "CINE": "a Vision Research cine stream. PIVTOOLs reads the original .cine "
+    "file directly with image_type 'cine'",
+}
 
 
 def _load_stream_manifest(set_dir: Path) -> Optional[ET.Element]:
@@ -284,6 +429,37 @@ def _bound_stream_index(node: ET.Element, what: str, stream_xml: Path) -> int:
     return index
 
 
+def _check_frame_reader(node: ET.Element, prefix: str, stream_xml: Path) -> None:
+    """Refuse a FrameReader that is not a LaVision image stream bound to frames.
+
+    Raises:
+        ValueError: If its Name is a foreign camera format, is any Name other
+            than ``Images_16bit_8Bit``, or its ContentPurpose is not
+            ``IsAssociatedToFrames="true"``. The message names the attribute and
+            its value.
+    """
+    name = node.get("Name") or ""
+    what = f"FrameReader '{prefix}' in {stream_xml}"
+    if name.upper() in _FOREIGN_READER_NAMES:
+        raise ValueError(
+            f"{what} has Name '{name}': {_FOREIGN_READER_NAMES[name.upper()]}."
+        )
+    if name != _FRAME_READER_NAME:
+        raise ValueError(
+            f"{what} has Name '{name}'. The only LaVision image-stream reader is "
+            f"'{_FRAME_READER_NAME}' (case-sensitive); lvpyio opens no image of "
+            f"this recording either."
+        )
+    purpose = node.find("ContentPurpose")
+    associated = None if purpose is None else purpose.get("IsAssociatedToFrames")
+    if purpose is not None and associated != "true":
+        raise ValueError(
+            f"{what}: ContentPurpose IsAssociatedToFrames is '{associated}'; "
+            f"an image stream is associated to frames ('true'). lvpyio refuses "
+            f"this recording too."
+        )
+
+
 def _streams_from_manifest(
     set_dir: Path, root: ET.Element, frame_readers: List[ET.Element]
 ) -> List[_StreamSource]:
@@ -297,6 +473,7 @@ def _streams_from_manifest(
     stream_xml = set_dir / "StreamSet.xml"
 
     prefixes: dict = {}
+    spans: dict = {}
     for node in frame_readers:
         prefix = (node.get("FilePrefix") or "").strip()
         if not prefix:
@@ -304,7 +481,10 @@ def _streams_from_manifest(
                 f"A FrameReader in {stream_xml} has no FilePrefix, so its stream "
                 f"files cannot be located."
             )
+        _check_frame_reader(node, prefix, stream_xml)
         index = _bound_stream_index(node, f"FrameReader '{prefix}'", stream_xml)
+        purpose = node.find("ContentPurpose")
+        spans[index] = int(purpose.get("EndFrame")) - index + 1
         if index in prefixes:
             raise ValueError(
                 f"{stream_xml.name} binds two image streams to frame stream "
@@ -341,44 +521,31 @@ def _streams_from_manifest(
             index=i,
             prefix=prefixes[i],
             scale_prefix=scale_prefixes.get(i),
-            declared=True,
+            frames_per_image=spans[i],
         )
         for i in found
     ]
 
 
-def _streams_from_glob(set_dir: Path) -> List[_StreamSource]:
-    """Frame streams by the ``Frame{N}`` naming convention, for recordings whose
-    StreamSet.xml is absent or declares no FrameReader (older exports)."""
-    indices = sorted(
-        {
-            int(p.name.split("-")[0].replace("Frame", ""))
-            for p in set_dir.glob("Frame*-1.ims")
-        }
-    )
-    return [
-        _StreamSource(
-            index=i, prefix=f"Frame{i}", scale_prefix=f"FrameScales{i}", declared=False
-        )
-        for i in indices
-    ]
-
-
 def _discover_streams(set_dir: Path, root: Optional[ET.Element]) -> List[_StreamSource]:
-    """Locate every frame stream: manifest-driven when the manifest names any,
-    ``Frame{N}`` glob otherwise.
+    """Every frame stream StreamSet.xml declares, in stream order.
 
-    The condition is "declares at least one FrameReader", not "StreamSet.xml
-    exists": a manifest that only declares transformers (our synthetic fixtures,
-    and possibly older DaVis exports) still relies on the naming convention.
+    The manifest is the only source. Guessing streams from ``Frame{N}`` file
+    names read sets lvpyio opens no image for (a foreign FrameReader type, or no
+    FrameReader at all), and named nothing when the guess was wrong.
+
+    Raises:
+        FileNotFoundError, ValueError: Via :func:`_raise_no_streams` when the
+            recording has no StreamSet.xml or it declares no FrameReader.
     """
-    if root is not None:
-        frame_readers = [
-            n for n in root.iter("ReaderInfo") if n.get("Type") == _FRAME_READER_TYPE
-        ]
-        if frame_readers:
-            return _streams_from_manifest(set_dir, root, frame_readers)
-    return _streams_from_glob(set_dir)
+    frame_readers = (
+        []
+        if root is None
+        else [n for n in root.iter("ReaderInfo") if n.get("Type") == _FRAME_READER_TYPE]
+    )
+    if not frame_readers:
+        _raise_no_streams(set_dir, manifest_present=root is not None)
+    return _streams_from_manifest(set_dir, root, frame_readers)
 
 
 def _parse_stream_transformers(set_dir: Path, root: Optional[ET.Element]) -> dict:
@@ -527,12 +694,11 @@ def _load_dark_cached(dark_path_str: str, mtime: float) -> np.ndarray:
 def _read_scales(scales_path: Optional[Path]) -> Tuple[float, float, str]:
     """Read intensity scale from a {scaleprefix}.scales XML.
 
-    ``None`` (the manifest declares no scale file for this stream) and a
-    missing conventional file (glob fallback) both mean identity scale -- that
-    is the declared state, not a fallback. A DECLARED file that is missing is
-    caught before this is called.
+    ``None`` (the manifest declares no scale file for this stream) means
+    identity scale -- that is the declared state, not a fallback. A declared
+    file that is missing is refused before this is called.
     """
-    if scales_path is None or not scales_path.exists():
+    if scales_path is None:
         return 1.0, 0.0, ""
     tree = ET.parse(scales_path)
     root = tree.getroot()
@@ -776,6 +942,18 @@ def _decode_pixels(raw: bytes, decoder: str, width: int, height: int) -> np.ndar
 # ---------------------------------------------------------------------------
 
 
+def _im7_image_files(set_dir: Path) -> List[Path]:
+    """The .im7 files in a companion folder that hold images, sorted.
+
+    Transformer data files (Transformer1-scmos-1.im7, Transformer0-dark.im7) are
+    .im7 too, and are NOT evidence of .im7 layout: advising lavision_im7 on their
+    account would read a correction map as image data.
+    """
+    return sorted(
+        p for p in set_dir.glob("*.im7") if not p.name.startswith("Transformer")
+    )
+
+
 def _parse_set(set_path: Union[str, Path]) -> SetInfo:
     """Parse a .set container, returning metadata for all frame streams.
 
@@ -791,16 +969,22 @@ def _parse_set(set_path: Union[str, Path]) -> SetInfo:
         raise FileNotFoundError(
             f"{set_path.name} has no companion data folder (expected {set_dir}). "
             f"A DaVis recording is a .set file plus a folder of the same name holding "
-            f"its Frame*.ims streams; both must be copied together. A .set with no "
+            f"its .ims image streams; both must be copied together. A .set with no "
             f"folder is usually a DaVis result set (processed vectors), which holds no "
             f"images -- point at the recording .set instead."
         )
 
     root = _load_stream_manifest(set_dir)
-    sources = _discover_streams(set_dir, root)
 
-    if not sources:
-        _raise_no_streams(set_dir)
+    # DaVis can leave a StreamSet.xml declaring .ims streams beside images it
+    # stored as .im7 files (E:\retro_tbl_35mm_far, drive-survey C7). Why is
+    # unknown; the fix is the same either way, so it is named before the
+    # manifest's streams are looked for and reported missing.
+    im7_files = _im7_image_files(set_dir)
+    if im7_files and not any(set_dir.glob("*.ims")):
+        _raise_im7_layout(set_dir, im7_files, manifest_present=root is not None)
+
+    sources = _discover_streams(set_dir, root)
 
     # Post-decode corrections DaVis declares for this recording (usually none).
     transformers = _parse_stream_transformers(set_dir, root)
@@ -815,25 +999,26 @@ def _parse_set(set_path: Union[str, Path]) -> SetInfo:
 
         for required in (index_path, data_path):
             if not required.exists():
-                if src.declared:
-                    raise FileNotFoundError(
-                        f"StreamSet.xml declares frame stream {src.index} with "
-                        f"prefix '{src.prefix}', but {required.name} is missing "
-                        f"from {set_dir}. Copy the complete companion folder."
-                    )
-                raise FileNotFoundError(f"Data file missing: {required}")
+                raise FileNotFoundError(
+                    f"StreamSet.xml declares frame stream {src.index} with "
+                    f"prefix '{src.prefix}', but {required.name} is missing "
+                    f"from {set_dir}. Copy the complete companion folder."
+                )
 
         scales_path = None
         if src.scale_prefix is not None:
             scales_path = set_dir / f"{src.scale_prefix}.scales"
-            if src.declared and not scales_path.exists():
+            if not scales_path.exists():
                 raise FileNotFoundError(
                     f"StreamSet.xml declares scale file '{src.scale_prefix}' for "
                     f"frame stream {src.index}, but {scales_path.name} is missing "
                     f"from {set_dir}. Copy the complete companion folder."
                 )
 
-        width, height, n_ent, entries = _parse_ims_index(index_path)
+        width, height, codec, entries = _parse_ims_index(
+            index_path, src.prefix, src.frames_per_image
+        )
+        n_ent = len(entries)
         decoder = _read_decoder(decoder_path)
         slope, offset, unit = _read_scales(scales_path)
 
@@ -851,6 +1036,7 @@ def _parse_set(set_path: Union[str, Path]) -> SetInfo:
                 data_path=data_path,
                 index_path=index_path,
                 decoder=decoder,
+                codec=codec,
                 width=width,
                 height=height,
                 n_entries=n_ent,
@@ -865,41 +1051,62 @@ def _parse_set(set_path: Union[str, Path]) -> SetInfo:
     return SetInfo(set_dir=set_dir, frames=frames, n_entries=n_entries)
 
 
-def _raise_no_streams(set_dir: Path) -> None:
-    """Name which non-recording shape a stream-less companion folder is.
+def _raise_im7_layout(
+    set_dir: Path, im7_files: List[Path], manifest_present: bool
+) -> None:
+    """Refuse a companion folder whose images are .im7 files, pointing at the
+    .im7 image type.
 
-    DaVis reuses the .set extension for project and calibration nodes, stores
-    some recordings as .im7 files, and names stream files by a per-recording
-    prefix the manifest must declare -- each has a different fix, and the bare
-    "no data files" message fitted none of them.
+    Args:
+        set_dir: the companion folder.
+        im7_files: its image .im7 files, from :func:`_im7_image_files`.
+        manifest_present: whether a StreamSet.xml sits beside them, which DaVis
+            leaves declaring .ims streams on some recordings.
+    """
+    shown = im7_files[0].name
+    if len(im7_files) > 1:
+        shown += f" and {len(im7_files) - 1} more"
+    leftover = (
+        " Its StreamSet.xml declares .ims streams, but none are stored here."
+        if manifest_present
+        else ""
+    )
+    raise FileNotFoundError(
+        f"{set_dir} holds .im7 files ({shown}), not .ims frame streams.{leftover} "
+        f"This recording is in DaVis .im7 layout: set image_type to 'lavision_im7' "
+        f"and point the source path at the folder {set_dir} rather than at the "
+        f".set file."
+    )
+
+
+def _raise_no_streams(set_dir: Path, manifest_present: bool) -> None:
+    """Name why a companion folder yields no declared frame stream.
+
+    DaVis reuses the .set extension for project and calibration nodes, and the
+    streams of a recording are found only through the FrameReader entries of its
+    StreamSet.xml -- each case has a different fix. (A folder of .im7 images is
+    named earlier, by :func:`_raise_im7_layout`.)
+
+    Raises:
+        FileNotFoundError: Stream files without a StreamSet.xml, or no image data.
+        ValueError: Stream files whose StreamSet.xml declares no FrameReader.
     """
     ims_prefixes = sorted({p.name[: -len("-1.ims")] for p in set_dir.glob("*-1.ims")})
     if ims_prefixes:
         shown = ", ".join(ims_prefixes[:5])
-        raise FileNotFoundError(
-            f"{set_dir} holds image streams ({shown}) whose prefix is not "
-            f"'Frame{{N}}', and its StreamSet.xml does not declare them (no "
-            f"FrameReader entry). The stream-to-camera mapping comes from that "
-            f"manifest, so it cannot be inferred from the file names. Re-export the "
-            f"recording from DaVis so the companion folder carries its StreamSet.xml."
+        common = (
+            f"{set_dir} holds image streams ({shown}), but the stream-to-camera "
+            f"mapping comes only from the FrameReader entries of StreamSet.xml and "
+            f"is not guessed from file names. Re-export the recording from DaVis, "
+            f"or copy the complete companion folder."
         )
+        if manifest_present:
+            raise ValueError(
+                f"StreamSet.xml in {set_dir} declares no FrameReader "
+                f"(Type '{_FRAME_READER_TYPE}'). {common}"
+            )
+        raise FileNotFoundError(f"StreamSet.xml is missing from {set_dir}. {common}")
 
-    # Transformer data files (Transformer1-scmos-1.im7 and the like) are .im7 too,
-    # and are NOT evidence of .im7 layout; advising a switch to lavision_im7 on
-    # their account would read a correction map as image data.
-    im7_files = sorted(
-        p for p in set_dir.glob("*.im7") if not p.name.startswith("Transformer")
-    )
-    if im7_files:
-        shown = im7_files[0].name
-        if len(im7_files) > 1:
-            shown += f" and {len(im7_files) - 1} more"
-        raise FileNotFoundError(
-            f"{set_dir} holds .im7 files ({shown}), not .ims frame streams. This "
-            f"recording is in DaVis .im7 layout: set image_type to 'lavision_im7' "
-            f"and point the source path at the folder {set_dir} rather than at the "
-            f".set file."
-        )
     found = sorted(p.name for p in set_dir.iterdir())
     raise FileNotFoundError(
         f"{set_dir} holds no image data -- no *-1.ims streams and no .im7 files. "
@@ -935,6 +1142,16 @@ def _read_single_image(
     """
     if entry_idx < 0 or entry_idx >= frame_info.n_entries:
         raise IndexError(f"Entry {entry_idx} out of range [0, {frame_info.n_entries})")
+
+    # Compressed bytes read as raw pixels decode without error whenever the
+    # stored size equals the raw size, so the codec is refused before the read.
+    if frame_info.codec not in _IMS_UNCOMPRESSED_CODECS:
+        raise ValueError(
+            f"Frame stream {frame_info.frame_idx} of "
+            f"{frame_info.data_path.parent.name} is stored with '{frame_info.codec}' "
+            f"compression ({frame_info.index_path.name}, header bytes 24..55), "
+            f"which PIVTOOLs does not decode."
+        )
 
     # Refuse before the 37 MB read, not after it. Per stream: a container whose
     # other streams carry only implemented corrections stays readable.

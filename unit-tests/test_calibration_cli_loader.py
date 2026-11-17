@@ -24,6 +24,10 @@ import numpy as np
 
 import pivtools_cli.calibration_cli as cli
 from pivtools_core.image_handling.path_utils import infer_image_type
+from pivtools_core.image_handling.readers.davis_tokens import (
+    TokenRunOverrunError,
+    TruncatedTokenStreamError,
+)
 
 
 def test_infer_image_type_by_extension():
@@ -254,12 +258,12 @@ def test_rle_pack1_scale_applies_to_every_camera(tmp_path):
     """Same exposure in the RLE reader: it decoded up to the last requested
     frame and read attributes from there. It must decode through the buffer.
     Exercised through read_im7_camera, the production path, for both cameras."""
-    # 4 frames (2 cameras x A/B) of constant 100: per frame the 3-byte preamble,
-    # one int8 delta of +100 from the implicit 0, then zero deltas (see the
+    # 4 frames (2 cameras x A/B) of constant 100: the 3-byte preamble before
+    # frame 0 only, one int8 delta of +100 from the implicit 0, then zero deltas
+    # through every frame, the running value carrying across frames (see the
     # pack_type 1 section below for the token kinds).
     npix = 4 * 5
-    frame_stream = bytes([0x01, 0x01, 0x00, 0x64]) + b"\x00" * (npix - 1)
-    body = frame_stream * 4
+    body = bytes([0x01, 0x01, 0x00, 0x64]) + b"\x00" * (4 * npix - 1)
     header = struct.pack("<hhhh iiii hhh", 0, 1, -4, 0, 5, 4, 1, 4, 0, 1, 0)
     header += b"\x00" * (HEADER_SIZE - len(header))
     payload = b"0.5 7\x00counts\x00"
@@ -366,10 +370,13 @@ def test_detect_frames_per_camera_indivisible_raises(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# pack_type 1 (DaVis delta+nibble RLE) — hermetic regression for the decoder
-# reverse-engineered bit-exact vs lvpyio on real ALK x25 calibration plates.
-# This pins the byte format so the three token kinds can't silently regress:
-#   3-byte preamble | int8 deltas | 0x81 nibble-run (0x8 terminates) | 0x80 abs16.
+# pack_type 1 (DaVis token stream) — hermetic regression for the decoder,
+# bit-exact vs lvpyio on real ALK x25 calibration plates and all 28 real pack-1
+# files. This pins the byte format so the token kinds can't silently regress:
+#   3-byte preamble | int8 deltas | 0x81 nibble-run (a LOW nibble 0x8
+#   terminates) | 0x80 abs16 | 0x7f n abs16 x n. Multi-frame buffers, the
+#   high-nibble-8 case and the named errors are in test_im7_pack1.py and
+#   test_davis_tokens.py.
 # ---------------------------------------------------------------------------
 
 
@@ -469,7 +476,7 @@ def test_packtype1_0x7f_run_overrunning_frame_raises(tmp_path):
     payload = bytes([0x01, 0x01, 0x00, 0x7F, 0x05] + [0x10, 0x00] * 5)
     p = tmp_path / "B00001.im7"
     _write_packtype1_im7(p, size_x=3, size_y=1, payload=payload)
-    with pytest.raises(IOError, match="overruns"):
+    with pytest.raises(TokenRunOverrunError, match="B00001.im7: pack-1 frame 0 of 1"):
         read_im7_camera(p, camera_no=1, frames_per_camera=1)
 
 
@@ -477,7 +484,9 @@ def test_packtype1_truncated_stream_raises_by_name(tmp_path):
     payload = bytes([0x01, 0x01, 0x00, 0x64, 0x01])  # 2 pixels for a 4-pixel frame
     p = tmp_path / "B00001.im7"
     _write_packtype1_im7(p, size_x=4, size_y=1, payload=payload)
-    with pytest.raises(IOError, match="pack_type 1 stream ended"):
+    with pytest.raises(
+        TruncatedTokenStreamError, match="B00001.im7: pack-1 frame 0 of 1"
+    ):
         read_im7_camera(p, camera_no=1, frames_per_camera=1)
 
 
