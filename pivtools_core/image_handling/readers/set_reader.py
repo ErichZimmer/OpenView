@@ -24,11 +24,11 @@ the recording is refused with the field and the value named (see
 ``_IMS_REQUIRED_WORDS`` and ``_FRAME_READER_NAME``).
 
 Pixel encodings: DaVis names the encoding in {prefix}-decoder.xml. The full set of
-ids DaVis 10/11 can write is in ``_DECODER_BITS_PER_PX`` below; ``mono-10p``,
-``mono-12p``, ``raw-16-bit`` and ``raw-8-bit`` are decoded here. The rest are
-recognised and refused by name -- their bit or channel order cannot be derived
-from the id alone, and a wrong guess yields a plausible-looking wrong image rather
-than a failure.
+ids DaVis 10/11 can write is in ``_DECODER_BITS_PER_PX`` below, and the ones
+decoded here, each with its layout proven against lvpyio, are in
+``_IMPLEMENTED_DECODERS``. ``rgb-24`` is recognised and refused by name -- its
+channel order cannot be derived from the id, and a wrong guess yields a
+plausible-looking wrong image rather than a failure.
 
 Compression: the index header names a codec per stream (``_IMS_CODECS``). A
 "Zlib", "LZ4" or "IMX" entry is decompressed to the packed payload before the
@@ -61,7 +61,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple, Union
+from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 from lz4.block import LZ4BlockError
@@ -820,21 +820,6 @@ _DECODER_LABELS = {
     "rgb-24": "RGB 24",
 }
 
-# What this reader decodes. The others are refused by name: the three 12-bit
-# encodings share a byte count and differ only in bit order, the two 10-bit ones
-# likewise, and rgb-24's channel order is not derivable from the id, so size alone
-# cannot disambiguate them. Each needs a real sample file and a cross-check
-# against lvpyio before it can be added.
-#
-# That cross-check IS a plain equality assertion, with two adjustments: lvpyio
-# pads the frame height up to a multiple of 16 with zero rows (3528 -> 3536), and
-# in a multi-camera buffer it pads every frame to the LARGEST frame's shape,
-# unmasked (a 1984x1264 stream comes back as 2160x2560 with zeros outside the
-# top-left block). Compare against its top-left `height` x `width` block.
-# Everything else agrees bit for bit, declared corrections included. See
-# [[piv-data-formats]].
-_IMPLEMENTED_DECODERS = ("mono-10p", "mono-12p", "raw-16-bit", "raw-8-bit")
-
 
 def _decode_mono10p(raw: bytes, width: int, height: int) -> np.ndarray:
     """Decode Mono10p (USB3 Vision packed 10-bit) bytes to uint16 array.
@@ -886,8 +871,58 @@ def _decode_mono10p(raw: bytes, width: int, height: int) -> np.ndarray:
     return pixels.reshape(height, width)
 
 
+def _decode_mono10pmsb(raw: bytes, width: int, height: int) -> np.ndarray:
+    """Decode PFNC Mono10pmsb (msb packed 10-bit) bytes to a uint16 array.
+
+    Packing: 4 pixels in 5 bytes, most-significant bits first, as one continuous
+    big-endian bit stream (PFNC 2.4, section 6.3.2, figure 6-11)::
+
+        pixel0 =  b0         << 2 | b1 >> 6
+        pixel1 = (b1 & 0x3F) << 4 | b2 >> 4
+        pixel2 = (b2 & 0x0F) << 6 | b3 >> 2
+        pixel3 = (b3 & 0x03) << 8 | b4
+
+    Each is a BIG-endian uint16 window over two adjacent bytes (``b_k << 8 |
+    b_k+1``), shifted down by (6, 4, 2, 0) and masked to 10 bits: the mirror of
+    :func:`_decode_mono10p`, same four windows at stride 5. ``>u2`` pins the byte
+    order whatever the host. This is the encoding of the NTNU Imager MX PIV
+    cameras. Verified bit-exact against lvpyio 1.3.1 on 16 real 5120x5120 NTNU
+    frames and on every single-bit and every pixel-pair input (2026-11-14 and
+    2026-11-16 research).
+
+    Raises:
+        ValueError: If the pixel count is not a multiple of 4, for the reason
+            given in :func:`_decode_mono10p`.
+    """
+    n_pixels = width * height
+    if n_pixels % 4:
+        raise ValueError(
+            f"mono-10pmsb packs four pixels into five bytes, so a frame must hold a "
+            f"multiple of four pixels; {width}x{height} is {n_pixels}. The declared "
+            f"frame geometry does not match a mono-10pmsb payload."
+        )
+    n_quads = n_pixels // 4
+
+    # The final window starts at byte 5*n_quads - 2 and reads two bytes, ending
+    # exactly at the end of the payload -- no over-read.
+    def window(offset: int) -> np.ndarray:
+        return np.ndarray(
+            (n_quads,), dtype=">u2", buffer=raw, offset=offset, strides=(5,)
+        )
+
+    pixels = np.empty((n_quads, 4), dtype=np.uint16)
+    # (b0<<8 | b1) >> 6 is at most 10 bits wide, so no mask is needed.
+    np.right_shift(window(0), 6, out=pixels[:, 0])
+    np.right_shift(window(1), 4, out=pixels[:, 1])
+    np.bitwise_and(pixels[:, 1], 0x03FF, out=pixels[:, 1])
+    np.right_shift(window(2), 2, out=pixels[:, 2])
+    np.bitwise_and(pixels[:, 2], 0x03FF, out=pixels[:, 2])
+    np.bitwise_and(window(3), 0x03FF, out=pixels[:, 3])
+    return pixels.reshape(height, width)
+
+
 def _decode_mono12p(raw: bytes, width: int, height: int) -> np.ndarray:
-    """Decode PFNC Mono12p (LSB-first) bytes to a uint16 array.
+    """Decode PFNC Mono12p (lsb packed) bytes to a uint16 array.
 
     Packing: 2 pixels in 3 bytes.
         pixel0 = byte0 | (byte1 & 0x0F) << 8
@@ -939,6 +974,95 @@ def _decode_mono12p(raw: bytes, width: int, height: int) -> np.ndarray:
     return pixels.reshape(height, width)
 
 
+def _require_even_pixels(decoder: str, width: int, height: int) -> int:
+    """Pixel pairs in a 2-px-in-3-bytes frame, refusing an odd pixel count.
+
+    Raises:
+        ValueError: If the frame holds an odd number of pixels, for the reason
+            given in :func:`_decode_mono12p`.
+    """
+    n_pixels = width * height
+    if n_pixels % 2:
+        raise ValueError(
+            f"{decoder} packs two pixels into three bytes, so a frame must hold an "
+            f"even number of pixels; {width}x{height} is {n_pixels}. The declared "
+            f"frame geometry does not match a {decoder} payload."
+        )
+    return n_pixels // 2
+
+
+def _decode_mono12pmsb(raw: bytes, width: int, height: int) -> np.ndarray:
+    """Decode PFNC msb packed 12-bit bytes (DaVis 'mono-12pmsb') to a uint16 array.
+
+    Packing: 2 pixels in 3 bytes, most-significant bits first, as one continuous
+    big-endian bit stream::
+
+        pixel0 =  b0         << 4 | b1 >> 4
+        pixel1 = (b1 & 0x0F) << 8 | b2
+
+    The mirror of :func:`_decode_mono12p` with BIG-endian windows::
+
+        uint16 at byte 3k+0  =  b0<<8 | b1  ->  >> 4      ==  pixel0
+        uint16 at byte 3k+1  =  b1<<8 | b2  ->  & 0x0FFF  ==  pixel1
+
+    Layout settled against lvpyio 1.3.1, which decodes a synthetic recording
+    carrying this id equal to this rule on all 2^24 three-byte groups, and to no
+    other candidate layout (01-lavision-readers REPORT A3). No real recording in
+    this encoding has been seen.
+
+    Raises:
+        ValueError: If the frame holds an odd number of pixels.
+    """
+    n_pairs = _require_even_pixels("mono-12pmsb", width, height)
+
+    # The final window starts at byte 3*n_pairs - 2 and reads two bytes, ending
+    # exactly at the end of the payload -- no over-read.
+    first = np.ndarray((n_pairs,), dtype=">u2", buffer=raw, offset=0, strides=(3,))
+    second = np.ndarray((n_pairs,), dtype=">u2", buffer=raw, offset=1, strides=(3,))
+
+    pixels = np.empty((n_pairs, 2), dtype=np.uint16)
+    np.right_shift(first, 4, out=pixels[:, 0])
+    np.bitwise_and(second, 0x0FFF, out=pixels[:, 1])
+    return pixels.reshape(height, width)
+
+
+def _decode_mono12packed(raw: bytes, width: int, height: int) -> np.ndarray:
+    """Decode DaVis 'mono-12packed' bytes to a uint16 array.
+
+    Packing: 2 pixels in 3 bytes, the two low nibbles in the MIDDLE byte::
+
+        pixel0 = b0 << 4 | (b1 & 0x0F)
+        pixel1 = b2 << 4 | (b1 >> 4)
+
+    This is not a PFNC packed style, and not PFNC Mono12g, which puts the nibble
+    byte last. Layout settled against lvpyio 1.3.1, which decodes a synthetic
+    recording carrying this id equal to this rule on all 2^24 three-byte groups,
+    and to no other candidate layout (01-lavision-readers REPORT A3). No real
+    recording in this encoding has been seen.
+
+    Two windows give it without byte gathers:
+
+        big-endian uint16 at 3k+0     =  b0<<8 | b1  ->  (w >> 4) & 0x0FF0 | w & 0x000F
+        little-endian uint16 at 3k+1  =  b1 | b2<<8  ->   w >> 4
+
+    Raises:
+        ValueError: If the frame holds an odd number of pixels.
+    """
+    n_pairs = _require_even_pixels("mono-12packed", width, height)
+
+    # The final window starts at byte 3*n_pairs - 2 and reads two bytes, ending
+    # exactly at the end of the payload -- no over-read.
+    first = np.ndarray((n_pairs,), dtype=">u2", buffer=raw, offset=0, strides=(3,))
+    second = np.ndarray((n_pairs,), dtype="<u2", buffer=raw, offset=1, strides=(3,))
+
+    pixels = np.empty((n_pairs, 2), dtype=np.uint16)
+    np.right_shift(first, 4, out=pixels[:, 0])
+    np.bitwise_and(pixels[:, 0], 0x0FF0, out=pixels[:, 0])
+    np.bitwise_or(pixels[:, 0], np.bitwise_and(first, 0x000F), out=pixels[:, 0])
+    np.right_shift(second, 4, out=pixels[:, 1])
+    return pixels.reshape(height, width)
+
+
 def _decode_raw16(raw: bytes, width: int, height: int) -> np.ndarray:
     """Decode raw uint16 little-endian bytes (DaVis 'raw-16-bit')."""
     return np.frombuffer(raw, dtype=np.dtype("<u2")).reshape(height, width)
@@ -954,6 +1078,33 @@ def _decode_raw8(raw: bytes, width: int, height: int) -> np.ndarray:
     magnitude) mean the same thing whichever encoding a recording used.
     """
     return np.frombuffer(raw, dtype=np.uint8).astype(np.uint16).reshape(height, width)
+
+
+# What this reader decodes, and the function that decodes each id. One table, so
+# "implemented" and "dispatched" cannot disagree. The 10-bit ids share a byte
+# count, as do the 12-bit ones, and differ only in bit order, so size alone never
+# picks a layout: each layout here was settled against lvpyio, not from its name.
+# mono-10pmsb on real NTNU frames, the two 12-bit ids on all 2^24 three-byte groups
+# of a synthetic recording lvpyio decodes (01-lavision-readers REPORT A1-A3).
+# rgb-24 alone is refused: lvpyio 1.3.1 opens no synthetic rgb-24 recording, so
+# there is no oracle for its channel order (REPORT A5).
+#
+# The cross-check against lvpyio IS a plain equality assertion, with two
+# adjustments: lvpyio pads the frame height up to a multiple of 16 with zero rows
+# (3528 -> 3536), and in a multi-camera buffer it pads every frame to the LARGEST
+# frame's shape, unmasked (a 1984x1264 stream comes back as 2160x2560 with zeros
+# outside the top-left block). Compare against its top-left `height` x `width`
+# block. Everything else agrees bit for bit, declared corrections included. See
+# [[piv-data-formats]].
+_IMPLEMENTED_DECODERS: dict[str, Callable[[bytes, int, int], np.ndarray]] = {
+    "mono-10p": _decode_mono10p,
+    "mono-10pmsb": _decode_mono10pmsb,
+    "mono-12p": _decode_mono12p,
+    "mono-12packed": _decode_mono12packed,
+    "mono-12pmsb": _decode_mono12pmsb,
+    "raw-16-bit": _decode_raw16,
+    "raw-8-bit": _decode_raw8,
+}
 
 
 def _payload_bytes(decoder: str, width: int, height: int) -> int:
@@ -1018,13 +1169,7 @@ def _decode_pixels(raw: bytes, decoder: str, width: int, height: int) -> np.ndar
             f"may not match the stored data."
         )
 
-    if decoder == "mono-10p":
-        return _decode_mono10p(raw, width, height)
-    if decoder == "mono-12p":
-        return _decode_mono12p(raw, width, height)
-    if decoder == "raw-16-bit":
-        return _decode_raw16(raw, width, height)
-    return _decode_raw8(raw, width, height)
+    return _IMPLEMENTED_DECODERS[decoder](raw, width, height)
 
 
 # ---------------------------------------------------------------------------

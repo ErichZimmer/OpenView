@@ -15,7 +15,8 @@ which silently decoded packed data as unpacked.
 These tests lock in:
   * ``raw-16-bit`` and ``raw-8-bit`` decode, and ``mono-12p`` still decodes.
   * ``raw-8-bit`` widens without rescaling (raw sensor counts, as mono-12p does).
-  * A known-but-unimplemented encoding is refused BY NAME, not silently aliased.
+  * A known-but-unimplemented encoding (rgb-24) is refused BY NAME, not silently
+    aliased.
   * The byte count is checked against the id's bit depth before decoding.
   * A missing or empty decoder XML raises instead of guessing ``mono-16``.
   * The three non-recording .set shapes each name themselves.
@@ -90,7 +91,7 @@ def test_raw8_widens_without_rescaling(tmp_path):
 def test_mono12p_still_decodes(tmp_path):
     """Regression: the one encoding that already worked is unchanged.
 
-    Hand-computed from the Mono12Packed rule (2 pixels in 3 bytes):
+    Hand-computed from the PFNC Mono12p (lsb packed) rule (2 pixels in 3 bytes):
         b0=0x34 b1=0x12 b2=0xAB
         p0 = 0x34 | (0x2 << 8) = 0x234 = 564
         p1 = 0x1  | (0xAB << 4) = 0xAB1 = 2737
@@ -129,32 +130,31 @@ def test_pre_paired_pair_reads_both_streams(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "decoder,label",
-    [
-        ("mono-10pmsb", "Mono10pmsb to 16 bit"),
-        ("mono-12packed", "Mono12packed to 16 bit"),
-        ("mono-12pmsb", "Mono12pmsb to 16 bit"),
-        ("rgb-24", "RGB 24"),
-    ],
-)
-def test_known_but_unimplemented_encoding_names_itself(tmp_path, decoder, label):
+def test_known_but_unimplemented_encoding_names_itself(tmp_path):
     """A real DaVis encoding we cannot decode says so, and says what we can decode.
 
-    These share byte counts with encodings we DO support (the three 12-bit ids are
-    all 1.5 bytes/pixel) and differ only in bit order, so aliasing one onto another
-    would produce a scrambled image rather than an error.
+    rgb-24 is the one id left: lvpyio opens no synthetic rgb-24 recording, so there
+    is no oracle for its channel order, and a guess would give a plausible wrong
+    image rather than an error. The packed mono ids are in
+    test_set_packed_decoders.py.
     """
-    set_file = build_set(tmp_path, decoder, [[b"\x00" * 6]], width=4, height=1)
+    set_file = build_set(tmp_path, "rgb-24", [[b"\x00" * 12]], width=4, height=1)
 
     with pytest.raises(ValueError) as exc:
         read_set_frame(set_file, entry_no=1, frame_idx=0)
 
     message = str(exc.value)
-    assert decoder in message
-    assert label in message
+    assert "rgb-24" in message
+    assert "RGB 24" in message
     for implemented in _IMPLEMENTED_DECODERS:
         assert implemented in message
+
+
+def test_every_davis_encoding_but_rgb24_is_implemented():
+    """The eight DaVis ids minus rgb-24, so a removed decoder cannot go unnoticed."""
+    assert sorted(set_reader._DECODER_BITS_PER_PX) == sorted(
+        [*_IMPLEMENTED_DECODERS, "rgb-24"]
+    )
 
 
 def test_unknown_encoding_is_rejected(tmp_path):

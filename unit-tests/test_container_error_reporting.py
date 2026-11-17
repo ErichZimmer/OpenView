@@ -112,10 +112,10 @@ def test_unsupported_encoding_reports_the_real_reason(client):
     This is the exact regression: the container is present and its first frame
     read fails on the encoding.
     """
-    result = _camera_result(client, "mono-12pmsb")
+    result = _camera_result(client, "rgb-24")
 
     assert result["status"] == "error"
-    assert "mono-12pmsb" in result["error"]
+    assert "rgb-24" in result["error"]
     assert "First frame not found" not in result["error"]
     # A genuine decode failure is still labelled as one.
     assert result["error"].startswith(
@@ -130,7 +130,7 @@ def test_decode_failure_withholds_the_folder_listing(client):
     (ValidationAlert.tsx), which is what produced "not found … Found files: <the
     file>" in one panel.
     """
-    result = _camera_result(client, "mono-12pmsb")
+    result = _camera_result(client, "rgb-24")
 
     assert result["sample_files"] == []
 
@@ -211,7 +211,7 @@ def test_validation_dict_is_json_serializable(tmp_path):
 
     from pivtools_core.image_handling.path_utils import validate_images_generic
 
-    set_file = _write_container(tmp_path, "mono-12pmsb")
+    set_file = _write_container(tmp_path, "rgb-24")
 
     def _read(_idx):
         from pivtools_core.image_handling.readers.set_reader import read_set_frame
@@ -232,7 +232,7 @@ def test_validation_dict_is_json_serializable(tmp_path):
     )
 
     assert result["valid"] is False
-    assert "mono-12pmsb" in result["read_error"]
+    assert "rgb-24" in result["read_error"]
     # The assertion that matters: this must not raise.
     json.dumps(result)
 
