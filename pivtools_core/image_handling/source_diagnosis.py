@@ -45,7 +45,9 @@ from .path_utils import (
     start_index_explains_failure,
     start_index_hint_message,
 )
+from .readers.davis_attr import LabelledCamera
 from .readers.set_reader import (
+    SetInfo,
     read_set_info,
     set_camera_streams,
     valid_stream_splits,
@@ -146,14 +148,25 @@ class Suggestion(TypedDict):
 
 
 class StreamInfo(TypedDict):
-    """One image stream inside a LaVision ``.set`` recording."""
+    """One image stream inside a LaVision ``.set`` recording.
+
+    ``width``/``height`` are the output size, None when a transformer id
+    PIVTOOLs does not know leaves it unknown. ``label``, ``camera_id``,
+    ``model`` and ``role`` come from the recording's camera labels and are None
+    when it has none; ``role`` is "A"/"B" for a double-frame camera's frames and
+    "" for a single-frame camera.
+    """
 
     index: int
     prefix: str
-    width: int
-    height: int
+    width: Optional[int]
+    height: Optional[int]
     decoder: str
     camera: Optional[int]
+    label: Optional[str]
+    camera_id: Optional[str]
+    model: Optional[str]
+    role: Optional[str]
 
 
 @dataclass(frozen=True)
@@ -503,9 +516,10 @@ def scan_sentence(scan: SourceScan) -> str:
             for name in scan.root_names
             if name.lower().endswith(_STREAM_INDEX_SUFFIX)
         }
+        # Files, not frame streams: one DaVis 11.4 stream file holds A and B.
         parts.append(
             f"{scan.listed.as_posix()} is the data folder of "
-            f"{scan.companion_of.as_posix()} ({_plural(len(prefixes), 'stream')})."
+            f"{scan.companion_of.as_posix()} ({_plural(len(prefixes), 'stream file')})."
         )
     else:
         if not scan.exists:
@@ -568,17 +582,74 @@ def streams_sentence(set_name: str, streams: Sequence[StreamInfo]) -> str:
             if len(group) == 1
             else f"{first['index']}\u2013{last['index']}"
         )
-        items.append(
-            f"{label}: {first['width']}\u00d7{first['height']} {first['decoder']}"
+        size = (
+            "size unknown"
+            if first["width"] is None
+            else f"{first['width']}\u00d7{first['height']}"
         )
+        items.append(f"{label}: {size} {first['decoder']}")
     return f"{set_name}: {_plural(len(streams), 'stream')} \u2014 {', '.join(items)}."
+
+
+def _streams_text(streams: Sequence[int]) -> str:
+    """``stream 4`` / ``streams 0\u20131``."""
+    if len(streams) == 1:
+        return f"stream {streams[0]}"
+    return f"streams {streams[0]}\u2013{streams[-1]}"
+
+
+def _labelled_cameras_text(cameras: Sequence[LabelledCamera]) -> str:
+    """``4 cameras from the recording's own labels: Camera 1 (...) on streams 0\u20131; ...``."""
+    listing = "; ".join(f"{c.describe()} on {_streams_text(c.frames)}" for c in cameras)
+    return f"{_cameras(len(cameras))} from the recording's own labels: {listing}."
+
+
+def recording_notes(info: SetInfo) -> str:
+    """Where a ``.set`` recording's cameras come from, and DaVis's own warning.
+
+    Partial labels (DaVis 11.4 writes the camera keys on a leading run of
+    images only) are counted, and ``SetIsSuspicious`` is reported as a warning,
+    not a refusal (decided 17 Nov).
+    """
+    notes: List[str] = []
+    if info.cameras is not None:
+        notes.append(_labelled_cameras_text(info.cameras))
+        counts = {c.labelled_images for c in info.cameras}
+        if counts != {info.n_entries}:
+            if len(counts) == 1:
+                where = f"{counts.pop()} of {info.n_entries} images"
+            else:
+                where = ", ".join(
+                    f"{c.labelled_images} of {info.n_entries} images for {c.label}"
+                    for c in info.cameras
+                )
+            notes.append(f"Camera labels on {where}; every labelled image agrees.")
+    elif info.attribute_files:
+        notes.append(
+            "No camera labels: its .attr files carry no camera keys, so cameras "
+            "are matched to streams by shape."
+        )
+    else:
+        notes.append(
+            "No camera labels: the recording has no .attr files, so cameras are "
+            "matched to streams by shape."
+        )
+    if info.suspicious_flag is not None and info.suspicious_flag != "0":
+        notes.append(
+            f"DaVis marked this recording as suspicious (SetIsSuspicious = "
+            f"{info.suspicious_flag} in {info.set_dir.name}.set) without saying "
+            f"why; check its images before processing."
+        )
+    return " ".join(notes)
 
 
 def set_stream_infos(set_path: Path, camera_count: int) -> List[StreamInfo]:
     """Per-stream table of a ``.set`` recording, with each stream's camera.
 
-    ``camera`` is the 1-based position in the unique stream split for
-    ``camera_count`` cameras, or None for every stream when no unique split exists.
+    With camera labels, ``camera`` is the labelled camera's number whatever
+    ``camera_count`` says. Without, it is the 1-based position in the unique
+    stream split for ``camera_count`` cameras, or None for every stream when no
+    unique split exists.
 
     Raises
     ------
@@ -586,22 +657,33 @@ def set_stream_infos(set_path: Path, camera_count: int) -> List[StreamInfo]:
         Whatever ``read_set_info`` raises for an unreadable recording.
     """
     info = read_set_info(set_path)
-    try:
-        split = set_camera_streams(set_path, camera_count, info)
-    except ValueError:
-        split = []
+    if info.cameras is not None:
+        split = [c.frames for c in info.cameras]
+    else:
+        try:
+            split = set_camera_streams(set_path, camera_count, info)
+        except ValueError:
+            split = []
     camera_of = {idx: cam for cam, group in enumerate(split, start=1) for idx in group}
-    return [
-        StreamInfo(
-            index=frame.frame_idx,
-            prefix=frame.data_path.name[: -len(_STREAM_DATA_SUFFIX)],
-            width=frame.shape[1],
-            height=frame.shape[0],
-            decoder=frame.decoder,
-            camera=camera_of.get(frame.frame_idx),
+    model_of = {idx: c.model for c in info.cameras or () for idx in c.frames}
+    out: List[StreamInfo] = []
+    for frame in info.frames:
+        shape = None if frame.has_unknown_transformer else frame.shape
+        out.append(
+            StreamInfo(
+                index=frame.frame_idx,
+                prefix=frame.data_path.name[: -len(_STREAM_DATA_SUFFIX)],
+                width=None if shape is None else shape[1],
+                height=None if shape is None else shape[0],
+                decoder=frame.decoder,
+                camera=camera_of.get(frame.frame_idx),
+                label=frame.camera_label,
+                camera_id=frame.camera_id,
+                model=model_of.get(frame.frame_idx),
+                role=frame.frame_role,
+            )
         )
-        for frame in info.frames
-    ]
+    return out
 
 
 def found_for(
@@ -613,13 +695,16 @@ def found_for(
 ) -> str:
     """The ``found`` sentence for a validation result.
 
-    A ``.set`` file target reports its stream table (or why there is none). Any
-    other valid source reports what loaded. Everything else reports what is on disk.
+    A ``.set`` file target reports its stream table and where its cameras come
+    from (or why there is none). Any other valid source reports what loaded.
+    Everything else reports what is on disk.
     """
     if ctx.image_type == "lavision_set" and scan.path.suffix.lower() == _SET_SUFFIX:
         companion = scan.path.with_suffix("")
         if streams:
-            return streams_sentence(scan.path.name, streams)
+            # The stream table was just read from the same cached SetInfo.
+            notes = recording_notes(read_set_info(scan.path))
+            return f"{streams_sentence(scan.path.name, streams)} {notes}"
         # Only a .set that exists can lack its data folder. A missing one falls
         # through to the disk description, which says it does not exist.
         if scan.exists and not companion.is_dir():
@@ -846,6 +931,8 @@ def rule_set_streams(inp: RuleInput) -> List[Suggestion]:
         # for the stream table). Anything else is a reader bug and propagates, so
         # it is logged and named in ``found`` rather than swallowed here.
         return []
+    if info.cameras is not None:
+        return _labelled_suggestions(inp, info.cameras)
     try:
         split = set_camera_streams(scan.path, ctx.camera_count, info)
     except ValueError:
@@ -874,6 +961,40 @@ def rule_set_streams(inp: RuleInput) -> List[Suggestion]:
     if not pairs:
         return []
     return [_streams_suggestion(inp, ctx.camera_count, split, pairs, False)]
+
+
+def _labelled_suggestions(
+    inp: RuleInput, cameras: Sequence[LabelledCamera]
+) -> List[Suggestion]:
+    """The one suggestion for a recording whose cameras carry labels.
+
+    The count is the labels'. With the pair reader the double-frame cameras are
+    selected (a single-frame camera has no A/B pair); time-resolved, every
+    camera is. Offered when the configured count differs, or when the pair
+    reader would pair a selected single-frame camera. A rig with no
+    double-frame camera gets no pair selection: ``SetPairingError`` names why.
+    """
+    ctx = inp.ctx
+    k = len(cameras)
+    double = [c.number for c in cameras if c.double_frame]
+    process = double if ctx.pair_reader else list(range(1, k + 1))
+    if not process:
+        return []
+    if ctx.camera_count != k:
+        change_count = True
+    elif ctx.pair_reader and set(ctx.camera_numbers) - set(double):
+        change_count = False
+    else:
+        return []
+    noun = "camera" if len(process) == 1 else "cameras"
+    message = (
+        f"{_cameras(k)} by the recording's own camera labels: "
+        + "; ".join(
+            f"{c.number} = {c.describe()}, {_streams_text(c.frames)}" for c in cameras
+        )
+        + f". Set {_cameras(k)} and process {noun} {_and_join(process)}."
+    )
+    return [_set_streams_suggestion(inp, k, process, change_count, message)]
 
 
 def _count_suggestions(
@@ -908,7 +1029,20 @@ def _streams_suggestion(
     process: List[int],
     change_count: bool,
 ) -> Suggestion:
-    """Build one ``set_streams`` suggestion (label, message and ``apply``)."""
+    """Build one ``set_streams`` suggestion for a split by stream shape."""
+    streams = set_stream_infos(inp.scan.path, camera_count)
+    message = set_streams_message(streams, split, process, inp.ctx.pair_reader)
+    return _set_streams_suggestion(inp, camera_count, process, change_count, message)
+
+
+def _set_streams_suggestion(
+    inp: RuleInput,
+    camera_count: int,
+    process: List[int],
+    change_count: bool,
+    message: str,
+) -> Suggestion:
+    """One ``set_streams`` suggestion: its label and ``apply`` around ``message``."""
     ctx = inp.ctx
     apply: Dict[str, Any] = {"camera_numbers": process}
     if change_count:
@@ -919,10 +1053,9 @@ def _streams_suggestion(
     else:
         noun = "camera" if len(process) == 1 else "cameras"
         label = f"Process {noun} {_and_join(process)}"
-    streams = set_stream_infos(inp.scan.path, camera_count)
     return make_suggestion(
         "set_streams",
-        set_streams_message(streams, split, process, ctx.pair_reader),
+        message,
         cross_store_label(ctx, "set_streams", label, apply),
         apply,
     )

@@ -1,3 +1,6 @@
 # The .pivraw contract fixtures are byte-exact recorder output copied from pivtools-acquisition, and the reader
 # tests check their file sizes against MANIFEST.json: never convert their line endings.
 unit-tests/fixtures/pivraw_contract/** -text
+# The DaVis .attr fixtures are byte cuts of real recordings, and test_davis_attr.py checks their round trip byte
+# for byte: never convert their line endings.
+unit-tests/fixtures/davis_attr/** -text

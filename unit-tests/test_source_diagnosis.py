@@ -271,7 +271,10 @@ def test_scan_sentence_companion_verbatim():
         listed_is_companion=True,
         companion_of=Path("D:/run.set"),
     )
-    assert scan_sentence(scan) == "D:/run is the data folder of D:/run.set (5 streams)."
+    assert (
+        scan_sentence(scan)
+        == "D:/run is the data folder of D:/run.set (5 stream files)."
+    )
 
 
 def test_streams_sentence_plif_verbatim():

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ScalesList>
+    <Scales>
+        <ScaleX Factor="1" Offset="0" Unit="pixel" Description=""/>
+        <ScaleY Factor="1" Offset="0" Unit="pixel" Description=""/>
+        <ScaleZ Factor="1" Offset="0" Unit="" Description=""/>
+        <ScaleI Factor="1" Offset="0" Unit="counts" Description=""/>
+    </Scales>
+</ScalesList>

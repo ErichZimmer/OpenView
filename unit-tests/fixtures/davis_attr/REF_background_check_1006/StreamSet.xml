@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<StreamCfg>
+    <Version>2</Version>
+    <MinDavisVersion>10.2.0</MinDavisVersion>
+    <ReaderInfo Name="Images_16bit_8Bit" Type="Core.Set.Recording.FrameReader" FilePrefix="Frame0" FormatDescription="LaVision image stream format">
+        <ContentPurpose IsAssociatedToFrames="true" IsAssociatedToEntireImage="false" IsAssociatedToAllImages="false" StartFrame="0" EndFrame="0"/>
+    </ReaderInfo>
+    <ReaderInfo Name="ScaleReaderV1" Type="Core.Set.Recording.ScaleReader" FilePrefix="FrameScales0" FormatDescription="Frame scale files">
+        <ContentPurpose IsAssociatedToFrames="true" IsAssociatedToEntireImage="false" IsAssociatedToAllImages="false" StartFrame="0" EndFrame="0"/>
+    </ReaderInfo>
+    <ReaderInfo Name="AttributeReaderV1" Type="Core.Set.Recording.AttributeReader" FilePrefix="MetaData0" FormatDescription="Attribute streaming file">
+        <ContentPurpose IsAssociatedToFrames="true" IsAssociatedToEntireImage="false" IsAssociatedToAllImages="false" StartFrame="0" EndFrame="0"/>
+    </ReaderInfo>
+    <ReaderInfo Name="Images_16bit_8Bit" Type="Core.Set.Recording.FrameReader" FilePrefix="Frame1" FormatDescription="LaVision image stream format">
+        <ContentPurpose IsAssociatedToFrames="true" IsAssociatedToEntireImage="false" IsAssociatedToAllImages="false" StartFrame="1" EndFrame="1"/>
+    </ReaderInfo>
+    <ReaderInfo Name="ScaleReaderV1" Type="Core.Set.Recording.ScaleReader" FilePrefix="FrameScales1" FormatDescription="Frame scale files">
+        <ContentPurpose IsAssociatedToFrames="true" IsAssociatedToEntireImage="false" IsAssociatedToAllImages="false" StartFrame="1" EndFrame="1"/>
+    </ReaderInfo>
+    <ReaderInfo Name="AttributeReaderV1" Type="Core.Set.Recording.AttributeReader" FilePrefix="MetaData1" FormatDescription="Attribute streaming file">
+        <ContentPurpose IsAssociatedToFrames="true" IsAssociatedToEntireImage="false" IsAssociatedToAllImages="false" StartFrame="1" EndFrame="1"/>
+    </ReaderInfo>
+    <ReaderInfo Name="Images_16bit_8Bit" Type="Core.Set.Recording.FrameReader" FilePrefix="Frame2" FormatDescription="LaVision image stream format">
+        <ContentPurpose IsAssociatedToFrames="true" IsAssociatedToEntireImage="false" IsAssociatedToAllImages="false" StartFrame="2" EndFrame="2"/>
+    </ReaderInfo>
+    <ReaderInfo Name="ScaleReaderV1" Type="Core.Set.Recording.ScaleReader" FilePrefix="FrameScales2" FormatDescription="Frame scale files">
+        <ContentPurpose IsAssociatedToFrames="true" IsAssociatedToEntireImage="false" IsAssociatedToAllImages="false" StartFrame="2" EndFrame="2"/>
+    </ReaderInfo>
+    <ReaderInfo Name="AttributeReaderV1" Type="Core.Set.Recording.AttributeReader" FilePrefix="MetaData2" FormatDescription="Attribute streaming file">
+        <ContentPurpose IsAssociatedToFrames="true" IsAssociatedToEntireImage="false" IsAssociatedToAllImages="false" StartFrame="2" EndFrame="2"/>
+    </ReaderInfo>
+    <ReaderInfo Name="Images_16bit_8Bit" Type="Core.Set.Recording.FrameReader" FilePrefix="Frame3" FormatDescription="LaVision image stream format">
+        <ContentPurpose IsAssociatedToFrames="true" IsAssociatedToEntireImage="false" IsAssociatedToAllImages="false" StartFrame="3" EndFrame="3"/>
+    </ReaderInfo>
+    <ReaderInfo Name="ScaleReaderV1" Type="Core.Set.Recording.ScaleReader" FilePrefix="FrameScales3" FormatDescription="Frame scale files">
+        <ContentPurpose IsAssociatedToFrames="true" IsAssociatedToEntireImage="false" IsAssociatedToAllImages="false" StartFrame="3" EndFrame="3"/>
+    </ReaderInfo>
+    <ReaderInfo Name="AttributeReaderV1" Type="Core.Set.Recording.AttributeReader" FilePrefix="MetaData3" FormatDescription="Attribute streaming file">
+        <ContentPurpose IsAssociatedToFrames="true" IsAssociatedToEntireImage="false" IsAssociatedToAllImages="false" StartFrame="3" EndFrame="3"/>
+    </ReaderInfo>
+    <ReaderInfo Name="Images_16bit_8Bit" Type="Core.Set.Recording.FrameReader" FilePrefix="Frame4" FormatDescription="LaVision image stream format">
+        <ContentPurpose IsAssociatedToFrames="true" IsAssociatedToEntireImage="false" IsAssociatedToAllImages="false" StartFrame="4" EndFrame="4"/>
+    </ReaderInfo>
+    <ReaderInfo Name="ScaleReaderV1" Type="Core.Set.Recording.ScaleReader" FilePrefix="FrameScales4" FormatDescription="Frame scale files">
+        <ContentPurpose IsAssociatedToFrames="true" IsAssociatedToEntireImage="false" IsAssociatedToAllImages="false" StartFrame="4" EndFrame="4"/>
+    </ReaderInfo>
+    <ReaderInfo Name="AttributeReaderV1" Type="Core.Set.Recording.AttributeReader" FilePrefix="MetaData4" FormatDescription="Attribute streaming file">
+        <ContentPurpose IsAssociatedToFrames="true" IsAssociatedToEntireImage="false" IsAssociatedToAllImages="false" StartFrame="4" EndFrame="4"/>
+    </ReaderInfo>
+    <ReaderInfo Name="Images_16bit_8Bit" Type="Core.Set.Recording.FrameReader" FilePrefix="Frame5" FormatDescription="LaVision image stream format">
+        <ContentPurpose IsAssociatedToFrames="true" IsAssociatedToEntireImage="false" IsAssociatedToAllImages="false" StartFrame="5" EndFrame="5"/>
+    </ReaderInfo>
+    <ReaderInfo Name="ScaleReaderV1" Type="Core.Set.Recording.ScaleReader" FilePrefix="FrameScales5" FormatDescription="Frame scale files">
+        <ContentPurpose IsAssociatedToFrames="true" IsAssociatedToEntireImage="false" IsAssociatedToAllImages="false" StartFrame="5" EndFrame="5"/>
+    </ReaderInfo>
+    <ReaderInfo Name="AttributeReaderV1" Type="Core.Set.Recording.AttributeReader" FilePrefix="MetaData5" FormatDescription="Attribute streaming file">
+        <ContentPurpose IsAssociatedToFrames="true" IsAssociatedToEntireImage="false" IsAssociatedToAllImages="false" StartFrame="5" EndFrame="5"/>
+    </ReaderInfo>
+    <ReaderInfo Name="AttributeReaderV1" Type="Core.Set.Recording.AttributeReader" FilePrefix="MetaData6" FormatDescription="Attribute streaming file">
+        <ContentPurpose IsAssociatedToFrames="false" IsAssociatedToEntireImage="true" IsAssociatedToAllImages="false"/>
+    </ReaderInfo>
+</StreamCfg>
