@@ -61,10 +61,20 @@ PACK_LZ4 = 20
 IM7_VERSION_BUFFER = 0
 # Version 1, pack 20, measured byte for byte on the real files (D3, 2026-11-17):
 # per frame an int64 compressed size and one LZ4 block; a table of size_f int64
-# frame offsets; the attribute records; then, not read here, per-frame LZ4 mask
-# planes (H x W uint8, all 1 in every real file), a mask-offset table and a
-# 256-byte footer of offsets. lvpyio 1.3.1 agrees bit for bit on all 10 files.
+# frame offsets; the attribute records; per frame an int32 20, an int64 size and
+# an LZ4 block of an H x W uint8 mask (1 = valid, all 1 in every real file); a
+# mask-offset table; and a 256-byte footer of offsets. lvpyio 1.3.1 agrees bit
+# for bit on all 10 files. The masks are checked, not applied: see
+# _check_masks_per_frame.
 IM7_VERSION_PER_FRAME = 1
+# The version-1 footer: the last 256 bytes, whose int64 slots 0, 1 and 7 hold
+# the start of the attribute records, the frame table and the mask table.
+IM7_FOOTER_SIZE = 256
+FOOTER_ATTRIBUTES = 0
+FOOTER_FRAME_TABLE = 1
+FOOTER_MASK_TABLE = 7
+# lvpyio's mask value for a valid pixel (frame.masks), 0 for a masked one.
+DAVIS_MASK_VALID = 1
 
 # Extended header record types (int32)
 IEH_END = 0
@@ -402,7 +412,7 @@ def _read_lz4_per_frame(
     every read. Leaves ``f`` positioned at the attribute records.
 
     The per-frame mask planes and the offset footer DaVis writes after the
-    attribute records (see :data:`IM7_VERSION_PER_FRAME`) are not read.
+    attribute records are checked by :func:`_check_masks_per_frame`.
     """
     dt = _pixel_dtype(header)
     frame_bytes = header.size_x * header.size_y * header.size_z * dt.itemsize
@@ -441,6 +451,106 @@ def _read_lz4_per_frame(
             f"is a pack-20 layout this reader does not know."
         )
     return pixels
+
+
+def _check_masks_per_frame(f, header: IM7Header, source: str, attr_at: int) -> None:
+    """Prove a version-1 file's DaVis masks are all valid, and its trailer consistent.
+
+    Called with ``f`` just after the IEH_END type that :func:`_read_attributes`
+    stopped at, and ``attr_at`` the byte the attribute records began at. Every
+    frame's mask plane is decoded, also for a camera read of one frame, because
+    the refusal is about the file. A mask that is all 1 carries no information,
+    so not applying it is lossless. A mask with any other value would be dropped
+    silently, so it is refused instead. The mask-offset table must list the
+    blocks the walk found, and the footer must point at the attribute records,
+    the frame table and the mask table, with every other byte 0 and nothing
+    after it. Layout at :data:`IM7_VERSION_PER_FRAME`.
+
+    Raises
+    ------
+    ValueError
+        A mask holds a value other than 1.
+    IOError
+        The trailer is truncated, damaged, or laid out in a way not measured.
+    """
+    n_frames = header.size_f
+    mask_bytes = header.size_x * header.size_y
+    file_size = os.fstat(f.fileno()).st_size
+
+    def damaged(pos: int, what: str) -> IOError:
+        return IOError(
+            f"{source}: version-1 trailer {what} at byte {pos}. The file is "
+            f"truncated, damaged, or uses a layout this reader does not know."
+        )
+
+    pos = f.tell()
+    end_size = f.read(4)
+    if len(end_size) != 4:
+        raise damaged(pos, "ends after the attribute records, with no mask planes")
+    if struct.unpack("<i", end_size)[0] != 0:
+        raise damaged(pos, "has an IEH_END record whose size is not 0")
+
+    mask_starts = []
+    for k in range(n_frames):
+        pos = f.tell()
+        mask_starts.append(pos)
+        head = f.read(12)
+        if len(head) != 12:
+            raise damaged(pos, f"cuts off mask {k} of {n_frames}")
+        tag, comp_size = struct.unpack("<iq", head)
+        if tag != PACK_LZ4:
+            raise damaged(
+                pos, f"gives mask {k} of {n_frames} compression {tag}, not {PACK_LZ4}"
+            )
+        if not 0 < comp_size <= file_size - pos - 12:
+            raise damaged(
+                pos, f"gives mask {k} of {n_frames} {comp_size} compressed bytes"
+            )
+        try:
+            mask = np.frombuffer(
+                _lz4_block_decompress(f.read(comp_size), mask_bytes), np.uint8
+            )
+        except IOError as exc:
+            raise IOError(f"{source}: version-1 mask {k} of {n_frames}: {exc}") from exc
+        # min and max are one pass each, ~6x faster than counting on a 4872x3248
+        # plane; the count is only needed for the refusal.
+        if mask.min() != DAVIS_MASK_VALID or mask.max() != DAVIS_MASK_VALID:
+            masked = mask_bytes - int(np.count_nonzero(mask == DAVIS_MASK_VALID))
+            raise ValueError(
+                f"{source}: frame {k} of {n_frames} carries a DaVis mask with "
+                f"{masked} of {mask_bytes} pixels masked. DaVis masks inside .im7 "
+                f"are not applied; export the images from DaVis without the mask "
+                f"and use the PIVTOOLs mask instead."
+            )
+
+    pos = f.tell()
+    table_raw = f.read(8 * n_frames)
+    if len(table_raw) != 8 * n_frames:
+        raise damaged(pos, "cuts off the mask-offset table")
+    table = list(struct.unpack(f"<{n_frames}q", table_raw))
+    if table != mask_starts:
+        raise damaged(
+            pos,
+            f"has a mask-offset table {table}, but the masks start at {mask_starts}",
+        )
+
+    pos = f.tell()
+    footer = f.read()
+    if len(footer) != IM7_FOOTER_SIZE:
+        raise damaged(
+            pos, f"has a footer of {len(footer)} bytes, not {IM7_FOOTER_SIZE}"
+        )
+    got = struct.unpack_from("<8q", footer)
+    want = [0] * 8
+    want[FOOTER_ATTRIBUTES] = attr_at
+    want[FOOTER_FRAME_TABLE] = attr_at - 8 * n_frames
+    want[FOOTER_MASK_TABLE] = pos - 8 * n_frames
+    if list(got) != want or any(footer[64:]):
+        raise damaged(
+            pos,
+            f"has a footer reading {list(got)}{' and more non-zero bytes' if any(footer[64:]) else ''}, "
+            f"but the attribute records, frame table and mask table give {want}",
+        )
 
 
 def _zlib_block_bytes(f, header: IM7Header) -> int:
@@ -783,7 +893,10 @@ def _read_im7_internal(filepath: Path) -> tuple:
         else:
             raise _unsupported_pack_error(header, filepath.name)
 
+        attr_at = f.tell()
         scales = _read_attributes(f, filepath.name, header.pack_type)
+        if header.version == IM7_VERSION_PER_FRAME:
+            _check_masks_per_frame(f, header, filepath.name, attr_at)
 
     return header, pixels, scales
 
@@ -886,7 +999,9 @@ def read_im7_camera(
         buffer reads frame A only: for pack types 0 and 2 that halves the
         bytes decoded (measured 61.3 -> 30.9 ms, 63 -> 32 MB on a 4-camera
         4872x3248 pack-0 calibration file), and version-1 pack 20 (one LZ4
-        block per frame) decodes only the frames returned. Version-0 pack 20
+        block per frame) decodes only the frames returned, though it decodes
+        every frame's mask plane to prove the file has no real mask
+        (:func:`_check_masks_per_frame`). Version-0 pack 20
         (one LZ4 block for the whole buffer) and pack 1 (one token stream,
         sequential) decode every frame of the buffer by format design, so
         there it narrows only the result.
@@ -1029,7 +1144,10 @@ def read_im7_camera(
             raise _unsupported_pack_error(header, filepath.name)
 
         # Read attributes for intensity scale
+        attr_at = f.tell()
         scales = _read_attributes(f, filepath.name, header.pack_type)
+        if header.version == IM7_VERSION_PER_FRAME:
+            _check_masks_per_frame(f, header, filepath.name, attr_at)
 
     # Apply intensity scale in-place
     if scales.slope != 1.0:
