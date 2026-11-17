@@ -1067,13 +1067,9 @@ class Config:
 
         format_str = image_format[0]  # Always tuple now
 
-        # Determine camera_path the way load_images._camera_path_from_source
-        # does. get_camera_folder already answers "" for .set, .cine and
-        # multi-camera .im7; single-camera-per-subfolder .im7 gets its folder.
-        # Treating every .im7 as "no subdir" here made shape detection look for
-        # source/B00001.im7 on a Cam1/B00001.im7 layout and fail as not found.
-        folder = self.get_camera_folder(camera_num)
-        camera_path = source_path / folder if folder else source_path
+        from .image_handling.path_utils import camera_path_for
+
+        camera_path = camera_path_for(self, source_path, camera_num)
 
         logging.debug(f"Camera path: {camera_path}")
 
