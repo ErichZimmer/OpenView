@@ -32,6 +32,7 @@ from loguru import logger
 from pivtools_cli.preprocessing.preprocess import apply_filters_to_batch
 from pivtools_cli.run_import import RunImportConflict, import_run
 from pivtools_core.config import (
+    ActivePathsError,
     Config,
     PairingStrideError,
     get_config,
@@ -73,6 +74,12 @@ from pivtools_gui.utils import (
 from pivtools_gui.vector_merging.app.views import merging_bp
 from pivtools_gui.vector_statistics.app.views import statistics_bp
 from pivtools_gui.video_maker.app.views import video_maker_bp
+
+# Why a source has no pair count: a .pivraw run the reader refuses, strides
+# the image type cannot be read with, or a dataset selection naming no real
+# dataset (a .pivraw count aligns the selected runs). Routes that read pairs
+# answer 400 with the message; the config routes carry it as pairing_error.
+PAIR_COUNT_ERRORS = (PivrawError, PairingStrideError, ActivePathsError)
 
 app = Flask(__name__, static_folder="static", static_url_path="")
 register_json_error_handlers(app)
@@ -457,9 +464,8 @@ def get_frame_pair():
             ),
             404,
         )
-    except (PivrawError, PairingStrideError) as e:
-        # A .pivraw run the reader refuses, or strides the image type cannot
-        # be read with: the message names the cause and the fix.
+    except PAIR_COUNT_ERRORS as e:
+        # The source has no pair count: the message names the cause and the fix.
         return jsonify({"error": str(e), "source_path": str(source_path)}), 400
     except Exception as e:
         return (
@@ -858,9 +864,8 @@ def filter_single_frame():
 
         return jsonify(response)
 
-    except (PivrawError, PairingStrideError, MaskError) as e:
-        # A .pivraw run the reader refuses, strides the image type cannot be
-        # read with, or a refused mask: the message names the cause and the fix.
+    except (*PAIR_COUNT_ERRORS, MaskError) as e:
+        # No pair count, or a refused mask: the message names the cause and the fix.
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         logger.error(f"Error processing single frame: {e}")
@@ -1272,8 +1277,9 @@ def _normalize_dict_keys(obj):
 def _frame_pair_counts(cfg: Config) -> dict:
     """``num_frame_pairs`` and ``per_loop_frame_pairs`` for a config response.
 
-    A ``.pivraw`` run the reader refuses, or strides the image type cannot be
-    read with (``PairingStrideError``), has no pair count. The two config
+    A source with no pair count (:data:`PAIR_COUNT_ERRORS`: a ``.pivraw`` run
+    the reader refuses, strides the image type cannot be read with, or a
+    dataset selection naming no real dataset) gets nulls. The two config
     routes must still answer (the GUI loads the config on mount, and the user
     changes the source through it), so the counts are null and
     ``pairing_error`` carries the refusal for the GUI to show. Every
@@ -1284,7 +1290,7 @@ def _frame_pair_counts(cfg: Config) -> dict:
             "num_frame_pairs": cfg.num_frame_pairs,
             "per_loop_frame_pairs": cfg.per_loop_frame_pairs,
         }
-    except (PivrawError, PairingStrideError) as e:
+    except PAIR_COUNT_ERRORS as e:
         return {
             "num_frame_pairs": None,
             "per_loop_frame_pairs": None,
@@ -1751,7 +1757,7 @@ def run_piv():
     active_paths = data.get("active_paths")  # List of path indices to process
     mode = data.get("mode", "instantaneous")  # PIV mode: instantaneous or ensemble
 
-    # Pairing (PivrawError, PairingStrideError) and masks (MaskError) are
+    # The selection and pairing (PAIR_COUNT_ERRORS) and masks (MaskError) are
     # checked before any job starts; each is a 400 with its message
     # (errors.py), so the null pair count /config reports can never launch one.
     require_piv_job_inputs(get_config(), active_paths)
