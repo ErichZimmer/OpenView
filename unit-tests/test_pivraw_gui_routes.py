@@ -149,6 +149,45 @@ def test_run_piv_refuses_the_run_and_starts_no_job(tmp_path, monkeypatch, mode):
     assert started == []
 
 
+def test_run_piv_pairs_the_runs_the_request_selects(tmp_path, monkeypatch):
+    """Run PIV's datasets come from the request (the Run tab's checkboxes), not
+    from paths.active_paths in the config file, and the pairing check follows
+    them: run 0 pairs, run 1 cannot, and the file says [0]."""
+    started = []
+
+    class _Runner:
+        def start_piv_job(self, **kwargs):
+            started.append(kwargs)
+            return {"status": "started", "job_id": "x"}
+
+    monkeypatch.delenv("PIV_ACTIVE_PATHS", raising=False)
+    monkeypatch.setattr(A, "get_runner", lambda: _Runner())
+    client = _client(tmp_path, monkeypatch, case="df_2cam_clean")
+    unpairable = copy_case(tmp_path, "df_2cam_missed_trigger_cam2")
+    config_path = tmp_path / "work" / "config.yaml"
+    data = yaml.safe_load(config_path.read_text())
+    data["paths"]["source_paths"].append(str(unpairable))
+    data["paths"]["base_paths"].append(str(tmp_path / "out2"))
+    data["paths"]["active_paths"] = [0]
+    config_path.write_text(yaml.dump(data))
+
+    r = client.post("/backend/run_piv", json={"active_paths": [1]})
+    assert r.status_code == 400
+    assert str(unpairable) in r.get_json()["error"]
+    assert REFUSAL in r.get_json()["error"]
+    assert started == []
+
+    r = client.post("/backend/run_piv", json={"active_paths": [0]})
+    assert r.status_code == 200
+    assert len(started) == 1
+
+    # No active_paths in the request: the job takes the file's [0], and so does
+    # the check (the CLI's behaviour, unchanged).
+    r = client.post("/backend/run_piv", json={})
+    assert r.status_code == 200
+    assert len(started) == 2
+
+
 def test_run_piv_starts_a_clean_run(tmp_path, monkeypatch):
     started = []
 

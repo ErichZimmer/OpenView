@@ -39,8 +39,20 @@ def job_units(cfg: Config, active_paths: Optional[list[int]]) -> list[tuple[int,
     ``instantaneous.main`` and ``ensemble.main`` loop over. The request's
     ``cameras`` field is not used by the job, so it is not used here either.
     """
-    paths = cfg.resolve_active_paths(active_paths_override(active_paths))
-    return [(path_idx, camera) for path_idx in paths for camera in cfg.camera_numbers]
+    return [
+        (path_idx, camera)
+        for path_idx in job_paths(cfg, active_paths)
+        for camera in cfg.camera_numbers
+    ]
+
+
+def job_paths(cfg: Config, active_paths: Optional[list[int]]) -> list[int]:
+    """The dataset indices a job started with ``active_paths`` processes.
+
+    ``Config.resolve_active_paths`` on the value :meth:`PIVRunner.start_piv_job`
+    puts in the job's ``PIV_ACTIVE_PATHS``, the job's own resolution.
+    """
+    return cfg.resolve_active_paths(active_paths_override(active_paths))
 
 
 def require_piv_job_inputs(cfg: Config, active_paths: Optional[list[int]]) -> None:
@@ -49,17 +61,19 @@ def require_piv_job_inputs(cfg: Config, active_paths: Optional[list[int]]) -> No
     The one preflight a job start runs. Each check is the job's own, so a
     refusal here is the one the job would hit, with the same message:
 
-    1. The pair count (:meth:`Config.require_frame_pairs`): a ``.pivraw`` run
-       that cannot be paired by trigger (``PivrawError``), or strides another
-       image type cannot be read with (``PairingStrideError``).
+    1. The pair count over the datasets of :func:`job_paths`
+       (:meth:`Config.require_frame_pairs`): a ``.pivraw`` run that cannot be
+       paired by trigger (``PivrawError``), or strides another image type
+       cannot be read with (``PairingStrideError``).
     2. Every camera's mask on every dataset of :func:`job_units`
        (``load_mask_for_camera``): a wrong-size mask, or masking on with no
        readable mask file (``MaskError``). With masking off it loads nothing.
 
+    Both halves check the same datasets, the ones the job will process.
     All three errors are bad input, answered 400 with their message
     (``pivtools_gui.errors.BAD_INPUT_ERRORS``).
     """
-    cfg.require_frame_pairs()
+    cfg.require_frame_pairs(job_paths(cfg, active_paths))
     for path_idx, camera in job_units(cfg, active_paths):
         load_mask_for_camera(camera, cfg, source_path_idx=path_idx)
 
