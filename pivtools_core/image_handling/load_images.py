@@ -321,13 +321,13 @@ def read_pair(
             # read_single_frame would allocate each frame via astype and then copy
             # both again in np.stack -- two full-frame passes where one does. Same
             # pattern read_set_pair already uses for the pre-paired case.
-            fi = info.frames[stream_idx]
+            shape = info.frames[stream_idx].shape  # after the transformers
             if out is None:
-                result = np.empty((2, fi.height, fi.width), dtype=np.float32)
+                result = np.empty((2, *shape), dtype=np.float32)
             else:
                 result = check_out(
                     out,
-                    (2, fi.height, fi.width),
+                    (2, *shape),
                     f"read_pair camera {camera} of {Path(set_file_path).name}",
                 )
             read_set_frame(
