@@ -458,7 +458,7 @@ def run_single(
 
             t0 = time.perf_counter()
             scattered = scatter_immutable_data(
-                client, config, None, None, ensemble=False
+                client, config, camera, None, None, ensemble=False
             )
             t_scatter = time.perf_counter() - t0
 

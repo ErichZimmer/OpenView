@@ -13,15 +13,19 @@ _correlator_cache_data = {}
 
 def make_correlator_backend(
     config: Config,
+    *,
+    camera: Optional[int] = None,
     precomputed_cache: Optional[dict] = None,
     ensemble: bool = False,
     vector_masks: Optional[List[np.ndarray]] = None,
     active_pass_idx: Optional[int] = None,
 ):
-    """Create correlator backend, optionally with precomputed cache.
+    """Create correlator backend for one camera, or from a cache built for one.
 
     :param config: Configuration object
-    :param precomputed_cache: Optional precomputed cache data to avoid redundant computation
+    :param camera: 1-based camera number whose image shape sets the window
+        grid. Give this or ``precomputed_cache``, not both.
+    :param precomputed_cache: Cache from a correlator built for one camera
     :param ensemble: If True, create ensemble correlator instead of instantaneous
     :param vector_masks: Pre-computed vector masks for each pass (ensemble only)
     :param active_pass_idx: If set, only allocate correlation buffers for this pass (ensemble only)
@@ -36,6 +40,7 @@ def make_correlator_backend(
 
             return EnsembleCorrelatorCPU(
                 config=config,
+                camera=camera,
                 precomputed_cache=precomputed_cache,
                 vector_masks=vector_masks,
                 active_pass_idx=active_pass_idx,
@@ -50,7 +55,7 @@ def make_correlator_backend(
 
     if backend == "cpu":
         return InstantaneousCorrelatorCPU(
-            config=config, precomputed_cache=precomputed_cache
+            config=config, camera=camera, precomputed_cache=precomputed_cache
         )
     elif backend == "gpu":
         return InstantaneousCorrelatorGPU()
@@ -60,6 +65,8 @@ def make_correlator_backend(
 
 def make_ensemble_correlator(
     config: Config,
+    *,
+    camera: Optional[int] = None,
     precomputed_cache: Optional[dict] = None,
     vector_masks: Optional[List[np.ndarray]] = None,
     active_pass_idx: Optional[int] = None,
@@ -69,13 +76,15 @@ def make_ensemble_correlator(
     Convenience function specifically for ensemble PIV.
 
     :param config: Configuration object
-    :param precomputed_cache: Optional precomputed cache data
+    :param camera: 1-based camera number (or give ``precomputed_cache``)
+    :param precomputed_cache: Cache from a correlator built for one camera
     :param vector_masks: Pre-computed vector masks for each pass
     :param active_pass_idx: If set, only allocate correlation buffers for this pass
     :return: EnsembleCorrelatorCPU instance
     """
     return make_correlator_backend(
         config=config,
+        camera=camera,
         precomputed_cache=precomputed_cache,
         ensemble=True,
         vector_masks=vector_masks,

@@ -1,0 +1,20 @@
+paths:
+  source_paths:
+  - C:\Users\mtt1e23\AppData\Local\Temp\pivraw_contract_hzdahmrz\set\df_2cam_cam2_empty
+  camera_numbers:
+  - 1
+  - 2
+  camera_count: 2
+  camera_subfolders: []
+images:
+  num_images: 0
+  image_format:
+  - Camera%d.pivraw
+  image_type: pivraw
+  start_index: 1
+  frame_stride: 1
+  pair_stride: 2
+  pairing_preset: skip_frames
+acquisition:
+  mode: double_frame
+  dt_s: 0.0002

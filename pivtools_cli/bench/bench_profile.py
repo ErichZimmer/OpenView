@@ -33,7 +33,6 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
-from . import bench_common as bc
 import numpy as np
 
 from pivtools_cli.piv.piv_backend.cpu_instantaneous import InstantaneousCorrelatorCPU
@@ -43,6 +42,8 @@ from pivtools_cli.processing.dask_pipeline import (
     get_filter_specs,
 )
 from pivtools_core.image_handling.load_images import load_images
+
+from . import bench_common as bc
 
 # Sub-sections nested *inside* a parent section — excluded from pass totals to avoid
 # double-counting (they are a finer breakdown of the same wall time):
@@ -195,7 +196,7 @@ def profile_instantaneous(
         # timed reads below are steady-state and order-independent in an A/B.
         _read_batch(camera, config, dataset)
 
-    correlator = InstantaneousCorrelatorCPU(config)
+    correlator = InstantaneousCorrelatorCPU(config, camera=camera)
     correlator.profiling_enabled = True
 
     runs_to_save = config.instantaneous_runs_0based

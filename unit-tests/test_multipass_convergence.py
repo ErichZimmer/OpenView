@@ -849,7 +849,7 @@ def _run_masked(fill, *, ensemble, n_pairs):
     reload_config()
     config = Config(path=str(cfg_path))
     pixel_mask = load_mask_for_camera(1, config)
-    vector_masks = compute_vector_mask(pixel_mask, config, ensemble=ensemble)
+    vector_masks = compute_vector_mask(pixel_mask, config, 1, ensemble=ensemble)
 
     client = Client(
         processes=False,

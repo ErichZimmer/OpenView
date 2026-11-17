@@ -22,10 +22,11 @@ repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
     hooks:
+      # unit-tests/fixtures/pivraw_contract/ is byte-exact recorder output (see its README): never rewritten.
       - id: trailing-whitespace
-        exclude: ^(pAiback/|__pycache__/|.*\.egg-info/|build/|dist/|\.venv/|venv/|env/|node_modules/|\.git/)
+        exclude: ^(pAiback/|__pycache__/|.*\.egg-info/|build/|dist/|\.venv/|venv/|env/|node_modules/|\.git/|unit-tests/fixtures/pivraw_contract/)
       - id: end-of-file-fixer
-        exclude: ^(pAiback/|__pycache__/|.*\.egg-info/|build/|dist/|\.venv/|venv/|env/|node_modules/|\.git/)
+        exclude: ^(pAiback/|__pycache__/|.*\.egg-info/|build/|dist/|\.venv/|venv/|env/|node_modules/|\.git/|unit-tests/fixtures/pivraw_contract/)
       - id: check-yaml
 
   - repo: https://github.com/PyCQA/autoflake
