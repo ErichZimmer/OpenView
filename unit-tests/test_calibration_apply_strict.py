@@ -302,6 +302,7 @@ def _stub_units(monkeypatch, tmp_path, cams=(1,)):
                 "uncal": tmp_path / "uncal",
                 "out": tmp_path / f"out{cam}",
                 "cameras": (cam,),
+                "frame_warnings": (),
             }
             for cam in cams
         ]
