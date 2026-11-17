@@ -15,6 +15,40 @@ class CrossCorrelator(ABC):
     ):
         pass
 
+    def _require_one_shape_source(
+        self, camera: int | None, precomputed_cache: dict | None
+    ) -> None:
+        """Refuse a correlator whose image shape would be ambiguous or missing.
+
+        The window grid is built for one camera's image shape. It comes either
+        from ``camera`` (detected through ``Config.image_shape_for``) or from a
+        ``precomputed_cache`` built for one camera on the client, never both
+        and never neither.
+        """
+        if (camera is None) == (precomputed_cache is None):
+            raise ValueError(
+                f"{type(self).__name__} needs exactly one of camera (to build its "
+                "window grid from that camera's image shape) or precomputed_cache "
+                "(a cache built for one camera), got "
+                f"{'both' if camera is not None else 'neither'}."
+            )
+
+    def _require_frame_shape(self, images: np.ndarray) -> None:
+        """Refuse a batch whose frames differ from the shape the grid was built for.
+
+        Cameras on one rig can differ in shape, and a correlator or its cache
+        belongs to one camera. Without this check a cache built for one camera
+        would lay its window grid over another camera's frames.
+        """
+        frame_shape = tuple(images.shape[-2:])
+        if frame_shape != (self.H, self.W):
+            raise ValueError(
+                f"{type(self).__name__} was built for {self.H} x {self.W} frames "
+                f"(H x W), got a batch of {frame_shape[0]} x {frame_shape[1]}. A "
+                "correlator and its cache belong to one camera's image shape; "
+                "build one per camera."
+            )
+
     @staticmethod
     def _window_weight_fun(
         wsize: tuple[int, int],
@@ -155,7 +189,7 @@ class CrossCorrelator(ABC):
             []
         )  # For single mode coordinate conversion
 
-        H, W = config.image_shape
+        H, W = self.H, self.W
 
         for pass_idx in range(len(window_sizes)):
             spacing_x, spacing_y, win_ctrs_x, win_ctrs_y, padding = compute_window_fn(

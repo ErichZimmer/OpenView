@@ -459,8 +459,9 @@ def _read_batch(
 ) -> np.ndarray:
     """Read a batch of image pairs from disk straight into one pre-allocated array.
 
-    One (count, 2, H, W) float32 buffer, sized from ``config.image_shape`` --
-    the same shape ``load_images`` promises Dask -- and every pair is decoded
+    One (count, 2, H, W) float32 buffer, sized from
+    ``config.image_shape_for(camera)`` -- the same shape ``load_images``
+    promises Dask for this camera -- and every pair is decoded
     into its slot through ``read_pair(out=)``. There is no per-pair temporary
     and no copy: earlier versions collected pairs in a list and np.stack-ed them
     (batch held twice, 3 GB peak per task at batch_size 10 on 5312x3528), then
@@ -468,12 +469,14 @@ def _read_batch(
     47 ms of a 298 ms .set pair). The batch is np.empty, not np.zeros -- every
     slot is overwritten, so a zero fill would be a wasted pass.
 
-    A pair whose real shape disagrees with ``config.image_shape`` fails here by
-    name. It used to produce a batch whose shape disagreed with what Dask was
-    told and what the PIV window grid assumes -- wrong vectors, not a working
-    run. ``config.image_shape`` is detected once per process from the first
-    configured camera, and cameras can differ in shape (alk235's five span
-    3472-3536 rows), which is why production runs one camera per subprocess.
+    A pair whose real shape disagrees with the camera's detected shape fails
+    here by name. It used to produce a batch whose shape disagreed with what
+    Dask was told and what the PIV window grid assumes -- wrong vectors, not a
+    working run. The shape is detected per camera, because cameras on one rig
+    can differ (alk235's five span 3472-3536 rows, and a 90 degree rotated
+    camera presents (W, H)). Production loops every selected camera in one
+    process, so a shape shared across cameras would size the second camera's
+    buffer from the first camera's frames.
 
     Args:
         start_idx: 1-based index of the first pair in the batch
@@ -485,7 +488,7 @@ def _read_batch(
     Returns:
         np.ndarray of shape (count, 2, H, W)
     """
-    height, width = config.image_shape
+    height, width = config.image_shape_for(camera)
     batch = np.empty((count, 2, height, width), dtype=np.float32)
     for i in range(count):
         try:
@@ -495,9 +498,8 @@ def _read_batch(
                 raise
             raise ValueError(
                 f"Pair {start_idx + i} of camera {camera} does not fit the batch "
-                f"buffer: config.image_shape {(height, width)} was detected from "
-                f"camera {config.camera_numbers[0]}, and this camera's frames "
-                f"differ. {exc}"
+                f"buffer: camera {camera}'s shape {(height, width)} was detected "
+                f"from its first image, and this pair's frames differ. {exc}"
             ) from exc
     return batch
 
@@ -556,6 +558,8 @@ def load_images(
             folder = config.get_camera_folder(camera)
             return base_source / folder if folder else base_source
 
+    image_shape = config.image_shape_for(camera)
+
     # Multi-loop: create batches per loop, concatenate
     if num_loops > 1:
         per_loop = config.per_loop_frame_pairs
@@ -575,7 +579,7 @@ def load_images(
                 )
                 dask_batch = da.from_delayed(
                     delayed_batch,
-                    shape=(actual_size, 2, *config.image_shape),
+                    shape=(actual_size, 2, *image_shape),
                     dtype=np.float32,  # every reader returns float32; see _read_batch
                 )
                 dask_batches.append(dask_batch)
@@ -606,7 +610,7 @@ def load_images(
         )
         dask_batch = da.from_delayed(
             delayed_batch,
-            shape=(actual_size, 2, *config.image_shape),
+            shape=(actual_size, 2, *image_shape),
             dtype=np.float32,  # every reader returns float32; see _read_batch
         )
         dask_batches.append(dask_batch)
@@ -622,21 +626,23 @@ def load_images(
     return images
 
 
-def create_rectangular_mask(config: Config) -> np.ndarray:
+def create_rectangular_mask(config: Config, camera: int) -> np.ndarray:
     """
     Create a rectangular edge mask based on config settings.
 
     Parameters
     ----------
     config : Config
-        Configuration object containing image shape and rectangular mask settings
+        Configuration object holding the rectangular mask settings
+    camera : int
+        1-based camera number; the mask takes this camera's image shape
 
     Returns
     -------
     np.ndarray
         Boolean mask array of shape (H, W) where True = masked region
     """
-    H, W = config.image_shape
+    H, W = config.image_shape_for(camera)
     mask = np.zeros((H, W), dtype=bool)
 
     rect_settings = config.mask_rectangular_settings
@@ -711,7 +717,7 @@ def load_mask_for_camera(
     # Rectangular mode: create mask from edge specifications
     if mask_mode == "rectangular":
         logging.debug("Using rectangular edge masking")
-        return create_rectangular_mask(config)
+        return create_rectangular_mask(config, camera_num)
 
     # File mode: load from .mat file
     elif mask_mode == "file":
@@ -766,6 +772,7 @@ def load_mask_for_camera(
 def compute_vector_mask(
     pixel_mask: np.ndarray,
     config: Config,
+    camera: int,
     ensemble: bool = None,
 ) -> List[np.ndarray]:
     """
@@ -792,6 +799,9 @@ def compute_vector_mask(
         Boolean pixel mask of shape (H, W) where True indicates masked regions
     config : Config
         Configuration object containing window sizes, overlap, and mask threshold
+    camera : int
+        1-based camera number. Its image shape sets the window grid, so the
+        vector masks match the grid that camera's correlator produces.
     ensemble : bool, optional
         If True, use ensemble config (ensemble_window_sizes, etc.).
         If False, use instantaneous config (window_sizes, etc.).
@@ -816,17 +826,18 @@ def compute_vector_mask(
     if pixel_mask is None:
         return []
 
-    # CRITICAL: Use config.image_shape for window grid computation to match
-    # correlator/accumulator, NOT pixel_mask.shape. This ensures the vector
-    # mask grid dimensions match the PIV data grid.
-    H, W = config.image_shape
-    logging.debug(f"compute_vector_mask: Using config.image_shape = ({H}, {W})")
+    # CRITICAL: Use the camera's image shape for window grid computation to
+    # match correlator/accumulator, NOT pixel_mask.shape. This ensures the
+    # vector mask grid dimensions match the PIV data grid.
+    H, W = config.image_shape_for(camera)
+    logging.debug(f"compute_vector_mask: camera {camera} image shape = ({H}, {W})")
     logging.debug(f"compute_vector_mask: pixel_mask.shape = {pixel_mask.shape}")
 
-    # Validate mask dimensions match config.image_shape
+    # Validate mask dimensions match the camera's image shape
     if pixel_mask.shape != (H, W):
         logging.warning(
-            f"Pixel mask shape {pixel_mask.shape} differs from config.image_shape {(H, W)}. "
+            f"Pixel mask shape {pixel_mask.shape} differs from camera {camera}'s "
+            f"image shape {(H, W)}. "
             f"Resizing mask to match image dimensions."
         )
         from scipy.ndimage import zoom

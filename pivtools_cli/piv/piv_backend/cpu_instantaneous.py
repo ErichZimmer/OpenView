@@ -44,9 +44,22 @@ class InstantaneousCorrelatorCPU(CrossCorrelator):
     _lib_for_cleanup = None
 
     def __init__(
-        self, config: Config, precomputed_cache: Optional[dict] = None
+        self,
+        config: Config,
+        *,
+        camera: Optional[int] = None,
+        precomputed_cache: Optional[dict] = None,
     ) -> None:
+        """Build the correlator for one camera's image shape.
+
+        :param config: Configuration object
+        :param camera: 1-based camera number; its image shape sets the window
+            grid. Give this or ``precomputed_cache``, not both.
+        :param precomputed_cache: Cache from ``get_cache_data`` of a correlator
+            built on the client for one camera; carries that camera's shape.
+        """
         super().__init__()
+        self._require_one_shape_source(camera, precomputed_cache)
         self.config = config
         # Use platform-appropriate library extension
         lib_extension = ".dll" if os.name == "nt" else ".so"
@@ -164,8 +177,8 @@ class InstantaneousCorrelatorCPU(CrossCorrelator):
         if precomputed_cache is not None:
             self._load_precomputed_cache(precomputed_cache)
         else:
+            self.H, self.W = config.image_shape_for(camera)
             self._cache_window_padding(config=config)
-            self.H, self.W = config.image_shape
             # Cache interpolation grids for performance
             self._cache_interpolation_grids(config=config)
 
@@ -386,6 +399,7 @@ class InstantaneousCorrelatorCPU(CrossCorrelator):
         # Validate channel dimension
         if C != 2:
             raise ValueError(f"Expected 2 channels (image pairs), got {C} channels")
+        self._require_frame_shape(images)
 
         # Validate non-zero dimensions
         if H == 0 or W == 0:
@@ -911,7 +925,8 @@ class InstantaneousCorrelatorCPU(CrossCorrelator):
 
         :param pass_idx: Index of the current pass.
         :type pass_idx: int
-        :param config: Configuration object containing window sizes, overlap, and image shape.
+        :param config: Configuration object containing window sizes and overlap.
+            The image shape is this correlator's ``(self.H, self.W)``.
         :type config: Config
         :return: Tuple containing window spacing in x and y, arrays of window center coordinates
                  in x and y, and padding tuple (top, bottom, left, right) - always (0,0,0,0) for
@@ -922,13 +937,13 @@ class InstantaneousCorrelatorCPU(CrossCorrelator):
         overlap = config.overlap[pass_idx]
 
         logging.debug(f"_compute_window_centres pass {pass_idx}:")
-        logging.debug(f"  Image shape (H, W) = {config.image_shape}")
+        logging.debug(f"  Image shape (H, W) = ({self.H}, {self.W})")
         logging.debug(f"  Window size (H, W) = ({win_height}, {win_width})")
         logging.debug(f"  Overlap = {overlap}%")
 
         # Use centralized window center computation
         result = compute_window_centers(
-            image_shape=config.image_shape,
+            image_shape=(self.H, self.W),
             window_size=(win_height, win_width),
             overlap=overlap,
             validate=True,
