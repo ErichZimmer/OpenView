@@ -32,6 +32,7 @@ from loguru import logger
 from pivtools_cli.preprocessing.preprocess import apply_filters_to_batch
 from pivtools_cli.run_import import RunImportConflict, import_run
 from pivtools_core.config import (
+    ActivePathsError,
     Config,
     PairingStrideError,
     get_config,
@@ -60,7 +61,7 @@ from pivtools_core.validation import later_loop_findings, validate_memory_for_im
 from pivtools_gui.calibration.app import calibration_bp, calibration_stepped_bp
 from pivtools_gui.errors import register_json_error_handlers
 from pivtools_gui.masking.app.views import masking_bp
-from pivtools_gui.piv_runner import get_runner, require_piv_job_inputs
+from pivtools_gui.piv_runner import get_runner, job_paths, require_piv_job_inputs
 from pivtools_gui.plotting.app.plotting_views import vector_plot_bp
 
 # Transform endpoints (per-file storage with backup/restore, used by frontend)
@@ -73,6 +74,12 @@ from pivtools_gui.utils import (
 from pivtools_gui.vector_merging.app.views import merging_bp
 from pivtools_gui.vector_statistics.app.views import statistics_bp
 from pivtools_gui.video_maker.app.views import video_maker_bp
+
+# Why a source has no pair count: a .pivraw run the reader refuses, strides
+# the image type cannot be read with, or a dataset selection naming no real
+# dataset (a .pivraw count aligns the selected runs). Routes that read pairs
+# answer 400 with the message; the config routes carry it as pairing_error.
+PAIR_COUNT_ERRORS = (PivrawError, PairingStrideError, ActivePathsError)
 
 app = Flask(__name__, static_folder="static", static_url_path="")
 register_json_error_handlers(app)
@@ -457,9 +464,8 @@ def get_frame_pair():
             ),
             404,
         )
-    except (PivrawError, PairingStrideError) as e:
-        # A .pivraw run the reader refuses, or strides the image type cannot
-        # be read with: the message names the cause and the fix.
+    except PAIR_COUNT_ERRORS as e:
+        # The source has no pair count: the message names the cause and the fix.
         return jsonify({"error": str(e), "source_path": str(source_path)}), 400
     except Exception as e:
         return (
@@ -594,6 +600,15 @@ def preload_images():
             "vmax": display_bounds[1] if display_bounds else None,
         }
     )
+
+
+def _query_selection(text: str) -> list:
+    """A query string's comma-separated dataset selection, as its entries.
+
+    Blank entries are skipped, as the job skips them. The entries stay text,
+    for ``job_paths`` to accept or refuse by name.
+    """
+    return [entry.strip() for entry in text.split(",") if entry.strip()]
 
 
 def _source_path_idx_error(idx: object, n_sources: int) -> Optional[str]:
@@ -858,9 +873,8 @@ def filter_single_frame():
 
         return jsonify(response)
 
-    except (PivrawError, PairingStrideError, MaskError) as e:
-        # A .pivraw run the reader refuses, strides the image type cannot be
-        # read with, or a refused mask: the message names the cause and the fix.
+    except (*PAIR_COUNT_ERRORS, MaskError) as e:
+        # No pair count, or a refused mask: the message names the cause and the fix.
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         logger.error(f"Error processing single frame: {e}")
@@ -1272,8 +1286,9 @@ def _normalize_dict_keys(obj):
 def _frame_pair_counts(cfg: Config) -> dict:
     """``num_frame_pairs`` and ``per_loop_frame_pairs`` for a config response.
 
-    A ``.pivraw`` run the reader refuses, or strides the image type cannot be
-    read with (``PairingStrideError``), has no pair count. The two config
+    A source with no pair count (:data:`PAIR_COUNT_ERRORS`: a ``.pivraw`` run
+    the reader refuses, strides the image type cannot be read with, or a
+    dataset selection naming no real dataset) gets nulls. The two config
     routes must still answer (the GUI loads the config on mount, and the user
     changes the source through it), so the counts are null and
     ``pairing_error`` carries the refusal for the GUI to show. Every
@@ -1284,7 +1299,7 @@ def _frame_pair_counts(cfg: Config) -> dict:
             "num_frame_pairs": cfg.num_frame_pairs,
             "per_loop_frame_pairs": cfg.per_loop_frame_pairs,
         }
-    except (PivrawError, PairingStrideError) as e:
+    except PAIR_COUNT_ERRORS as e:
         return {
             "num_frame_pairs": None,
             "per_loop_frame_pairs": None,
@@ -1751,7 +1766,7 @@ def run_piv():
     active_paths = data.get("active_paths")  # List of path indices to process
     mode = data.get("mode", "instantaneous")  # PIV mode: instantaneous or ensemble
 
-    # Pairing (PivrawError, PairingStrideError) and masks (MaskError) are
+    # The selection and pairing (PAIR_COUNT_ERRORS) and masks (MaskError) are
     # checked before any job starts; each is a 400 with its message
     # (errors.py), so the null pair count /config reports can never launch one.
     require_piv_job_inputs(get_config(), active_paths)
@@ -2130,41 +2145,12 @@ def get_uncalibrated_count():
     base_paths = cfg.base_paths
 
     # active_paths is required: defaulting to dataset 0 is what pinned the progress
-    # bar at 100% for the rest of a multi-dataset run.
-    raw_active = request.args.get("active_paths", "")
-    try:
-        active_paths = [int(p) for p in raw_active.split(",") if p.strip()]
-    except ValueError:
-        return (
-            jsonify(
-                {
-                    "error": "active_paths must be comma-separated integers, "
-                    f"got {raw_active!r}"
-                }
-            ),
-            400,
-        )
-    if not active_paths:
-        return (
-            jsonify(
-                {
-                    "error": "active_paths is required "
-                    "(comma-separated base path indices)"
-                }
-            ),
-            400,
-        )
-    out_of_range = [i for i in active_paths if not 0 <= i < len(base_paths)]
-    if out_of_range:
-        return (
-            jsonify(
-                {
-                    "error": f"active_paths entries out of range: {out_of_range} "
-                    f"({len(base_paths)} base path(s) configured)"
-                }
-            ),
-            400,
-        )
+    # bar at 100% for the rest of a multi-dataset run. It is resolved as the job
+    # resolves it, so an empty, non-integer or out-of-range selection is an
+    # ActivePathsError, a 400 (errors.py).
+    active_paths = job_paths(
+        cfg, _query_selection(request.args.get("active_paths", ""))
+    )
 
     # Camera is part of the key because `files` is camera-specific.
     cache_key = (tuple(active_paths), type_name, cam)
@@ -2240,8 +2226,11 @@ def get_uncalibrated_count():
 def check_output_exists():
     """Check if output data exists for given paths/cameras."""
     cfg = get_config()
-    active_paths_str = request.args.get("active_paths", "")
-    active_paths = [int(p) for p in active_paths_str.split(",") if p.strip()]
+    selection = _query_selection(request.args.get("active_paths", ""))
+    # A selection is resolved as the PIV job resolves it: a dataset outside the
+    # config or a non-integer is ActivePathsError, a 400 (errors.py). No
+    # selection asks about nothing.
+    active_paths = job_paths(cfg, selection) if selection else []
     mode = request.args.get("mode", "")  # "instantaneous" or "ensemble"
     types_to_check = (
         [mode]
@@ -2261,9 +2250,6 @@ def check_output_exists():
     details = {}
 
     for path_idx in active_paths:
-        if path_idx >= len(cfg.base_paths):
-            logger.warning(f"[check_output_exists] Path index {path_idx} out of range")
-            continue
         base = cfg.base_paths[path_idx]
         path_key = f"path_{path_idx}"
         details[path_key] = {}
@@ -2321,9 +2307,13 @@ def clear_output():
     cleared = []
     errors = []
 
+    # Resolved as the PIV job resolves them, before anything is deleted: a
+    # negative index used to clear another dataset's output (Python indexing),
+    # and an out-of-range one was skipped. Both are ActivePathsError, a 400.
+    if active_paths:
+        active_paths = job_paths(cfg, active_paths)
+
     for path_idx in active_paths:
-        if path_idx >= len(cfg.base_paths):
-            continue
         base = cfg.base_paths[path_idx]
 
         for cam_num in camera_numbers:

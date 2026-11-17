@@ -48,6 +48,8 @@ logger = logging.getLogger(__name__)
 
 # Ensemble PIV stores its result under this name + struct (vs per-frame "piv_result").
 ENSEMBLE_FILE = "ensemble_result.mat"
+# How a refusal names the datasets an apply was asked to calibrate.
+APPLY_SELECTION = "the calibration apply dataset selection"
 
 
 class ApplyCancelled(Exception):
@@ -192,16 +194,17 @@ def plan_apply_units(
         raise ValueError(
             f"active_paths must be a list of base-path indices, got {active_paths!r}"
         )
+    # A given selection goes through the one dataset check (Config.resolve_active_paths):
+    # a negative index would wrap to the last dataset and calibrate the wrong run, and
+    # int() turned 1.5 and True into dataset 1. None or [] is every dataset here.
     base_indices = (
-        [int(i) for i in active_paths] if active_paths else list(range(len(base_paths)))
-    )
-    # A negative index would wrap to the last dataset and calibrate the wrong run.
-    bad = [i for i in base_indices if not 0 <= i < len(base_paths)]
-    if bad:
-        raise ValueError(
-            f"active_paths {bad} out of range: {len(base_paths)} base path(s) configured "
-            f"(valid indices 0..{len(base_paths) - 1})"
+        full_cfg.resolve_active_paths(
+            list(active_paths),
+            label=f"{APPLY_SELECTION} [{', '.join(str(i) for i in active_paths)}]",
         )
+        if active_paths
+        else list(range(len(base_paths)))
+    )
 
     units = []
     if stereo:

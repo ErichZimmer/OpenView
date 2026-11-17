@@ -40,14 +40,18 @@ def get_active_paths_from_args(args, config):
     """
     Get active paths, with CLI override support.
 
-    If args.active_paths is provided (e.g., "0,1,2"), parse and return those indices.
-    Otherwise, return config.active_paths.
+    If args.active_paths is provided (e.g., "0,1,2"), those indices are
+    resolved as the PIV job resolves PIV_ACTIVE_PATHS
+    (``Config.resolve_active_paths``); otherwise config.active_paths. Either
+    way an index outside the datasets or a non-integer entry raises
+    ``ActivePathsError`` by name.
 
     Returns list of path indices.
     """
-    if hasattr(args, "active_paths") and args.active_paths:
-        # Parse comma-separated indices
-        return [int(i.strip()) for i in args.active_paths.split(",")]
+    if getattr(args, "active_paths", None):
+        return config.resolve_active_paths(
+            args.active_paths, label=f"--active-paths '{args.active_paths}'"
+        )
     return config.active_paths
 
 
@@ -117,9 +121,6 @@ def transform_command(args):
         )
 
     active_paths = get_active_paths_from_args(args, config)
-    if not active_paths:
-        print("Error: No active paths configured in config.yaml")
-        sys.exit(1)
 
     print("=" * 60)
     print("Vector Transform - Starting")
@@ -187,9 +188,6 @@ def merge_command(args):
     type_name = args.type_name or config.merging_type_name or "instantaneous"
 
     active_paths = get_active_paths_from_args(args, config)
-    if not active_paths:
-        print("Error: No active paths configured in config.yaml")
-        sys.exit(1)
 
     if len(cameras) < 2:
         print("Error: Merging requires at least 2 cameras")
@@ -299,9 +297,6 @@ def statistics_command(args):
         use_merged = config.statistics_workflow == "after_merge"
 
     active_paths = get_active_paths_from_args(args, config)
-    if not active_paths:
-        print("Error: No active paths configured in config.yaml")
-        sys.exit(1)
 
     print("=" * 60)
     print("Vector Statistics - Starting")
@@ -487,9 +482,6 @@ def video_command(args):
     )
 
     active_paths = get_active_paths_from_args(args, config)
-    if not active_paths:
-        print("Error: No active paths configured in config.yaml")
-        sys.exit(1)
 
     print("=" * 60)
     print("Video Creation - Starting")
@@ -870,6 +862,11 @@ def instantaneous_command(args):
     from pivtools_core import instantaneous
 
     if args.active_paths:
+        # Checked here first, so a refusal names --active-paths, not the
+        # PIV_ACTIVE_PATHS variable the job is handed.
+        from pivtools_core.config import Config
+
+        get_active_paths_from_args(args, Config())
         os.environ["PIV_ACTIVE_PATHS"] = args.active_paths
     # instantaneous/ensemble delegate to main(), which reads config.camera_numbers,
     # so the camera override is passed via env var (statistics/transform own their
@@ -906,6 +903,11 @@ def ensemble_command(args):
     from pivtools_core import ensemble
 
     if args.active_paths:
+        # Checked here first, so a refusal names --active-paths, not the
+        # PIV_ACTIVE_PATHS variable the job is handed.
+        from pivtools_core.config import Config
+
+        get_active_paths_from_args(args, Config())
         os.environ["PIV_ACTIVE_PATHS"] = args.active_paths
     # instantaneous/ensemble delegate to main(), which reads config.camera_numbers,
     # so the camera override is passed via env var (statistics/transform own their

@@ -19,6 +19,9 @@ from loguru import logger
 from pivtools_core.config import ACTIVE_PATHS_ENV, Config
 from pivtools_core.image_handling.load_images import load_mask_for_camera
 
+# How refusals name the dataset checkboxes of the GUI's Run PIV tab.
+RUN_SELECTION = "the Run PIV dataset selection"
+
 
 def active_paths_override(active_paths: Optional[list[int]]) -> Optional[str]:
     """The ``PIV_ACTIVE_PATHS`` value a job started with ``active_paths`` gets.
@@ -46,13 +49,33 @@ def job_units(cfg: Config, active_paths: Optional[list[int]]) -> list[tuple[int,
     ]
 
 
-def job_paths(cfg: Config, active_paths: Optional[list[int]]) -> list[int]:
+def job_paths(cfg: Config, active_paths: Optional[list]) -> list[int]:
     """The dataset indices a job started with ``active_paths`` processes.
 
-    ``Config.resolve_active_paths`` on the value :meth:`PIVRunner.start_piv_job`
-    puts in the job's ``PIV_ACTIVE_PATHS``, the job's own resolution.
+    ``Config.resolve_active_paths``, the job's own resolution, on the request's
+    selection. The job receives it as the :func:`active_paths_override` string,
+    which is accepted or refused exactly as the list is; the list is passed so
+    a refusal names what the user sent, as "the Run PIV dataset selection
+    [5]". None is the config file's ``paths.active_paths``, as for the job.
     """
-    return cfg.resolve_active_paths(active_paths_override(active_paths))
+    if active_paths is None:
+        return cfg.resolve_active_paths(None)
+    return cfg.resolve_active_paths(
+        active_paths, label=run_selection_label(active_paths)
+    )
+
+
+def run_selection_label(selection: object) -> str:
+    """How a refusal names a dataset selection sent by the GUI.
+
+    The GUI's Run PIV tab holds the dataset checkboxes, so every route that
+    takes them (run, clear, check, progress) is named after it.
+    """
+    if isinstance(selection, (list, tuple)):
+        shown = "[" + ", ".join(str(entry) for entry in selection) + "]"
+    else:
+        shown = repr(selection)
+    return f"{RUN_SELECTION} {shown}"
 
 
 def require_piv_job_inputs(cfg: Config, active_paths: Optional[list[int]]) -> None:

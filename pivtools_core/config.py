@@ -56,6 +56,23 @@ PREDICTOR_FILL_METHODS = ("harmonic", "nearest", "none")
 # Environment variable the GUI's PIV runner sets to choose a job's datasets.
 ACTIVE_PATHS_ENV = "PIV_ACTIVE_PATHS"
 
+
+def _dataset_number(entry: object) -> Optional[int]:
+    """``entry`` as a dataset index, or None when it is not a whole number.
+
+    An int, or a string of digits with an optional minus sign (the form an
+    override and a quoted YAML entry take). A bool is not a number here, though
+    Python counts it as an int, and neither is a float.
+    """
+    if isinstance(entry, bool):
+        return None
+    if isinstance(entry, int):
+        return entry
+    if isinstance(entry, str) and re.fullmatch(r"-?\d+", entry.strip()):
+        return int(entry)
+    return None
+
+
 _PREDICTOR_BC_KEYS = frozenset({"y_position", "ux", "uy", "edge"})
 _PREDICTOR_BC_EDGES = ("bottom", "top")
 
@@ -142,6 +159,17 @@ class PairingStrideError(ValueError):
     the key and the fix. The GUI treats it as it treats a ``.pivraw`` run the
     reader refuses: the config routes carry it in ``images.pairing_error`` and
     the routes that read pairs answer HTTP 400 with its message.
+    """
+
+
+class ActivePathsError(ValueError):
+    """A dataset selection that names no real dataset: the user fixes the selection.
+
+    Raised by :meth:`Config.resolve_active_paths` for an index outside the
+    datasets, a non-integer entry or an empty selection, in
+    ``paths.active_paths`` or in ``PIV_ACTIVE_PATHS``. The message names the
+    bad value and how many datasets the config has. The GUI answers it with
+    HTTP 400 and its message; the CLI exits non-zero.
     """
 
 
@@ -3062,7 +3090,11 @@ class Config:
         """
         return self.resolve_active_paths(os.environ.get(ACTIVE_PATHS_ENV))
 
-    def resolve_active_paths(self, override: Optional[str]) -> list:
+    def resolve_active_paths(
+        self,
+        override: Optional[object] = None,
+        label: Optional[str] = None,
+    ) -> list:
         """Active path indices given the ``PIV_ACTIVE_PATHS`` value ``override``.
 
         The one resolution a PIV job's datasets come from. ``active_paths``
@@ -3070,38 +3102,90 @@ class Config:
         value the runner is about to set, so it checks the datasets the job
         will process.
 
+        Datasets are the entries of ``paths.source_paths``, numbered from 0
+        (``validate_config`` refuses a ``base_paths`` of another length).
+
         Parameters
         ----------
-        override : str or None
-            Comma-separated indices, or None/empty for the config file's
-            ``paths.active_paths`` (all paths when that is unset).
+        override : str, list or None
+            The selection: a comma-separated string (blank entries are
+            skipped), a list of entries as a request sent them, or None for the
+            config file's ``paths.active_paths`` (every dataset when that is
+            unset). A list and its ``",".join(map(str, ...))`` string, which is
+            what the job receives, are accepted or refused alike.
+        label : str, optional
+            What the user touched, named in every refusal: "the Run PIV dataset
+            selection [5]", "--active-paths '0,9'". None names the
+            ``PIV_ACTIVE_PATHS`` value, the job's own environment, which a
+            route check has already passed unless it was bypassed.
 
         Returns
         -------
         list[int]
-            0-indexed path indices.
+            0-indexed dataset indices, as selected.
+
+        Raises
+        ------
+        ActivePathsError
+            An index outside the datasets, a non-integer entry, or a selection
+            that names no dataset. Nothing is dropped or replaced.
         """
-        env_paths = override
-        if env_paths:
-            try:
-                indices = [int(i) for i in env_paths.split(",") if i.strip()]
-                # Validate indices
-                max_idx = len(self.source_paths) - 1
-                return [i for i in indices if 0 <= i <= max_idx]
-            except ValueError:
-                pass
+        n = len(self.source_paths)
+        if n == 0:
+            datasets = "this config has no datasets (paths.source_paths is empty)"
+        else:
+            numbered = "0" if n == 1 else f"0 to {n - 1}"
+            plural = "dataset" if n == 1 else "datasets"
+            datasets = f"this config has {n} {plural} (paths.source_paths), numbered {numbered}"
 
-        # Fall back to config file
-        paths_data = self.data.get("paths", {})
-        active = paths_data.get("active_paths")
+        if override is not None:
+            if label is None:
+                where = f"{ACTIVE_PATHS_ENV} '{override}'"
+                note = (
+                    f" {ACTIVE_PATHS_ENV} holds the datasets chosen in Run PIV or "
+                    "with --active-paths."
+                )
+            else:
+                where, note = label, ""
+            if isinstance(override, str):
+                entries: list = [e.strip() for e in override.split(",") if e.strip()]
+            elif isinstance(override, (list, tuple)):
+                entries = list(override)
+            else:
+                raise ActivePathsError(
+                    f"{where} is {override!r}, not a list of dataset numbers: "
+                    f"{datasets}.{note}"
+                )
+        else:
+            where = "paths.active_paths"
+            note = ""
+            entries = self.data.get("paths", {}).get("active_paths")
+            if entries is None:
+                # Unset: every dataset (none at all is refused below).
+                entries = list(range(n))
+            if not isinstance(entries, list):
+                raise ActivePathsError(
+                    f"{where} is {entries!r}, not a list of dataset numbers: {datasets}."
+                )
 
-        if active is None:
-            # Default: all paths are active
-            return list(range(len(self.source_paths)))
-
-        # Validate indices
-        max_idx = len(self.source_paths) - 1
-        return [i for i in active if 0 <= i <= max_idx]
+        indices = []
+        for entry in entries:
+            index = _dataset_number(entry)
+            if index is None:
+                raise ActivePathsError(
+                    f"Dataset {entry!r} in {where} is not a dataset number: "
+                    f"{datasets}.{note}"
+                )
+            if not 0 <= index < n:
+                raise ActivePathsError(
+                    f"Dataset {index} in {where} is out of range: {datasets}.{note}"
+                )
+            indices.append(index)
+        if not indices:
+            raise ActivePathsError(
+                f"{where} selects no dataset: {datasets}. Select at least one.{note}"
+            )
+        return indices
 
     # --- .set file path helpers ---
 

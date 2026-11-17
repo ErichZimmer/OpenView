@@ -86,6 +86,25 @@ def test_config_loads_and_carries_the_refusal(tmp_path, monkeypatch):
     assert REFUSAL in images["pairing_error"]
 
 
+def test_config_loads_and_carries_a_selection_that_names_no_dataset(
+    tmp_path, monkeypatch
+):
+    """A .pivraw pair count aligns the selected runs, so a selection naming no
+    real run has no count: the setup page must still load and show why."""
+    monkeypatch.delenv("PIV_ACTIVE_PATHS", raising=False)
+    client = _client(tmp_path, monkeypatch, case="df_2cam_clean")
+    config_path = tmp_path / "work" / "config.yaml"
+    data = yaml.safe_load(config_path.read_text())
+    data["paths"]["active_paths"] = [5]
+    config_path.write_text(yaml.dump(data))
+
+    r = client.get("/backend/config")
+    assert r.status_code == 200
+    images = r.get_json()["images"]
+    assert images["num_frame_pairs"] is None
+    assert "Dataset 5 in paths.active_paths is out of range" in images["pairing_error"]
+
+
 def test_update_config_saves_and_carries_the_refusal(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     r = client.post("/backend/update_config", json={"images": {"num_images": 6}})
