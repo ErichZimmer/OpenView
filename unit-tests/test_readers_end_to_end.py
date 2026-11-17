@@ -312,15 +312,18 @@ CLI_TIMEOUT_S = 300
 @pytest.mark.slow
 def test_cli_instantaneous_processes_both_cameras(tmp_path, clean_set_cache):
     """``pivtools-cli instantaneous`` in a subprocess, from the config's folder,
-    as a user runs it. Until P4, ``instantaneous.main`` logs an error and
-    exits 0, so the proof is each camera's files on its own grid; the exit
-    code is asserted too, which P4 makes meaningful."""
+    as a user runs it: it exits 0 (a failed camera exits non-zero, P4) and
+    each camera's files sit on its own grid. Camera and path overrides are
+    cleared, so a stale one cannot narrow the run to one camera."""
     cfg, _set_file, _sensor = _rotated_config(tmp_path, pre_paired=True)
     worktree = Path(__file__).resolve().parent.parent
+    env = dict(os.environ, PYTHONPATH=str(worktree))
+    env.pop("PIV_CAMERA", None)
+    env.pop("PIV_ACTIVE_PATHS", None)
     result = subprocess.run(
         [sys.executable, "-m", "pivtools_cli.cli", "instantaneous"],
         cwd=tmp_path,
-        env={**os.environ, "PYTHONPATH": str(worktree)},
+        env=env,
         capture_output=True,
         text=True,
         timeout=CLI_TIMEOUT_S,
