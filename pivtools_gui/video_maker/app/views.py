@@ -8,7 +8,7 @@ from flask import Blueprint, jsonify, request, send_file
 from loguru import logger
 from scipy.io import loadmat
 
-from pivtools_core.config import get_config
+from pivtools_core.config import PairingStrideError, get_config
 from pivtools_core.image_handling.readers.pivraw_reader import PivrawError
 from pivtools_core.paths import count_vector_files, get_data_paths, list_vector_files
 from pivtools_gui.services.job_manager import job_manager
@@ -1358,8 +1358,9 @@ def start_video_batch():
             }
         )
 
-    except PivrawError as e:
-        # A .pivraw run the reader refuses: the message names camera and reason.
+    except (PivrawError, PairingStrideError) as e:
+        # A .pivraw run the reader refuses, or strides the image type cannot
+        # be read with: the message names the cause and the fix.
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         logger.error(f"Error starting batch video creation: {e}", exc_info=True)

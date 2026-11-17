@@ -13,7 +13,7 @@ import threading
 from flask import Blueprint, jsonify, request
 from loguru import logger
 
-from pivtools_core.config import get_config
+from pivtools_core.config import PairingStrideError, get_config
 from pivtools_core.image_handling.readers.pivraw_reader import PivrawError
 from pivtools_gui.services.job_manager import job_manager
 from pivtools_gui.transforms import (
@@ -353,8 +353,9 @@ def transform_all_frames():
                 400,
             )
 
-    except PivrawError as e:
-        # A .pivraw run the reader refuses: the message names camera and reason.
+    except (PivrawError, PairingStrideError) as e:
+        # A .pivraw run the reader refuses, or strides the image type cannot
+        # be read with: the message names the cause and the fix.
         return jsonify({"success": False, "error": str(e)}), 400
     except Exception as e:
         logger.exception(f"Error getting transform status: {e}")

@@ -31,7 +31,12 @@ from loguru import logger
 
 from pivtools_cli.preprocessing.preprocess import apply_filters_to_batch
 from pivtools_cli.run_import import RunImportConflict, import_run
-from pivtools_core.config import Config, get_config, reload_config
+from pivtools_core.config import (
+    Config,
+    PairingStrideError,
+    get_config,
+    reload_config,
+)
 from pivtools_core.fft_sizes import BUILT_FFT_SIZES, SINGLE_MODE_WINDOW_SIZES
 from pivtools_core.image_handling.load_images import (
     create_piv_frame_reader,
@@ -478,8 +483,9 @@ def get_frame_pair():
             ),
             404,
         )
-    except PivrawError as e:
-        # A .pivraw run the reader refuses: the message names camera and reason.
+    except (PivrawError, PairingStrideError) as e:
+        # A .pivraw run the reader refuses, or strides the image type cannot
+        # be read with: the message names the cause and the fix.
         return jsonify({"error": str(e), "source_path": str(source_path)}), 400
     except Exception as e:
         return (
@@ -895,8 +901,9 @@ def filter_single_frame():
 
         return jsonify(response)
 
-    except PivrawError as e:
-        # A .pivraw run the reader refuses: the message names camera and reason.
+    except (PivrawError, PairingStrideError) as e:
+        # A .pivraw run the reader refuses, or strides the image type cannot
+        # be read with: the message names the cause and the fix.
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         logger.error(f"Error processing single frame: {e}")
@@ -1313,10 +1320,11 @@ def _normalize_dict_keys(obj):
 def _frame_pair_counts(cfg: Config) -> dict:
     """``num_frame_pairs`` and ``per_loop_frame_pairs`` for a config response.
 
-    A ``.pivraw`` run the reader refuses has no pair count. The two config
+    A ``.pivraw`` run the reader refuses, or strides the image type cannot be
+    read with (``PairingStrideError``), has no pair count. The two config
     routes must still answer (the GUI loads the config on mount, and the user
     changes the source through it), so the counts are null and
-    ``pairing_error`` carries the reader's message for the GUI to show. Every
+    ``pairing_error`` carries the refusal for the GUI to show. Every
     route that reads pairs answers 400 with the same message instead.
     """
     try:
@@ -1324,7 +1332,7 @@ def _frame_pair_counts(cfg: Config) -> dict:
             "num_frame_pairs": cfg.num_frame_pairs,
             "per_loop_frame_pairs": cfg.per_loop_frame_pairs,
         }
-    except PivrawError as e:
+    except (PivrawError, PairingStrideError) as e:
         return {
             "num_frame_pairs": None,
             "per_loop_frame_pairs": None,
