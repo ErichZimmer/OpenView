@@ -927,8 +927,8 @@ class Config:
     ) -> tuple:
         """Get the file/frame indices for a given pair number.
 
-        ``.pivraw`` runs are paired by trigger, and with unequal drops each
-        camera holds pair n at its own file frames: ``camera`` is required, and
+        ``.pivraw`` runs are paired by trigger, and each camera's file frames
+        of pair n come from the run's alignment: ``camera`` is required, and
         ``source`` names the run folder (None means the first source path).
         Every other image type ignores both and uses the unified stride formula:
             pair_start = start_index + (pair_number - 1) * pair_stride
@@ -1067,13 +1067,9 @@ class Config:
 
         format_str = image_format[0]  # Always tuple now
 
-        # Determine camera_path the way load_images._camera_path_from_source
-        # does. get_camera_folder already answers "" for .set, .cine and
-        # multi-camera .im7; single-camera-per-subfolder .im7 gets its folder.
-        # Treating every .im7 as "no subdir" here made shape detection look for
-        # source/B00001.im7 on a Cam1/B00001.im7 layout and fail as not found.
-        folder = self.get_camera_folder(camera_num)
-        camera_path = source_path / folder if folder else source_path
+        from .image_handling.path_utils import camera_path_for
+
+        camera_path = camera_path_for(self, source_path, camera_num)
 
         logging.debug(f"Camera path: {camera_path}")
 

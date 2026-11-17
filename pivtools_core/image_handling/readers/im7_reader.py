@@ -75,6 +75,11 @@ IM7_VERSION_BUFFER = 0
 # for bit on all 10 files. The masks are checked, not applied: see
 # _check_masks_per_frame.
 IM7_VERSION_PER_FRAME = 1
+# Planes per frame (header size_z) of a camera image. Every camera and PIV .im7
+# on the four surveyed drives has 1; the only size_z 2 files are DaVis's float
+# dewarped-image output (drive survey D, 2026-11-16). A camera read refuses any
+# other value, as .ims header word 14 must be 0 (Morgan, 17 Nov 2026).
+IM7_CAMERA_PLANES = 1
 # The version-1 footer: the last 256 bytes, whose int64 slots 0, 1 and 7 hold
 # the start of the attribute records, the frame table and the mask table.
 IM7_FOOTER_SIZE = 256
@@ -1029,6 +1034,15 @@ def read_im7_camera(
     with open(filepath, "rb") as f:
         raw_header = f.read(HEADER_SIZE)
     header = _parse_header(raw_header, filepath.name)
+    if header.size_z != IM7_CAMERA_PLANES:
+        raise ValueError(
+            f"{filepath.name}: header size_z (planes per frame) is "
+            f"{header.size_z}; a camera image has {IM7_CAMERA_PLANES} plane per "
+            "frame, and every camera .im7 seen so far does. More than one plane "
+            "is DaVis processing output (such as dewarped float images), not a "
+            "camera recording, so it is refused rather than read on a guess. "
+            "Use the recorded images."
+        )
 
     if frames is not None and frames < 1:
         raise ValueError(f"frames must be >= 1, got {frames}")
@@ -1083,11 +1097,7 @@ def read_im7_camera(
                 frame = np.frombuffer(raw, dtype=dt).reshape(
                     header.size_z, header.size_y, header.size_x
                 )
-                result[i] = (
-                    frame[0]
-                    if header.size_z == 1
-                    else frame.reshape(header.size_y, header.size_x)
-                )
+                result[i] = frame[0]
                 del frame, raw  # free before next iteration's read
             # The attribute records follow the LAST frame of the buffer, not the
             # last frame read. Without this seek, every camera but the last had
@@ -1108,11 +1118,7 @@ def read_im7_camera(
                 frame = np.frombuffer(buf, dtype=dt).reshape(
                     header.size_z, header.size_y, header.size_x
                 )
-                result[i] = (
-                    frame[0]
-                    if header.size_z == 1
-                    else frame.reshape(header.size_y, header.size_x)
-                )
+                result[i] = frame[0]
                 del frame, buf
             # Walk the remaining frames' block-size prefixes (no decompression) so
             # the attribute records are read from where they actually are.
@@ -1124,11 +1130,7 @@ def read_im7_camera(
             frames = _read_pixels_lz4(f, header, filepath.name, (start, end))
             for i in range(n_frames):
                 frame = frames[i]
-                result[i] = (
-                    frame[0]
-                    if header.size_z == 1
-                    else frame.reshape(header.size_y, header.size_x)
-                )
+                result[i] = frame[0]
             del frames
 
         elif header.pack_type == PACK_RLE:
@@ -1136,11 +1138,7 @@ def read_im7_camera(
             frames = _read_pixels_packtype1(f, header, filepath.name, (start, end))
             for i in range(n_frames):
                 frame = frames[i]
-                result[i] = (
-                    frame[0]
-                    if header.size_z == 1
-                    else frame.reshape(header.size_y, header.size_x)
-                )
+                result[i] = frame[0]
             del frames
         else:
             raise _unsupported_pack_error(header, filepath.name)

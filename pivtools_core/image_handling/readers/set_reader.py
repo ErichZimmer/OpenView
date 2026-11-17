@@ -279,12 +279,14 @@ _IMS_REQUIRED_WORDS: Dict[int, Tuple[str, Tuple[int, ...], str]] = {
         "At 8 lvpyio keeps only the low byte of each decoded pixel, and it opens "
         "no other value",
     ),
-    # 1 is accepted beside the measured 0 because lvpyio reads both alike; 2 or
-    # more fails or crashes lvpyio (HYPOTHESIS: planes per frame).
+    # Only the measured 0 (Morgan, 17 Nov 2026). lvpyio reads 1 as it reads 0
+    # and fails or crashes on 2 or more, but no real file has 1 or more
+    # (HYPOTHESIS: planes per frame).
     14: (
         "planes per frame",
-        (0, 1),
-        "lvpyio fails or crashes on 2 or more",
+        (0,),
+        "0 is the only value any real recording has; lvpyio fails or crashes "
+        "on 2 or more",
     ),
     15: (
         "sample type",

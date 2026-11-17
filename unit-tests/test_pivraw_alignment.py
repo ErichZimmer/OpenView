@@ -1,8 +1,9 @@
 """Trigger alignment of ``.pivraw`` runs (ticket P2, decision 02-1).
 
 Ground truth is the recorder's own record of each contract fixture
-(``pivraw_contract/expected.json``): the pairs, the 1-based file frames per
-camera, the skipped count, or the reason the run must be refused. The same
+(``pivraw_contract/expected.json``): the pairs and the 1-based file frames per
+camera, or the reason the run must be refused. A run with any drop is refused
+(``dropped``, Morgan 2026-11-17). The same
 outcomes pin the acquisition app's ``export.align_run`` (A1), so the two
 aligners agree case by case. Edited copies of the fixtures cover the cases the
 recorder cannot be made to write (a software tick, a flipped camera clock).
@@ -68,7 +69,6 @@ def test_alignment_matches_the_decided_outcome(case):
     ]
     want = [(p["run_triggers"], p["file_frames"]) for p in truth["pairs"]]
     assert got == want
-    assert alignment.skipped_incomplete == truth["skipped_incomplete"]
 
 
 # ---------------------------------------------------------------------------
@@ -97,6 +97,111 @@ def test_refusal_message_names_camera_and_reason(case, words):
     for word in words:
         assert word in str(info.value), str(info.value)
     assert str(CONTRACT_DIR / case) in str(info.value)
+
+
+# ---------------------------------------------------------------------------
+# A run with any drop is refused (Morgan 2026-11-17: pairs are never dropped;
+# a run that lost one is recorded again)
+# ---------------------------------------------------------------------------
+
+
+def _refused_as_dropped(run, frame_stride=1, pair_stride=2, cameras=None):
+    with pytest.raises(PivrawAlignmentError) as info:
+        align_pivraw_run(run, frame_stride, pair_stride, cameras=cameras)
+    assert info.value.reason == "dropped", str(info.value)
+    message = str(info.value)
+    assert message.startswith(str(run)) and message.endswith("Re-record the run.")
+    return message
+
+
+def test_a_camera_with_missing_indices_is_refused_as_dropped(tmp_path):
+    message = _refused_as_dropped(_cam2_dropped_pair_2(tmp_path))
+    assert "Camera2 lost 1 pair (run trigger 1). PIVTOOLs processes" in message
+    assert "Camera1" not in message, message
+
+
+def test_fewer_triggers_than_requested_is_refused_as_dropped(tmp_path):
+    """run.yaml asks for 3 triggers and both cameras hold 2: one was lost
+    before the first or after the last delivered frame, on every camera."""
+    run = copy_case(tmp_path, "df_2cam_clean")
+    edit_run_yaml(run, record_n=3)
+    message = _refused_as_dropped(run)
+    assert (
+        "Camera1 lost 1 pair (run trigger 2); Camera2 lost 1 pair (run trigger 2)."
+        in message
+    ), message
+
+
+def test_a_camera_whose_frames_stop_early_is_refused_as_dropped(tmp_path):
+    """Camera 2 holds triggers 0 and 1 of 3, with nothing in missing_indices:
+    its last trigger never arrived. Stand-in: df_2cam_missed_trigger_cam2 with
+    camera 2's host times moved onto camera 1's triggers 0 and 1, so only the
+    lost last trigger is wrong with it."""
+    run = copy_case(tmp_path, "df_2cam_missed_trigger_cam2", "cam2_stops_early")
+    host = read_pivraw_header(run / "Camera1.pivraw").index["host_ns"]
+    edit_index(run, 2, host_ns=host[:4])
+    assert read_pivraw_header(run / "Camera2.pivraw").missing_indices == ()
+    message = _refused_as_dropped(run)
+    assert (
+        "Camera2 lost 1 pair (run trigger 2)." in message and "Camera1" not in message
+    )
+
+
+def test_a_time_resolved_lost_frame_is_refused_as_dropped(tmp_path):
+    run = copy_case(tmp_path, "tr_lost_frame")
+    message = _refused_as_dropped(run, 1, 1)
+    assert "Camera1 lost 1 frame (run trigger 1)." in message
+
+
+@pytest.mark.parametrize(
+    "case, reason",
+    [
+        ("df_lost_first_frame", "ab_phase"),  # also missing_indices [4, 5]
+        ("df_2cam_lost_first_pair_cam1", "camera_offset"),  # Camera1 short
+        ("df_2cam_missed_trigger_cam2", "camera_offset"),  # Camera2 short
+    ],
+)
+def test_a_specific_reason_wins_over_dropped(case, reason):
+    """Each of these runs also lost a frame, and the specific reason says what
+    happened, so it is the one given (the acquisition export agrees)."""
+    with pytest.raises(PivrawAlignmentError) as info:
+        align_pivraw_run(CONTRACT_DIR / case, 1, 2)
+    assert info.value.reason == reason, str(info.value)
+
+
+def test_no_complete_pair_after_drops_is_refused_as_dropped(tmp_path):
+    """Camera 1 holds triggers 0 and 1, camera 2 triggers 2 and 3: no pair is
+    complete on both, and the drops are why, so the reason is ``dropped``
+    (the acquisition export agrees). Stand-in: df_2cam_clean with camera 2's
+    ids moved on by two triggers and run.yaml asking for 4."""
+    run = copy_case(tmp_path, "df_2cam_clean", "disjoint")
+    edit_index(run, 2, frame_id=[5004, 5005, 5006, 5007])
+    edit_sidecar(run, 2, missing_indices=[0, 1, 2, 3], dropped_pairs=2)
+    edit_run_yaml(run, record_n=4)
+    message = _refused_as_dropped(run)
+    assert (
+        "Camera1 lost 2 pairs (run triggers 2-3); Camera2 lost 2 pairs "
+        "(run triggers 0-1)." in message
+    ), message
+
+
+def test_a_stale_run_yaml_wins_over_dropped(tmp_path):
+    run = _cam2_dropped_pair_2(tmp_path)
+    edit_run_yaml(run, record_n=1)
+    with pytest.raises(PivrawAlignmentError) as info:
+        align_pivraw_run(run, 1, 2)
+    assert info.value.reason == "run_file_count", str(info.value)
+
+
+def test_a_drop_on_a_deselected_camera_does_not_refuse_the_run(tmp_path):
+    """Camera 2 lost trigger 1. Over camera 1 alone the run aligns all three
+    triggers; over camera 2, or both, it is refused."""
+    run = _cam2_dropped_pair_2(tmp_path)
+    one = align_pivraw_run(run, 1, 2, cameras=(1,))
+    assert [p.run_triggers for p in one.pairs] == [(0, 0), (1, 1), (2, 2)]
+    assert one.pairs[1].file_frames == {1: (3, 4)}
+    _refused_as_dropped(run, cameras=(2,))
+    _refused_as_dropped(run, cameras=(1, 2))
 
 
 def test_cross_camera_check_uses_host_time_not_the_camera_clocks():
@@ -172,22 +277,16 @@ def test_unprovable_phase_is_a_note_not_a_refusal(tmp_path):
     assert note.startswith("Camera1: A/B phase not provable") and "20.00 ms" in note
 
 
-def test_phase_with_one_pair_per_run_is_a_note():
-    alignment = align_pivraw_run(CONTRACT_DIR / "df_2cam_unequal_drops", 1, 2)
+def test_phase_with_one_pair_per_run_is_a_note(tmp_path):
+    """Stand-in for a run of one trigger: camera 1 of
+    df_2cam_lost_first_pair_cam1 (one A/B pair) with run.yaml asking for 1."""
+    run = copy_case(tmp_path, "df_2cam_lost_first_pair_cam1", "one_trigger")
+    edit_run_yaml(run, record_n=1)
+    alignment = align_pivraw_run(run, 1, 2, cameras=(1,))
+    assert len(alignment.pairs) == 1
     assert alignment.notes == (
         "Camera1: A/B phase not provable (fewer than two consecutive pairs); "
         "pairs are read as recorded.",
-    )
-
-
-def test_unaccounted_triggers_become_a_note(tmp_path):
-    run = copy_case(tmp_path, "df_2cam_clean")
-    edit_run_yaml(run, record_n=3)
-    alignment = align_pivraw_run(run, 1, 2)
-    assert alignment.triggers_requested == 3 and alignment.triggers_unaccounted == 1
-    assert any(
-        "1 trigger(s) were lost before the first or after the last" in n
-        for n in alignment.notes
     )
 
 
@@ -247,9 +346,9 @@ def test_cameras_on_different_rates_are_refused(tmp_path):
 
 def test_alignment_is_recomputed_when_a_file_changes(tmp_path):
     run = copy_case(tmp_path, "df_2cam_clean")
-    assert align_pivraw_run(run, 1, 2).triggers_unaccounted == 0
+    assert align_pivraw_run(run, 1, 2).triggers_requested == 2
     edit_run_yaml(run, record_n=5)
-    assert align_pivraw_run(run, 1, 2).triggers_unaccounted == 3
+    _refused_as_dropped(run)
 
 
 # ---------------------------------------------------------------------------
@@ -278,22 +377,27 @@ def _validate(run, camera, pair_strides):
     )
 
 
-def test_validation_reports_skipped_pairs_per_camera(tmp_path):
-    run = copy_case(tmp_path, "df_2cam_unequal_drops")
+def test_validation_reports_the_alignment(tmp_path):
+    run = copy_case(tmp_path, "df_2cam_clean")
     for camera in (1, 2):
         result = _validate(run, camera, (1, 2))
         assert result["valid"] is True, result["error"]
-        report = result["pivraw_alignment"]
-        assert report["pairs"] == 1 and report["skipped_incomplete"] == 2
-        assert report["skipped_by_camera"] == {"1": 1, "2": 1}  # str keys: jsonify
-        assert report["summary"] == (
-            "1 pair(s) aligned by trigger on every camera; 2 skipped as "
-            "incomplete (Camera1 lacks a frame of 1, Camera2 lacks a frame of 1)."
-        )
-        assert report["notes"] == [
-            "Camera1: A/B phase not provable (fewer than two consecutive pairs); "
-            "pairs are read as recorded."
-        ]
+        assert result["pivraw_alignment"] == {
+            "pairs": 2,
+            "triggers_requested": 2,
+            "summary": "2 pair(s) aligned by trigger on every camera.",
+            "notes": [],
+        }
+
+
+def test_validation_refuses_a_run_with_a_drop(tmp_path):
+    run = _cam2_dropped_pair_2(tmp_path)
+    result = _validate(run, 1, (1, 2))
+    assert result["valid"] is False
+    assert "Camera2 lost 1 pair (run trigger 1)" in result["error"]
+    assert result["error"].endswith("Re-record the run.")
+    assert result["read_error"] == result["error"]
+    assert result["pivraw_alignment"] is None
 
 
 def test_validation_refuses_a_run_that_cannot_align(tmp_path):
@@ -334,21 +438,16 @@ def test_piv_validation_of_a_run_needs_the_strides(tmp_path):
         _validate(run, 1, None)
 
 
-def test_validate_config_warns_skipped_pairs_and_notes(tmp_path):
+def test_validate_config_refuses_a_run_with_a_drop(tmp_path):
     run = _cam2_dropped_pair_2(tmp_path)
-    cfg = _config_with_base(tmp_path, run, num_images=4)
-    ok, error, warnings = validate_config(cfg)
-    assert ok, error
-    assert any(
-        "2 pair(s) aligned by trigger on every camera; 1 skipped as incomplete "
-        "(Camera2 lacks a frame of 1)." in w
-        for w in warnings
-    ), warnings
-    assert any("Camera2: A/B phase not provable" in w for w in warnings), warnings
+    cfg = _config_with_base(tmp_path, run, num_images=6)
+    ok, error, _warnings = validate_config(cfg)
+    assert not ok
+    assert "Camera2 lost 1 pair (run trigger 1)" in error and "Re-record" in error
 
 
 def test_validate_config_says_when_num_images_caps_the_pairs(tmp_path):
-    run = _cam2_dropped_pair_2(tmp_path)
+    run = copy_case(tmp_path, "df_2cam_clean")
     cfg = _config_with_base(tmp_path, run, num_images=2)
     ok, error, warnings = validate_config(cfg)
     assert ok, error
@@ -358,34 +457,36 @@ def test_validate_config_says_when_num_images_caps_the_pairs(tmp_path):
     ), warnings
 
 
-def test_validate_config_reports_every_runs_findings(tmp_path):
-    """Two runs of 2 aligned pairs each: the first skips a pair and cannot prove
-    Camera2's phase, the second cannot prove Camera1's phase. Both runs'
-    findings reach the warnings, each named by its run."""
-    first = _cam2_dropped_pair_2(tmp_path)
-    second = copy_case(tmp_path, "df_2cam_clean", "second_run")
-    cam = read_pivraw_header(second / "Camera1.pivraw").index["camera_ns"].copy()
+def _unprovable_phase(tmp_path, name, camera):
+    """df_2cam_clean with one camera's A->B and B->next A both 20 ms on its own
+    clock, so that camera's A/B phase cannot be proven."""
+    run = copy_case(tmp_path, "df_2cam_clean", name)
+    cam = read_pivraw_header(run / f"Camera{camera}.pivraw").index["camera_ns"].copy()
     cam[1] = cam[0] + 20_000_000
     cam[2] = cam[1] + 20_000_000
     cam[3] = cam[2] + 20_000_000
-    edit_index(second, 1, camera_ns=cam)
+    edit_index(run, camera, camera_ns=cam)
+    return run
+
+
+def test_validate_config_reports_every_runs_findings(tmp_path):
+    """Two runs of 2 aligned pairs each: the first cannot prove Camera2's
+    phase, the second Camera1's. Both runs' notes reach the warnings, each
+    named by its run, and an aligned run adds no summary warning."""
+    first = _unprovable_phase(tmp_path, "first_run", 2)
+    second = _unprovable_phase(tmp_path, "second_run", 1)
     cfg = _config_with_base(tmp_path, first, num_images=4)
     cfg.data["paths"]["source_paths"] = [str(first), str(second)]
     cfg.data["paths"]["base_paths"] = [str(tmp_path / "o1"), str(tmp_path / "o2")]
     ok, error, warnings = validate_config(cfg)
     assert ok, error
     assert any(
-        w.startswith(f"{first}: 2 pair(s) aligned")
-        and "Camera2 lacks a frame of 1" in w
-        for w in warnings
-    ), warnings
-    assert any(
         w.startswith(f"{first}: Camera2: A/B phase not provable") for w in warnings
     ), warnings
     assert any(
         w.startswith(f"{second}: Camera1: A/B phase not provable") for w in warnings
     ), warnings
-    assert not any(w.startswith(f"{second}: 2 pair(s) aligned") for w in warnings)
+    assert not any("pair(s) aligned" in w for w in warnings), warnings
 
 
 def test_validate_config_refuses_a_run_that_cannot_align(tmp_path):
@@ -426,14 +527,13 @@ def test_dropped_pairs_must_match_missing_indices(tmp_path, case, camera, droppe
 
 
 def _cam2_dropped_pair_2(tmp_path):
-    """A two-camera run whose cameras keep different file frames for one trigger.
+    """A two-camera run in which camera 2 dropped run trigger 1.
 
     Stand-in built from ``df_2cam_missed_trigger_cam2``: camera 2's second file
     pair is relabelled run trigger 2 (ids 5004, 5005, with trigger 1 in
     ``missing_indices``). Its host times already sit on camera 1's trigger 2,
-    so this is the run the recorder writes when camera 2 drops pair 2. Truth:
-    trigger 0 is file pair (1, 2) on both cameras; trigger 2 is (5, 6) on
-    camera 1 and (3, 4) on camera 2; trigger 1 is skipped (camera 2 lacks it).
+    so this is the run the recorder writes when camera 2 drops pair 2. Camera 1
+    holds all three triggers.
     """
     run = copy_case(tmp_path, "df_2cam_missed_trigger_cam2", "cam2_dropped_pair_2")
     edit_index(run, 2, frame_id=[5000, 5001, 5004, 5005])
@@ -441,25 +541,17 @@ def _cam2_dropped_pair_2(tmp_path):
     return run
 
 
-def test_unequal_drops_give_each_camera_its_own_file_frames(tmp_path):
-    run = _cam2_dropped_pair_2(tmp_path)
-    alignment = align_pivraw_run(run, 1, 2)
-    assert [p.run_triggers for p in alignment.pairs] == [(0, 0), (2, 2)]
-    assert alignment.pairs[1].file_frames == {1: (5, 6), 2: (3, 4)}
-    assert alignment.skipped_incomplete == 1
-    assert alignment.skipped_by_camera == {1: 0, 2: 1}
-
-
 def test_config_and_read_pair_follow_the_alignment_per_camera(tmp_path):
-    run = _cam2_dropped_pair_2(tmp_path)
+    run = copy_case(tmp_path, "df_2cam_clean")
     cfg = Config(path=str(write_piv_config(tmp_path, run, 2, 4)))
     assert cfg.num_frame_pairs == 2
-    assert cfg.get_frame_pair_indices(2, camera=1) == (5, 6)
+    assert cfg.get_frame_pair_indices(2, camera=1) == (3, 4)
     assert cfg.get_frame_pair_indices(2, camera=2) == (3, 4)
 
-    source = "df_2cam_missed_trigger_cam2"  # the pixels were not edited
-    cam1, cam2 = expected_frames(source, 1), expected_frames(source, 2)
-    np.testing.assert_array_equal(read_pair(2, run, 1, cfg), cam1[4:6])
+    cam1, cam2 = expected_frames("df_2cam_clean", 1), expected_frames(
+        "df_2cam_clean", 2
+    )
+    np.testing.assert_array_equal(read_pair(2, run, 1, cfg), cam1[2:4])
     np.testing.assert_array_equal(read_pair(2, run, 2, cfg), cam2[2:4])
     batch = _read_batch(1, 2, run, 2, cfg)
     np.testing.assert_array_equal(batch[0], cam2[0:2])
@@ -485,7 +577,7 @@ def test_a_batch_resolves_the_alignment_once(tmp_path, monkeypatch):
     frames read are the same as pair by pair."""
     from pivtools_core.image_handling.readers import pivraw_reader
 
-    run = _cam2_dropped_pair_2(tmp_path)
+    run = copy_case(tmp_path, "df_2cam_clean")
     cfg = Config(path=str(write_piv_config(tmp_path, run, 2, 4)))
     cfg.image_shape_for(2)
     calls = []
@@ -498,8 +590,7 @@ def test_a_batch_resolves_the_alignment_once(tmp_path, monkeypatch):
     monkeypatch.setattr(pivraw_reader, "align_pivraw_run", counting)
     batch = _read_batch(1, 2, run, 2, cfg)
     assert len(calls) == 1
-    source = "df_2cam_missed_trigger_cam2"
-    np.testing.assert_array_equal(batch[1], expected_frames(source, 2)[2:4])
+    np.testing.assert_array_equal(batch[1], expected_frames("df_2cam_clean", 2)[2:4])
 
 
 def test_pivraw_pair_indices_need_the_camera(tmp_path):
@@ -512,7 +603,7 @@ def test_pivraw_pair_indices_need_the_camera(tmp_path):
 def test_num_images_caps_the_aligned_pairs(tmp_path):
     """num_images keeps its subset meaning: the first aligned pairs, at most as
     many as that many frames of a clean run would give."""
-    run = _cam2_dropped_pair_2(tmp_path)
+    run = copy_case(tmp_path, "df_2cam_clean")
     cfg = Config(path=str(write_piv_config(tmp_path, run, 2, 2)))
     assert cfg.num_frame_pairs == 1
     assert cfg.get_frame_pair_indices(1, camera=2) == (1, 2)
@@ -538,15 +629,17 @@ def test_unsupported_pairing_is_refused_by_name(tmp_path, images, message):
 
 
 def test_two_runs_with_different_pair_counts_are_refused(tmp_path):
-    """One config, two runs: 2 aligned pairs and 1. A single pair count would
-    read past the end of one run, so the config is refused naming both."""
-    clean = copy_case(tmp_path, "df_2cam_clean")
-    dropped = copy_case(tmp_path, "df_2cam_unequal_drops")
-    cfg = Config(path=str(write_piv_config(tmp_path, clean, 2, 4)))
-    cfg.data["paths"]["source_paths"] = [str(clean), str(dropped)]
+    """One config, two runs of camera 1: 2 aligned pairs and 3. A single pair
+    count would read past the end of one run, so the config is refused naming
+    both. Camera 1 of df_2cam_missed_trigger_cam2 holds all 3 triggers."""
+    two = copy_case(tmp_path, "df_2cam_clean")
+    three = copy_case(tmp_path, "df_2cam_missed_trigger_cam2")
+    cfg = Config(path=str(write_piv_config(tmp_path, two, 2, 6)))
+    cfg.data["paths"]["source_paths"] = [str(two), str(three)]
+    cfg.data["paths"]["camera_numbers"] = [1]
     with pytest.raises(PivrawError, match="same number of aligned pairs") as info:
         cfg.num_frame_pairs
-    assert str(clean) in str(info.value) and str(dropped) in str(info.value)
+    assert str(two) in str(info.value) and str(three) in str(info.value)
 
 
 def test_an_inactive_run_does_not_block_the_active_one(tmp_path):
@@ -585,20 +678,6 @@ def test_deselecting_a_dead_camera_unblocks_the_config(tmp_path):
         "Camera2 is in the run but not selected" in w and "holds no frames" in w
         for w in warnings
     ), warnings
-
-
-def test_pairs_are_one_trigger_across_the_selected_cameras(tmp_path):
-    """Camera 2 lacks trigger 1. Over cameras 1 and 2, pair 2 is trigger 2 on
-    both; over camera 1 alone, nothing is skipped and pair 2 is trigger 1. The
-    two alignments are cached apart."""
-    run = _cam2_dropped_pair_2(tmp_path)
-    both = align_pivraw_run(run, 1, 2, cameras=(1, 2))
-    one = align_pivraw_run(run, 1, 2, cameras=(1,))
-    assert [p.run_triggers for p in both.pairs] == [(0, 0), (2, 2)]
-    assert both.pairs[1].file_frames == {1: (5, 6), 2: (3, 4)}
-    assert [p.run_triggers for p in one.pairs] == [(0, 0), (1, 1), (2, 2)]
-    assert one.pairs[1].file_frames == {1: (3, 4)}
-    assert one.skipped_incomplete == 0
 
 
 def test_a_selected_camera_missing_from_the_run_is_refused(tmp_path):
