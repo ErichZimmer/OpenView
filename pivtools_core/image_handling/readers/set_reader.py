@@ -46,8 +46,16 @@ Four geometries turn the frame by 90 degrees, so a stream's OUTPUT shape
 the output shape. Three known DaVis ids with no measured effect are refused when
 their stream is read, not skipped, because skipping one returns different pixels
 from DaVis with nothing to indicate it happened. An id outside the 13 DaVis ids
-refuses the whole recording at parse: its output shape is unknown, and cameras
-are mapped to streams by shape.
+leaves its stream's output shape unknown. With camera labels (below) it blocks
+only the camera that stream belongs to; without them the whole recording is
+refused at parse, because cameras are then mapped to streams by shape.
+
+Cameras: a DaVis 10.2+ recording names its cameras in its ``MetaData{N}.attr``
+files (``davis_attr``), which StreamSet.xml binds to frame streams by
+AttributeReader, never by ``N``. When they carry camera keys, the cameras are
+those labels (``SetInfo.cameras``): numbered by first frame stream, double frame
+(A/B) or single frame. Without labels, the stream shapes decide
+(:func:`valid_stream_splits`), and only a unique split is accepted.
 
 Also supports:
 - Pre-paired pairs: the camera's two streams (camera_streams) via read_set_pair
@@ -58,6 +66,7 @@ Also supports:
 Reference: LaVision DaVis 10.x .set recording format
 """
 
+import re
 import struct
 import threading
 import xml.etree.ElementTree as ET
@@ -71,6 +80,14 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
 import numpy as np
 from lz4.block import LZ4BlockError
 
+from .davis_attr import (
+    AttrBinding,
+    AttrFormatError,
+    LabelledCamera,
+    RecordingAttributes,
+    group_cameras,
+    read_recording_attributes,
+)
 from .davis_tokens import TokenStreamError, decode_imx_words
 from .im7_reader import _lz4_block_decompress
 from .out_buffer import check_out
@@ -136,6 +153,14 @@ class IMSFrameInfo:
     entries: List[IMSIndexEntry]
     # In application order (LaVision's, not the manifest's); empty when none.
     transformers: Tuple[StreamTransformer, ...] = ()
+    # From the recording's camera keys; all None when it carries none. Role is
+    # "A" or "B" for a double-frame camera's frames, "" for a single frame.
+    camera_label: Optional[str] = None
+    camera_id: Optional[str] = None
+    frame_role: Optional[str] = None
+    # Why this stream cannot be read, when its camera carries a transformer id
+    # PIVTOOLs does not know; None when it can.
+    blocked: Optional[str] = None
 
     @property
     def shape(self) -> Tuple[int, int]:
@@ -144,13 +169,25 @@ class IMSFrameInfo:
         (W, H) of :attr:`stored_shape` when its geometry turns the frame by 90
         degrees. A refused id is taken to keep the shape: all three are intensity
         corrections by their DaVis label (HYPOTHESIS, rotation-shape REPORT §5).
+
+        Raises:
+            ValueError: If the stream carries a transformer id PIVTOOLs does not
+                know: its output shape is unknown (the message is
+                :attr:`blocked`).
         """
+        if self.has_unknown_transformer:
+            raise ValueError(self.blocked)
         h, w = self.stored_shape
         for tf in self.transformers:
             geometry = _GEOMETRIES.get(tf.id)
             if geometry is not None and geometry.swaps_axes:
                 return (w, h)
         return (h, w)
+
+    @property
+    def has_unknown_transformer(self) -> bool:
+        """True when a transformer id is outside the 13 DaVis ids PIVTOOLs knows."""
+        return any(tf.id not in _APPLICATION_RANK for tf in self.transformers)
 
 
 @dataclass(frozen=True)
@@ -175,11 +212,22 @@ class _StreamSource:
 
 @dataclass
 class SetInfo:
-    """Parsed .set container metadata."""
+    """Parsed .set container metadata.
+
+    ``cameras`` are the recording's own camera labels, in frame-stream order;
+    None when it has no ``.attr`` files or none of them carries camera keys
+    (``attribute_files`` tells the two apart: the declared file names, empty
+    when there are none). ``suspicious_flag`` is the text of DaVis's
+    ``SetIsSuspicious`` key in the ``.set`` file, None when absent; DaVis does
+    not record why it sets it.
+    """
 
     set_dir: Path
     frames: List[IMSFrameInfo]
     n_entries: int  # number of images (same across all frames)
+    cameras: Optional[Tuple[LabelledCamera, ...]]
+    attribute_files: Tuple[str, ...]
+    suspicious_flag: Optional[str]
     # Resolved stream->camera split per camera count, filled lazily by
     # set_camera_streams. Lives on SetInfo so it dies with the cache entry.
     stream_splits: Dict[int, Tuple[Tuple[int, ...], ...]] = field(
@@ -545,6 +593,9 @@ _APPLICATION_RANK: Dict[str, int] = {
 # scale files "FrameScales0" / "CameraScale1" respectively. Both seen in the wild.
 _FRAME_READER_TYPE = "Core.Set.Recording.FrameReader"
 _SCALE_READER_TYPE = "Core.Set.Recording.ScaleReader"
+_ATTRIBUTE_READER_TYPE = "Core.Set.Recording.AttributeReader"
+# The Name of every AttributeReader on the surveyed drives (DaVis 10.2.1, 11.4).
+_ATTRIBUTE_READER_NAME = "AttributeReaderV1"
 
 # The FrameReader Name of a LaVision image stream. lvpyio opens a stream only
 # for this exact, case-sensitive Name, and one foreign Name makes it open no
@@ -771,6 +822,78 @@ def _discover_streams(set_dir: Path, root: Optional[ET.Element]) -> List[_Stream
     return _streams_from_manifest(set_dir, root, frame_readers)
 
 
+def _attribute_bindings(set_dir: Path, root: Optional[ET.Element]) -> List[AttrBinding]:
+    """The AttributeReaders StreamSet.xml declares, in declaration order.
+
+    Each binds ``{FilePrefix}.attr`` to one frame stream (``IsAssociatedToFrames
+    ="true"``, ``StartFrame == EndFrame``) or to the whole image buffer
+    (``IsAssociatedToFrames="false" IsAssociatedToEntireImage="true"``), the
+    only two forms on the surveyed drives (attr-decode REPORT A4).
+
+    Raises:
+        AttrFormatError: If a reader has no FilePrefix, a Name other than
+            ``AttributeReaderV1`` (the only one seen; another may be another
+            layout), or any other binding.
+        ValueError: Via :func:`_bound_stream_index` for a frame binding with a
+            bad or spanning frame range.
+    """
+    if root is None:
+        return []
+    stream_xml = set_dir / "StreamSet.xml"
+    bindings: List[AttrBinding] = []
+    for node in root.iter("ReaderInfo"):
+        if node.get("Type") != _ATTRIBUTE_READER_TYPE:
+            continue
+        prefix = (node.get("FilePrefix") or "").strip()
+        what = f"AttributeReader '{prefix}'"
+        if not prefix:
+            raise AttrFormatError(
+                f"An AttributeReader in {stream_xml} has no FilePrefix, so its "
+                f".attr file cannot be located."
+            )
+        name = node.get("Name") or ""
+        if name != _ATTRIBUTE_READER_NAME:
+            raise AttrFormatError(
+                f"{what} in {stream_xml} has Name '{name}'. The only attribute "
+                f"reader seen is '{_ATTRIBUTE_READER_NAME}'; another may be another "
+                f"file layout, so it is refused rather than parsed on a guess."
+            )
+        purpose = node.find("ContentPurpose")
+        frames = None if purpose is None else purpose.get("IsAssociatedToFrames")
+        entire = None if purpose is None else purpose.get("IsAssociatedToEntireImage")
+        if (frames, entire) == ("false", "true"):
+            bindings.append(AttrBinding(prefix, None))
+        elif (frames, entire) == ("true", "false"):
+            bindings.append(
+                AttrBinding(prefix, _bound_stream_index(node, what, stream_xml))
+            )
+        else:
+            raise AttrFormatError(
+                f"{what} in {stream_xml} has IsAssociatedToFrames={frames!r} and "
+                f"IsAssociatedToEntireImage={entire!r}. Only a file bound to one "
+                f"frame or to the whole image is understood."
+            )
+    return bindings
+
+
+# ``SetIsSuspicious = 1;`` in the .set file's "#GROUP Sets" block. DaVis 11.4
+# wrote it on both recordings whose camera keys stop partway through, one of
+# which holds blank images 501..899 (attr-decode REPORT C3, D5 ledger note).
+_SUSPICIOUS_LINE = re.compile(rb"^SetIsSuspicious\s*=\s*([^;\r\n]*);", re.MULTILINE)
+
+
+def _read_suspicious_flag(set_path: Path) -> Optional[str]:
+    """The text of the ``.set`` file's ``SetIsSuspicious`` key, None when absent.
+
+    A missing ``.set`` file has no flag to read; the companion folder alone is
+    what the streams come from.
+    """
+    if not set_path.is_file():
+        return None
+    match = _SUSPICIOUS_LINE.search(set_path.read_bytes())
+    return None if match is None else match.group(1).decode("latin-1").strip()
+
+
 def _parse_stream_transformers(
     set_dir: Path, root: Optional[ET.Element]
 ) -> Dict[int, Tuple[StreamTransformer, ...]]:
@@ -785,8 +908,10 @@ def _parse_stream_transformers(
 
     A stream may carry each correction once and at most one geometry. They are
     returned in LaVision's application order, not the manifest's. Refused ids
-    are recorded here and refused when THAT stream is read; everything else that
-    is wrong is refused now.
+    are recorded here and refused when THAT stream is read. An id outside the
+    13 DaVis ids is recorded too: :func:`_block_unknown_transformers` decides,
+    once the camera labels are known, whether it blocks one camera or the whole
+    recording. Everything else that is wrong is refused now.
 
     Args:
         set_dir: The .set companion directory.
@@ -798,11 +923,9 @@ def _parse_stream_transformers(
 
     Raises:
         ValueError: If a transformer's binding is missing or spans several
-            streams; its id is not one of the 13 DaVis ids (the whole recording
-            is refused: cameras are mapped to streams by output shape, and this
-            stream's is unknown); a stream declares one id twice or two
-            geometries (lvpyio silently keeps only the last of each, and this
-            reader drops nothing silently).
+            streams; a stream declares one id twice or two geometries (lvpyio
+            silently keeps only the last of each, and this reader drops nothing
+            silently).
         FileNotFoundError: If a declared correction image is not on disk.
     """
     if root is None:
@@ -815,17 +938,6 @@ def _parse_stream_transformers(
         label = (node.get("Label") or "").strip()
         prefix = (node.get("FilePrefix") or "").strip()
         stream_index = _bound_stream_index(node, f"Transformer '{prefix}'", stream_xml)
-
-        if tid not in _APPLICATION_RANK:
-            raise ValueError(
-                f"{stream_xml.name} declares the transformer '{tid}' (DaVis label "
-                f"'{label}', FilePrefix '{prefix}') for frame stream {stream_index}. "
-                f"It is not one of the 13 DaVis transformer ids PIVTOOLs knows, so "
-                f"its effect on the frame, and on the frame's shape, is unknown. "
-                f"Cameras are mapped to streams by shape, so no camera of this "
-                f"recording can be read. PIVTOOLs applies: "
-                f"{', '.join([*_CORRECTIONS, *_GEOMETRIES])}."
-            )
 
         on_stream = declared.setdefault(stream_index, [])
         for other, other_prefix in on_stream:
@@ -864,14 +976,66 @@ def _parse_stream_transformers(
             )
         )
 
+    # An unknown id never runs (its camera is blocked first), so where it sorts
+    # is moot; last keeps the known ones in LaVision's order.
+    unknown_rank = len(_APPLICATION_RANK)
     return {
         index: tuple(
             sorted(
-                (tf for tf, _prefix in found), key=lambda tf: _APPLICATION_RANK[tf.id]
+                (tf for tf, _prefix in found),
+                key=lambda tf: _APPLICATION_RANK.get(tf.id, unknown_rank),
             )
         )
         for index, found in declared.items()
     }
+
+
+def _unknown_transformer_text(frame: IMSFrameInfo, set_name: str) -> str:
+    """What is unknown about a stream's transformer id, in plain words."""
+    tf = next(t for t in frame.transformers if t.id not in _APPLICATION_RANK)
+    return (
+        f"StreamSet.xml of {set_name} declares the transformer '{tf.id}' (DaVis "
+        f"label '{tf.label}') for frame stream {frame.frame_idx}. It is not one of "
+        f"the 13 DaVis transformer ids PIVTOOLs knows, so its effect on the frame, "
+        f"and on the frame's shape, is unknown. PIVTOOLs applies: "
+        f"{', '.join([*_CORRECTIONS, *_GEOMETRIES])}."
+    )
+
+
+def _block_unknown_transformers(
+    set_name: str,
+    frames: List[IMSFrameInfo],
+    cameras: Optional[Tuple[LabelledCamera, ...]],
+) -> None:
+    """Refuse, or block one camera for, each transformer id PIVTOOLs does not know.
+
+    With camera labels, the camera owning such a stream is blocked: every one of
+    its streams carries the reason in ``blocked`` and refuses to read, while the
+    other cameras read (decided 17 Nov). Without labels, cameras are mapped to
+    streams by shape and this stream's is unknown, so the recording is refused.
+
+    Raises:
+        ValueError: Without camera labels, for the first such stream.
+    """
+    unknown = [f for f in frames if f.has_unknown_transformer]
+    if not unknown:
+        return
+    if cameras is None:
+        raise ValueError(
+            f"{_unknown_transformer_text(unknown[0], set_name)} The recording "
+            f"carries no camera labels, so cameras are mapped to streams by shape, "
+            f"and no camera of this recording can be read."
+        )
+    for frame in unknown:
+        camera = next(c for c in cameras if frame.frame_idx in c.frames)
+        reason = (
+            f"Camera {camera.number}, {camera.describe()}, of {set_name} cannot be "
+            f"read. {_unknown_transformer_text(frame, set_name)} The recording's "
+            f"other cameras are unaffected."
+        )
+        for stream in camera.frames:
+            if frames[stream].blocked is None:
+                frames[stream].blocked = reason
 
 
 def _load_correction(path_str: str) -> np.ndarray:
@@ -1449,7 +1613,47 @@ def _parse_set(set_path: Union[str, Path]) -> SetInfo:
             )
         )
 
-    return SetInfo(set_dir=set_dir, frames=frames, n_entries=n_entries)
+    bindings = _attribute_bindings(set_dir, root)
+    rec = read_recording_attributes(set_dir, bindings, len(frames), n_entries)
+    cameras = None if rec is None else group_cameras(rec)
+    for camera in cameras or ():
+        for stream, role in zip(
+            camera.frames, ("A", "B") if camera.double_frame else ("",)
+        ):
+            frames[stream].camera_label = camera.label
+            frames[stream].camera_id = camera.camera_id
+            frames[stream].frame_role = role
+    _block_unknown_transformers(set_path.name, frames, cameras)
+
+    return SetInfo(
+        set_dir=set_dir,
+        frames=frames,
+        n_entries=n_entries,
+        cameras=cameras,
+        attribute_files=tuple(f"{b.prefix}.attr" for b in bindings),
+        suspicious_flag=_read_suspicious_flag(set_path),
+    )
+
+
+def read_set_attributes(set_path: Union[str, Path]) -> Optional[RecordingAttributes]:
+    """Every attribute of a recording, per image, frame stream and whole image.
+
+    For inspection and checks against lvpyio; the reader itself keeps only the
+    camera identity (:attr:`SetInfo.cameras`), not the attributes, so a cached
+    SetInfo stays small.
+
+    Returns:
+        None when StreamSet.xml declares no AttributeReader.
+
+    Raises:
+        Whatever :func:`read_set_info` raises for the recording.
+    """
+    set_path = Path(set_path)
+    info = read_set_info(set_path)
+    bindings = _attribute_bindings(info.set_dir, _load_stream_manifest(info.set_dir))
+    return read_recording_attributes(
+        info.set_dir, bindings, len(info.frames), info.n_entries
+    )
 
 
 def _raise_im7_layout(
@@ -1543,6 +1747,8 @@ def _read_single_image(
     """
     if entry_idx < 0 or entry_idx >= frame_info.n_entries:
         raise IndexError(f"Entry {entry_idx} out of range [0, {frame_info.n_entries})")
+    if frame_info.blocked is not None:
+        raise ValueError(frame_info.blocked)
 
     # Refuse an unimplemented encoding before the read; its size is also what a
     # compressed entry must decompress to.
@@ -1803,10 +2009,28 @@ def _size(width: int, height: int) -> str:
 def _stream_table(info: SetInfo) -> str:
     """One-line stream listing for error messages: output size, decoder, transformers."""
     return "; ".join(
-        f"{f.frame_idx}: {_size(f.shape[1], f.shape[0])} {f.decoder}"
+        f"{f.frame_idx}: "
+        + (
+            "size unknown"
+            if f.has_unknown_transformer
+            else _size(f.shape[1], f.shape[0])
+        )
+        + f" {f.decoder}"
         + "".join(f" {tf.id}" for tf in f.transformers)
         for f in info.frames
     )
+
+
+def _streams_text(streams: Tuple[int, ...]) -> str:
+    """``stream 4`` / ``streams 0–1``."""
+    if len(streams) == 1:
+        return f"stream {streams[0]}"
+    return f"streams {streams[0]}–{streams[-1]}"
+
+
+def _camera_list(cameras: Sequence[LabelledCamera]) -> str:
+    """``Camera 1 (Imager MX 25M, ..., double frame (A/B)) on streams 0–1; ...``."""
+    return "; ".join(f"{c.describe()} on {_streams_text(c.frames)}" for c in cameras)
 
 
 def set_camera_streams(
@@ -1814,10 +2038,13 @@ def set_camera_streams(
     num_cameras: int,
     set_info: Optional[SetInfo] = None,
 ) -> List[Tuple[int, ...]]:
-    """The unique stream->camera split of a .set container.
+    """The stream->camera split of a .set container.
 
-    Cached on the SetInfo, so it is computed once per container and follows the
-    SetInfo cache's invalidation. Errors are not cached.
+    With camera labels (:attr:`SetInfo.cameras`) the split is the labelled
+    cameras' streams, and the camera count must be theirs. Without labels it is
+    the unique split by stream shape. Cached on the SetInfo, so it is computed
+    once per container and follows the SetInfo cache's invalidation. Errors are
+    not cached.
 
     Args:
         set_path: path to the .set file.
@@ -1828,13 +2055,27 @@ def set_camera_streams(
         One tuple of 0-based stream indices per camera, in camera order.
 
     Raises:
-        SetConfigError: If no split fits, or more than one does (ambiguous).
+        SetConfigError: With labels, if ``num_cameras`` is not their count (the
+            message lists the cameras by label, model and ID). Without, if no
+            shape split fits, or more than one does (ambiguous).
     """
     _require_positive_cameras(num_cameras, set_path)
     info = set_info if set_info is not None else read_set_info(set_path)
     cached = info.stream_splits.get(num_cameras)
     if cached is not None:
         return list(cached)
+
+    if info.cameras is not None:
+        n = len(info.cameras)
+        if num_cameras != n:
+            raise SetConfigError(
+                f"{Path(set_path).name} holds {n} {'camera' if n == 1 else 'cameras'} "
+                f"by its own camera labels, not {num_cameras}: "
+                f"{_camera_list(info.cameras)}. Set the camera count to {n}."
+            )
+        split = tuple(c.frames for c in info.cameras)
+        info.stream_splits[num_cameras] = split
+        return list(split)
 
     # Output shapes: an A/B pair must match as read, after the transformers, and
     # a rotated stream must not pair with an unrotated one of equal stored shape.
@@ -1891,6 +2132,13 @@ def camera_streams(
         raise SetConfigError(f"Camera {camera} is outside 1..{num_cameras} for {name}.")
     info = set_info if set_info is not None else read_set_info(set_path)
     streams = set_camera_streams(set_path, num_cameras, info)[camera - 1]
+    if pair and len(streams) == 1 and info.cameras is not None:
+        raise SetPairingError(
+            f"Camera {camera} of {name}, {info.cameras[camera - 1].describe()} on "
+            f"{_streams_text(streams)}, is a single-frame camera, so it has no A/B "
+            f"pairs. Deselect camera {camera} in the PIV camera selection, or "
+            f"process it time-resolved."
+        )
     if pair and len(streams) == 1:
         frame = info.frames[streams[0]]
         raise SetPairingError(

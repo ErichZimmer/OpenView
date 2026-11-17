@@ -11,6 +11,7 @@ import pytest
 import yaml
 
 from pivtools_core.config import Config
+from pivtools_core.image_handling.readers import davis_attr
 from pivtools_core.image_handling.readers.set_reader import clear_set_info_cache
 
 # Index layout as DaVis writes it (container-unknowns REPORT §1, measured on 20
@@ -150,6 +151,8 @@ def write_manifest(
     transformers=(),
     reader_name="Images_16bit_8Bit",
     associated_to_frames="true",
+    attribute_readers=(),
+    attribute_reader_name="AttributeReaderV1",
 ):
     """Write a StreamSet.xml in DaVis's real shape (``<StreamCfg>`` root).
 
@@ -165,6 +168,11 @@ def write_manifest(
         reader_name: the FrameReader ``Name``. Every real recording carries
             ``Images_16bit_8Bit``; anything else builds a foreign reader.
         associated_to_frames: the FrameReader's ``IsAssociatedToFrames``.
+        attribute_readers: (prefix, stream_index) per ``{prefix}.attr`` file
+            bound to one frame, or (prefix, None) for one bound to the whole
+            image buffer, in declaration order.
+        attribute_reader_name: the AttributeReader ``Name``; every real
+            recording carries ``AttributeReaderV1``.
     """
 
     def purpose(frame, associated="true", end=None):
@@ -187,6 +195,19 @@ def write_manifest(
         for prefix, *frames in scale_readers
     )
     body += "".join(
+        f'<ReaderInfo Name="{attribute_reader_name}" '
+        f'Type="Core.Set.Recording.AttributeReader" FilePrefix="{prefix}" '
+        f'FormatDescription="Attribute streaming file">'
+        + (
+            '<ContentPurpose IsAssociatedToFrames="false" '
+            'IsAssociatedToEntireImage="true" IsAssociatedToAllImages="false"/>'
+            if frame is None
+            else purpose(frame)
+        )
+        + "</ReaderInfo>"
+        for prefix, frame in attribute_readers
+    )
+    body += "".join(
         f'<Transformer ID="{tid}" Label="L" FilePrefix="{prefix}" '
         f'MinDaVisVersion="10.2.0">{purpose(frame)}</Transformer>'
         for tid, prefix, frame in transformers
@@ -195,6 +216,47 @@ def write_manifest(
         '<?xml version="1.0" encoding="UTF-8"?><StreamCfg><Version>2</Version>'
         f"{body}</StreamCfg>"
     )
+
+
+def write_attr(path, images, trailing=None):
+    """Write a ``.attr`` file: one entry per image, each a {key: value} dict.
+
+    A str value becomes a string record, an ndarray an array record of its
+    dtype (uint16, int32, float32 or float64). The encoder is the production
+    one, whose round trip is proven on DaVis's own bytes (test_davis_attr.py).
+    """
+    type_of = {
+        np.dtype("<u2"): davis_attr.TYPE_UINT16,
+        np.dtype("<i4"): davis_attr.TYPE_INT32,
+        np.dtype("<f4"): davis_attr.TYPE_FLOAT32,
+        np.dtype("<f8"): davis_attr.TYPE_FLOAT64,
+    }
+
+    def entry(values):
+        return davis_attr.AttrEntry(
+            tuple(
+                davis_attr.AttrRecord(
+                    davis_attr.TYPE_STRING if isinstance(v, str) else type_of[v.dtype],
+                    k,
+                    v,
+                )
+                for k, v in values.items()
+            )
+        )
+
+    stream = davis_attr.AttrStream(
+        str(path), tuple(entry(v) for v in images), entry(trailing or {})
+    )
+    path.write_bytes(davis_attr.encode_attr_stream(stream))
+
+
+def camera_keys(label, camera_id, camera_name):
+    """The three camera keys of one frame, as DaVis writes them."""
+    return {
+        davis_attr.KEY_LABEL: label,
+        davis_attr.KEY_ID: camera_id,
+        davis_attr.KEY_NAME: camera_name,
+    }
 
 
 def write_scales(path, factor, offset=0.0):
