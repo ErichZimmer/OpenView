@@ -12,6 +12,7 @@ from pivtools_cli.piv.save_results import (
     save_corr_plane_dump,
     save_piv_result_distributed,
 )
+from pivtools_cli.processing.unique_scatter import scatter_unique
 from pivtools_core.config import Config
 
 
@@ -97,6 +98,7 @@ def perform_piv_and_save(
     config: Config,
     client: Client,
     output_path: Path,
+    camera: int,
     start_frame: int = 1,
     runs_to_save: Optional[List[int]] = None,
     vector_masks: Optional[List[np.ndarray]] = None,
@@ -134,6 +136,8 @@ def perform_piv_and_save(
         Dask distributed client.
     output_path : Path
         Directory where .mat files will be saved.
+    camera : int
+        1-based camera number whose image shape the correlator cache is built for.
     start_frame : int
         Starting frame number (1-based) for filenames.
     runs_to_save : Optional[List[int]]
@@ -150,14 +154,14 @@ def perform_piv_and_save(
     """
     # Use pre-scattered cache if provided, otherwise create and scatter
     if scattered_cache is None:
-        temp_correlator = make_correlator_backend(config)
+        temp_correlator = make_correlator_backend(config, camera=camera)
         correlator_cache = temp_correlator.get_cache_data()
-        scattered_cache = client.scatter(correlator_cache, broadcast=True)
+        scattered_cache = scatter_unique(client, correlator_cache, broadcast=True)
         logging.info("Broadcast correlator cache to all workers")
 
     # Use pre-scattered masks if provided, otherwise scatter if needed
     if scattered_masks is None and vector_masks is not None:
-        scattered_masks = client.scatter(vector_masks, broadcast=True)
+        scattered_masks = scatter_unique(client, vector_masks, broadcast=True)
         total_mask_size = sum(m.nbytes for m in vector_masks) / 1024
         logging.info(
             f"Broadcast vector masks to all workers ({total_mask_size:.1f} KB)"

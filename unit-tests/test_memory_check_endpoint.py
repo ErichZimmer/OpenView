@@ -33,13 +33,13 @@ _BIG_SHAPE = (3648, 4872)
 _SMALL_SHAPE = (64, 64)
 
 
-def _make_config(tmp_path, batch_size, memory_limit):
+def _make_config(tmp_path, batch_size, memory_limit, cameras=(1,)):
     cfg = {
         "paths": {
             "base_paths": [str(tmp_path / "out")],
             "source_paths": [str(tmp_path / "src")],
-            "camera_count": 1,
-            "camera_numbers": [1],
+            "camera_count": len(cameras),
+            "camera_numbers": list(cameras),
             "camera_subfolders": [],
         },
         "images": {
@@ -62,19 +62,26 @@ def _make_config(tmp_path, batch_size, memory_limit):
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
-    """The real api_bp route; image_shape is stubbed so no image is read."""
+    """The real api_bp route; image_shape_for is stubbed so no image is read.
 
-    def _build(batch_size, memory_limit, image_shape):
-        config = _make_config(tmp_path, batch_size, memory_limit)
-        if image_shape is None:
+    ``shapes`` maps camera number to (H, W), or is None for a source folder
+    that does not exist yet.
+    """
 
-            def _raise(self):
+    def _build(batch_size, memory_limit, shapes):
+        cameras = (1,) if shapes is None else tuple(shapes)
+        config = _make_config(tmp_path, batch_size, memory_limit, cameras)
+        if shapes is None:
+
+            def _raise(self, camera):
                 raise FileNotFoundError("no image")
 
-            monkeypatch.setattr(Config, "image_shape", property(_raise))
+            monkeypatch.setattr(Config, "image_shape_for", _raise)
         else:
+            # The stub stands for images in a source folder that exists.
+            (tmp_path / "src").mkdir()
             monkeypatch.setattr(
-                Config, "image_shape", property(lambda self: image_shape)
+                Config, "image_shape_for", lambda self, camera: shapes[camera]
             )
         monkeypatch.setattr(gui_app, "get_config", lambda: config)
         app = Flask(__name__)
@@ -86,7 +93,7 @@ def client(tmp_path, monkeypatch):
 
 def test_warns_when_batch_exceeds_worker_memory(client):
     """50 pairs of 17.8 MP images need ~19.9 GB; 12 GB per worker is short."""
-    response = client(50, "12GB", _BIG_SHAPE).get("/backend/memory_check")
+    response = client(50, "12GB", {1: _BIG_SHAPE}).get("/backend/memory_check")
 
     assert response.status_code == 200
     warning = response.get_json()["warning"]
@@ -96,23 +103,62 @@ def test_warns_when_batch_exceeds_worker_memory(client):
 
 
 def test_silent_when_batch_fits(client):
-    response = client(10, "12GB", _SMALL_SHAPE).get("/backend/memory_check")
+    response = client(10, "12GB", {1: _SMALL_SHAPE}).get("/backend/memory_check")
 
     assert response.status_code == 200
     assert response.get_json()["warning"] is None
 
 
-def test_silent_when_no_image_can_be_read(client):
-    """No image yet means nothing to estimate — not an error."""
+def test_largest_camera_sets_the_estimate(client):
+    """Cameras run one after another on the same workers, so a small first
+    camera must not hide a large second one."""
+    response = client(50, "12GB", {1: _SMALL_SHAPE, 2: _BIG_SHAPE}).get(
+        "/backend/memory_check"
+    )
+
+    assert response.status_code == 200
+    warning = response.get_json()["warning"]
+    assert warning is not None
+    assert "17.8 MP" in warning
+
+
+def test_silent_when_nothing_is_configured_yet(client):
+    """The source folder does not exist yet: nothing to estimate, not an error."""
     response = client(50, "12GB", None).get("/backend/memory_check")
 
     assert response.status_code == 200
     assert response.get_json()["warning"] is None
 
 
+def test_a_camera_whose_size_cannot_be_read_is_named(tmp_path, monkeypatch):
+    """A configured source whose camera 2 the reader refuses: the estimate is
+    not silently skipped, the warning names the camera and the reader's text."""
+    from pivtools_core.image_handling.readers.pivraw_reader import PivrawError
+
+    config = _make_config(tmp_path, 50, "12GB", cameras=(1, 2))
+    (tmp_path / "src").mkdir()
+
+    def shape(self, camera):
+        if camera == 2:
+            raise PivrawError("Camera2.pivraw: the sidecar is refused.")
+        return _SMALL_SHAPE
+
+    monkeypatch.setattr(Config, "image_shape_for", shape)
+    monkeypatch.setattr(gui_app, "get_config", lambda: config)
+    app = Flask(__name__)
+    app.register_blueprint(gui_app.api_bp)
+    response = app.test_client().get("/backend/memory_check")
+
+    assert response.status_code == 200
+    warning = response.get_json()["warning"]
+    assert warning is not None
+    assert "camera 2" in warning
+    assert "Camera2.pivraw: the sidecar is refused." in warning
+
+
 def test_validate_files_no_longer_carries_the_memory_gate(client):
     """Setup validation reports files only; the memory key is gone."""
-    response = client(50, "12GB", _BIG_SHAPE).post(
+    response = client(50, "12GB", {1: _BIG_SHAPE}).post(
         "/backend/validate_files", json={}
     )
 

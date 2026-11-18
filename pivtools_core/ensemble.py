@@ -51,6 +51,7 @@ from pivtools_cli.processing.dask_pipeline import (
     reduce_warp_sums,
     scatter_immutable_data,
 )
+from pivtools_cli.processing.unique_scatter import scatter_unique
 from pivtools_core.image_handling.load_images import (
     compute_vector_mask,
     load_images,
@@ -198,7 +199,7 @@ def process_pass_worker_accumulate(
         n_phase_a = image_bg_sums["n_images"]
         A_mean = (image_bg_sums["warp_A_sum"] / n_phase_a).astype(np.float32)
         B_mean = (image_bg_sums["warp_B_sum"] / n_phase_a).astype(np.float32)
-        scattered_mean_images = client.scatter((A_mean, B_mean), broadcast=True)
+        scattered_mean_images = scatter_unique(client, (A_mean, B_mean), broadcast=True)
         logger.info(f"  Phase A complete: mean images from {n_phase_a} pairs")
 
     # Create per-worker progress variables
@@ -489,7 +490,7 @@ def run_ensemble_piv(
     # 2. Scatter immutable data once
     logger.info("Scattering immutable data...")
     scattered = scatter_immutable_data(
-        client, config, vector_masks, pixel_mask, ensemble=True
+        client, config, camera_num, vector_masks, pixel_mask, ensemble=True
     )
 
     # 3. Optional gain-normalisation pre-pass (two extra reads of the data)
@@ -544,7 +545,7 @@ def run_ensemble_piv(
             f"Large dataset ({num_chunks} chunks): workers load from disk per pass"
         )
     num_passes = config.ensemble_num_passes
-    accumulator = SinglePassAccumulator(config, vector_masks)
+    accumulator = SinglePassAccumulator(config, camera_num, vector_masks)
     predictor_field = None
 
     # Check for resume from previous pass
@@ -614,22 +615,22 @@ def run_ensemble_piv(
         )
 
     # Scatter config once to avoid repeated serialization
-    scattered_config = client.scatter(config, broadcast=True)
+    scattered_config = scatter_unique(client, config, broadcast=True)
 
     # Scatter pixel_mask for worker-accumulation mode
     scattered_pixel_mask = None
     if pixel_mask is not None:
-        scattered_pixel_mask = client.scatter(pixel_mask, broadcast=True)
+        scattered_pixel_mask = scatter_unique(client, pixel_mask, broadcast=True)
 
     # Scatter per-frame gains for the worker-side pipeline reconstruction
     scattered_frame_gains = None
     if frame_gains is not None:
-        scattered_frame_gains = client.scatter(frame_gains, broadcast=True)
+        scattered_frame_gains = scatter_unique(client, frame_gains, broadcast=True)
 
     images_are_persisted = (num_chunks == 1) or config.ensemble_persist_images
 
     # Pre-compute correlator metadata for intermediate saves and coordinates
-    temp_correlator = make_correlator_backend(config, ensemble=True)
+    temp_correlator = make_correlator_backend(config, camera=camera_num, ensemble=True)
     correlator_cache = temp_correlator.get_cache_data()
     image_height = temp_correlator.H
     del temp_correlator
@@ -676,7 +677,7 @@ def run_ensemble_piv(
                         f"  Filled {int(prev_mask.sum())} masked windows in the "
                         f"predictor ({config.masking_predictor_fill})"
                     )
-            scattered_predictor = client.scatter(warp_predictor, broadcast=True)
+            scattered_predictor = scatter_unique(client, warp_predictor, broadcast=True)
             logger.info("  Broadcast predictor field from previous pass")
 
         workers = list(client.ncores().keys())
@@ -890,8 +891,13 @@ def main():
                 vector_masks = None
                 if config.masking_enabled and mask is not None:
                     logger.info("Computing vector masks...")
-                    logger.debug(f"config.image_shape = {config.image_shape}")
-                    vector_masks = compute_vector_mask(mask, config, ensemble=True)
+                    logger.debug(
+                        f"camera {camera_num} image shape = "
+                        f"{config.image_shape_for(camera_num)}"
+                    )
+                    vector_masks = compute_vector_mask(
+                        mask, config, camera_num, ensemble=True
+                    )
                     logger.info(f"  Vector masks: {len(vector_masks)} passes")
                     for i, vm in enumerate(vector_masks):
                         logger.info(f"    Pass {i}: mask shape = {vm.shape}")
@@ -938,12 +944,9 @@ def main():
                 # Clean up (local only — gc.collect on workers historically caused SIGSEGV (attributed to FFTW plan teardown; FFTW is gone and this is unverified against the codelet engine — guard retained))
                 gc.collect()
 
-    except Exception as e:
-        import traceback
-
-        logger.error(f"Error: {e}")
-        traceback.print_exc()
-
+    # No except clause: a failure stops the remaining cameras and propagates
+    # after the cluster is shut down, so the process exits non-zero with the
+    # message (the CLI wrapper prints it; a direct script run shows the traceback).
     finally:
         # Clean shutdown - suppress noisy distributed logs during teardown
         import io as _io

@@ -431,6 +431,7 @@ def run_single(
             create_filter_pipeline,
             scatter_immutable_data,
         )
+        from pivtools_cli.processing.unique_scatter import scatter_unique
         from pivtools_core.image_handling.load_images import load_images
 
         t0 = time.perf_counter()
@@ -458,12 +459,12 @@ def run_single(
 
             t0 = time.perf_counter()
             scattered = scatter_immutable_data(
-                client, config, None, None, ensemble=False
+                client, config, camera, None, None, ensemble=False
             )
             t_scatter = time.perf_counter() - t0
 
             images = create_filter_pipeline(images, config, None)
-            scattered_config = client.scatter(config, broadcast=True)
+            scattered_config = scatter_unique(client, config, broadcast=True)
 
             num_chunks = len(images.chunks[0])
             max_in_flight = min(

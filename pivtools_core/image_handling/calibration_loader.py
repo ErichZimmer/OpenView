@@ -3,7 +3,8 @@
 This module provides functions for loading and validating calibration images
 using the centralized image handling system. It supports all image formats
 including standard formats (TIFF, PNG, JPEG) and container formats
-(.set, .im7, .cine).
+(.set, .im7, .cine). A ``.pivraw`` run is never a calibration source
+(``calibration_settings.refuse_non_calibration_type``).
 
 Key Functions:
 - read_calibration_image: Read a single calibration image
@@ -25,14 +26,18 @@ from typing import Any, Dict, NamedTuple, Optional, Tuple
 
 import numpy as np
 
-from ..calibration_settings import default_settings, try_load_settings
+from ..calibration_settings import (
+    default_settings,
+    refuse_non_calibration_type,
+    try_load_settings,
+)
 from ..config import Config
 from .load_images import read_single_frame
 from .path_utils import (
-    _glob_images,
     build_calibration_camera_path,
     cine_extension_mismatch,
     format_to_glob,
+    glob_images,
     infer_image_type,
     resolve_file_path,
     validate_images_generic,
@@ -314,6 +319,9 @@ def _resolve_image_settings(
         image["image_type"] = image_type
     if num_images is not None:
         image["n_views"] = num_images
+    refuse_non_calibration_type(
+        image["image_type"], f"Calibration source {source}, image type"
+    )
     return source, image
 
 
@@ -452,11 +460,13 @@ def read_calibration_frame_at(
     Raises
     ------
     ValueError
+        ``image_type`` is ``pivraw``, which is never a calibration image type.
         ``zero_based_indexing`` is True for a container (``.set`` / ``.cine``).
         Container entries are numbered by the reader (``.set`` from 1, ``.cine``
         through its ``FirstImageNo``), not by filenames, so the flag has nothing
         to shift; refusing it keeps a 0/1 setting from being silently ignored.
     """
+    refuse_non_calibration_type(image_type, f"Calibration frame read in {camera_path}")
     if zero_based_indexing and image_type in _CONTAINER_TYPES:
         raise ValueError(
             f"image.zero_based_indexing is set, but {image_type} calibration "
@@ -650,7 +660,7 @@ def validate_calibration_images(
         # generic validator then reports "Camera path does not exist" and the
         # diagnosis suggests the real folders, which is what the user needs (not
         # an "expected_count is required" internal).
-        expected_count = max(len(_glob_images(camera_path, format_to_glob(fmt))), 1)
+        expected_count = max(len(glob_images(camera_path, format_to_glob(fmt))), 1)
     else:
         # Containers with blank n_views: the generic validator reads the real entry
         # count itself and has no user count to hold it to.
@@ -787,7 +797,7 @@ def get_calibration_frame_count(
     else:
         # Standard formats and IM7 both count matching files.
         pattern = format_to_glob(fmt)
-        found = FrameCount(len(_glob_images(camera_path, pattern)), "files")
+        found = FrameCount(len(glob_images(camera_path, pattern)), "files")
         where = f"'{pattern}' in {camera_path}"
 
     if found.n <= 0:

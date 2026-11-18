@@ -64,11 +64,13 @@ def infer_image_type(image_format: str) -> str:
     Standalone twin of ``Config._detect_image_type`` for callers that hold a format
     string but not a ``Config`` (e.g. the calibration CLI, which takes ``--source`` /
     ``--image-format`` directly). Returns one of ``standard``, ``cine``,
-    ``lavision_set``, ``lavision_im7``.
+    ``pivraw``, ``lavision_set``, ``lavision_im7``.
     """
     fmt = (image_format or "").lower()
     if ".cine" in fmt:
         return "cine"
+    if ".pivraw" in fmt:
+        return "pivraw"
     if ".set" in fmt or ".ims" in fmt:
         return "lavision_set"
     if ".im7" in fmt:
@@ -81,7 +83,7 @@ def infer_image_type(image_format: str) -> str:
 RASTER_EXTENSIONS: Tuple[str, ...] = (".tif", ".tiff", ".png", ".jpg", ".jpeg")
 
 
-def _glob_images(directory: Path, pattern: str) -> List[Path]:
+def glob_images(directory: Path, pattern: str) -> List[Path]:
     """glob() a directory, excluding dotfiles.
 
     macOS writes AppleDouble sidecar files ("._foo.tif") next to real images on
@@ -96,7 +98,7 @@ def _raster_images(directory: Path) -> List[Path]:
     """Every ``RASTER_EXTENSIONS`` file in ``directory`` (dot-names excluded)."""
     found: List[Path] = []
     for ext in RASTER_EXTENSIONS:
-        found.extend(_glob_images(directory, f"*{ext}"))
+        found.extend(glob_images(directory, f"*{ext}"))
     return found
 
 
@@ -110,9 +112,10 @@ def camera_subfolder_name(
 ) -> str:
     """Subfolder holding one camera's images: THE rule for PIV and calibration alike.
 
-    - Container formats (``lavision_set``, ``cine``) never use a subfolder: all
-      cameras live in one ``.set``, and ``.cine`` files sit side by side in the
-      source directory (``%d`` in the pattern names the camera).
+    - Container formats (``lavision_set``, ``cine``, ``pivraw``) never use a
+      subfolder: all cameras live in one ``.set``, and ``.cine`` / ``.pivraw``
+      files sit side by side in the source directory (``%d`` in the pattern
+      names the camera).
     - IM7 uses a subfolder only when ``use_camera_subfolders`` is True (one
       single-camera ``.im7`` per folder); otherwise one multi-camera ``.im7``
       per time instance sits at the source root. This is the only format the
@@ -127,7 +130,7 @@ def camera_subfolder_name(
     :func:`calibration_camera_folder` (calibration images, the sidecar's
     ``image`` block) both call this, so the two can never disagree.
     """
-    if image_type in ("lavision_set", "cine"):
+    if image_type in ("lavision_set", "cine", "pivraw"):
         return ""
     if image_type == "lavision_im7" and not use_camera_subfolders:
         return ""
@@ -189,19 +192,42 @@ def build_calibration_camera_path(
     return source
 
 
+def camera_path_for(config: "Config", base_source: Path, camera: int) -> Path:
+    """Where one camera's PIV images are, given a source (one loop's, if looped).
+
+    THE camera-path rule for PIV images: every reader (the pipeline, the GUI
+    routes, shape detection, validation) calls this, so none can look for a
+    camera somewhere the others do not. The folder comes from
+    ``Config.get_camera_folder`` (:func:`camera_subfolder_name`):
+
+    - ``.set``: ``base_source`` is the container file itself.
+    - ``.cine`` / ``.pivraw``: the directory holding one file per camera.
+    - ``.im7``: ``base_source / Cam{N}`` with ``images.use_camera_subfolders``
+      (one single-camera file per folder), else ``base_source`` (one
+      multi-camera file per instant).
+    - standard rasters: ``base_source / Cam{N}`` (or the configured
+      subfolder) when there is more than one camera, else ``base_source``.
+
+    Args:
+        config: Configuration object.
+        base_source: A ``paths.source_paths`` entry, or the loop source
+            ``Config.get_loop_source_path`` derived from one. The camera folder
+            sits inside the loop's source, so a loop is resolved first.
+        camera: Camera number (1-based).
+    """
+    folder = config.get_camera_folder(camera)
+    return Path(base_source) / folder if folder else Path(base_source)
+
+
 def build_piv_camera_path(
     config: "Config",
     source_path_idx: int = 0,
     camera: int = 1,
 ) -> Path:
-    """Build the path to PIV images for a specific camera.
+    """Path to one camera's PIV images in ``source_paths[source_path_idx]``.
 
-    Path structure depends on image type and use_camera_subfolders setting:
-    - .set files: source_path IS the .set file (return it directly)
-    - .cine files: source_path directory (no camera subfolder)
-    - IM7 with use_camera_subfolders=False: source_path (all cameras in file)
-    - IM7 with use_camera_subfolders=True: source_path / camera_folder
-    - Standard formats: source_path / camera_folder
+    :func:`camera_path_for` on the configured source (loop 0 of a looped
+    recording).
 
     Args:
         config: Configuration object
@@ -211,32 +237,7 @@ def build_piv_camera_path(
     Returns:
         Path: Path to PIV image file (.set) or directory for other formats
     """
-    source_path = config.source_paths[source_path_idx]
-    image_type = config.image_type
-
-    # SET: source_path IS the .set file - return it directly
-    if image_type == "lavision_set":
-        return source_path
-
-    # CINE: source_path is directory containing .cine files
-    if image_type == "cine":
-        return source_path
-
-    # IM7: check if using camera subfolders
-    if image_type == "lavision_im7":
-        if config.images_use_camera_subfolders:
-            # Single-camera IM7 files in camera subdirectories
-            camera_folder = config.get_camera_folder(camera)
-            if camera_folder:
-                return source_path / camera_folder
-        # Multi-camera IM7 files (default): no subdirectory
-        return source_path
-
-    # Standard formats use camera subdirectories
-    camera_folder = config.get_camera_folder(camera)
-    if camera_folder:
-        return source_path / camera_folder
-    return source_path
+    return camera_path_for(config, config.source_paths[source_path_idx], camera)
 
 
 def resolve_file_path(
@@ -252,7 +253,7 @@ def resolve_file_path(
     Handles the different file path patterns for each image type:
     - lavision_set: camera_path IS the .set file (return directly)
     - lavision_im7: camera_path / (format_pattern % frame_idx)
-    - cine: camera_path / (format_pattern % camera)
+    - cine, pivraw: camera_path / (format_pattern % camera)
     - standard: camera_path / (format_pattern % frame_idx)
 
     Args:
@@ -260,7 +261,8 @@ def resolve_file_path(
         camera: Camera number (1-based)
         frame_idx: Frame index (1-based)
         format_pattern: File format pattern (e.g., "%05d.tif", "Camera%d.cine")
-        image_type: One of "lavision_set", "lavision_im7", "cine", "standard"
+        image_type: One of "lavision_set", "lavision_im7", "cine", "pivraw",
+            "standard"
         zero_based_indexing: Whether file indices are 0-based
 
     Returns:
@@ -274,8 +276,8 @@ def resolve_file_path(
         # (format_pattern is ignored as source_path contains the full file path)
         return camera_path
 
-    elif image_type == "cine":
-        # .cine files: pattern uses camera number
+    elif image_type in ("cine", "pivraw"):
+        # .cine / .pivraw files: pattern uses camera number
         if "%" in format_pattern:
             return camera_path / (format_pattern % camera)
         return camera_path / format_pattern
@@ -686,6 +688,19 @@ def cine_extension_mismatch(cine_file: Path) -> Optional[str]:
     return f"Image type is CINE but the pattern names {kind} file: {cine_file}"
 
 
+def pivraw_extension_mismatch(pivraw_file: Path) -> Optional[str]:
+    """The error for a PIVRAW image type whose pattern names a non-``.pivraw`` file.
+
+    Twin of :func:`cine_extension_mismatch`: without it the reader would report a
+    missing ``<name>.json`` sidecar for, say, a ``.png``, which hides the real
+    mistake. None when the suffix is ``.pivraw``.
+    """
+    if pivraw_file.suffix.lower() == ".pivraw":
+        return None
+    kind = f"a {pivraw_file.suffix}" if pivraw_file.suffix else "an extension-less"
+    return f"Image type is PIVRAW but the pattern names {kind} file: {pivraw_file}"
+
+
 def _container_count_failure(
     result: Dict[str, Any], container: Path, exc: Exception
 ) -> Dict[str, Any]:
@@ -731,6 +746,7 @@ def validate_images_generic(
     *,
     diagnosis: "DiagnosisContext",
     scan_cache: Optional[Dict[str, "SourceScan"]] = None,
+    pair_strides: Optional[Tuple[int, int]] = None,
 ) -> Dict[str, Any]:
     """Generic image validation for both PIV and calibration images.
 
@@ -746,7 +762,8 @@ def validate_images_generic(
     image_format : str
         Image format pattern (e.g., "%05d.tif", "data.set")
     image_type : str
-        One of "lavision_set", "lavision_im7", "cine", "standard"
+        One of "lavision_set", "lavision_im7", "cine", "pivraw",
+        "standard"
     expected_count : int or None
         Expected number of images/frames. A container (.set / .cine) holding
         fewer entries fails validation; more is a processing subset and passes.
@@ -764,6 +781,10 @@ def validate_images_generic(
         One request's source scans keyed by source path, shared by the cameras a
         route validates against the same source so the source is scanned once.
         None scans afresh. Never keep it beyond one request: the disk changes.
+    pair_strides : (int, int), optional
+        ``(frame_stride, pair_stride)`` of the PIV pairing. Required for a
+        ``.pivraw`` source on the PIV page, whose run is paired by trigger
+        here; ignored otherwise.
 
     Returns
     -------
@@ -790,9 +811,17 @@ def validate_images_generic(
           report into an HTTP 500 with no message.
         - detected_start_index: int or None - First frame index among the files
           matching the pattern (full listing, standard/im7 only)
+        - notes: list - Plain-words facts about how the images are read that do
+          not fail validation (``.pivraw``: the run has no dark, so the images
+          are raw counts)
         - found: str - What is on disk (or what loaded), one plain sentence
         - suggestions: list - Ranked one-click fixes (``Suggestion`` dicts)
         - streams: list or None - Per-stream table of a ``.set`` recording
+        - warnings: list - What should look like a warning, not a fact (a
+          ``.set`` that DaVis marked ``SetIsSuspicious``)
+        - pivraw_alignment: dict or None - PIV ``.pivraw`` only: the run's
+          trigger alignment (``PivrawAlignment.report``: pairs, triggers
+          requested, a summary sentence, notes)
 
         When no pattern can be derived from the folder's files, the reason is
         appended to ``error``.
@@ -800,7 +829,8 @@ def validate_images_generic(
     Raises
     ------
     ValueError
-        When ``diagnosis.image_type`` differs from ``image_type``.
+        When ``diagnosis.image_type`` differs from ``image_type``, or a PIV
+        ``.pivraw`` source is validated without ``pair_strides``.
     """
     from .source_diagnosis import apply_diagnosis
 
@@ -818,6 +848,8 @@ def validate_images_generic(
         zero_based_indexing,
         read_frame_fn,
         calibration=diagnosis.calibration,
+        pair_strides=pair_strides,
+        selected_cameras=diagnosis.camera_numbers,
     )
     apply_diagnosis(
         result, diagnosis, camera, camera_path, expected_count, scan_cache=scan_cache
@@ -835,12 +867,16 @@ def _validate_core(
     read_frame_fn: Callable[[int], np.ndarray],
     *,
     calibration: bool,
+    pair_strides: Optional[Tuple[int, int]] = None,
+    selected_cameras: Sequence[int] = (),
 ) -> Dict[str, Any]:
     """The validation body of :func:`validate_images_generic`, before diagnosis.
 
     ``calibration`` selects how a missing-pattern reason is derived (calibration
-    never pairs A/B patterns). Returns the result dict without ``found`` /
-    ``suggestions`` / ``streams``.
+    never pairs A/B patterns) and whether a ``.pivraw`` run is aligned by
+    trigger (PIV only, with ``pair_strides``, over ``selected_cameras``, the
+    cameras selected for processing). Returns the result dict without
+    ``found`` / ``suggestions`` / ``streams`` / ``warnings``.
     """
     result: Dict[str, Any] = {
         "valid": False,
@@ -854,9 +890,16 @@ def _validate_core(
         "format_detected": None,
         "error": None,
         "detected_start_index": None,  # first frame index among matching files
+        "notes": [],  # plain-words facts about how the images are read
+        "pivraw_alignment": None,
     }
 
-    if expected_count is None and image_type not in ("lavision_set", "cine"):
+    if image_type == "pivraw" and not calibration and pair_strides is None:
+        raise ValueError(
+            "pair_strides is required to validate a .pivraw source for PIV: the "
+            "run is paired by trigger with the config's frame and pair strides"
+        )
+    if expected_count is None and image_type not in ("lavision_set", "cine", "pivraw"):
         raise ValueError(
             f"expected_count is required for {image_type} images (only containers "
             "can be validated without one)"
@@ -871,7 +914,7 @@ def _validate_core(
         if camera_path.exists() and camera_path.is_dir():
             all_images = []
             if image_type == "lavision_im7":
-                all_images = _glob_images(camera_path, "*.im7")
+                all_images = glob_images(camera_path, "*.im7")
             else:
                 all_images.extend(_raster_images(camera_path))
             if all_images:
@@ -889,7 +932,7 @@ def _validate_core(
             # List sibling .set files (the set_in_folder rule suggests them).
             parent_dir = set_file.parent
             if parent_dir.exists():
-                set_files = _glob_images(parent_dir, "*.set")
+                set_files = glob_images(parent_dir, "*.set")
                 if set_files:
                     result["sample_files"] = [f.name for f in set_files[:5]]
             return result
@@ -960,7 +1003,7 @@ def _validate_core(
         if not cine_file.exists():
             result["error"] = f"CINE file not found: {cine_file}"
             # List the .cine files present (the pattern rule suggests a pattern).
-            cine_files = _glob_images(camera_path, "*.cine")
+            cine_files = glob_images(camera_path, "*.cine")
             if cine_files:
                 result["sample_files"] = [f.name for f in cine_files[:5]]
             return result
@@ -1003,10 +1046,100 @@ def _validate_core(
 
         return result
 
+    elif image_type == "pivraw":
+        if "%" in image_format:
+            pivraw_filename = image_format % camera
+        else:
+            pivraw_filename = image_format
+        pivraw_file = camera_path / pivraw_filename
+
+        if not pivraw_file.exists():
+            result["error"] = f"PIVRAW file not found: {pivraw_file}"
+            # List the .pivraw files present (the pattern rule suggests a pattern).
+            pivraw_files = glob_images(camera_path, "*.pivraw")
+            if pivraw_files:
+                result["sample_files"] = [f.name for f in pivraw_files[:5]]
+            return result
+
+        mismatch = pivraw_extension_mismatch(pivraw_file)
+        if mismatch is not None:
+            # read_error too, for the same reason as the CINE branch above.
+            result["error"] = mismatch
+            result["read_error"] = mismatch
+            return result
+
+        result["format_detected"] = "pivraw"
+        result["sample_files"] = [pivraw_filename]
+
+        # A sidecar whose frame count cannot be read (missing field, wrong
+        # version, unfinalised run, size mismatch) fails validation visibly.
+        try:
+            from .readers.pivraw_reader import get_pivraw_frame_count
+
+            result["found_count"] = get_pivraw_frame_count(pivraw_file)
+        except Exception as e:
+            return _container_count_failure(result, pivraw_file, e)
+        # No per-camera count check against num_images: the trigger alignment
+        # below refuses a run in which a selected camera lost any frame, and
+        # the pair count is min(aligned pairs, the num_images cap)
+        # (Config.per_loop_frame_pairs), so no num_images can read past a
+        # camera's frames. found_count stays for display.
+        result["valid"] = True
+
+        # PIV pairs the run's cameras by trigger. A run that cannot be aligned
+        # (a camera offset by a trigger, a flipped A/B phase, a camera with no
+        # frames, a dropped frame, ...) fails here with the camera, trigger and reason; read_error
+        # too, so the PIV route does not replace it with "First frame not found".
+        if not calibration:
+            from .readers.pivraw_reader import PivrawError, align_pivraw_run
+
+            try:
+                alignment = align_pivraw_run(
+                    camera_path, *pair_strides, cameras=selected_cameras
+                )
+            except PivrawError as e:
+                result["valid"] = False
+                result["error"] = str(e)
+                result["read_error"] = str(e)
+                return result
+            result["pivraw_alignment"] = alignment.report()
+
+        try:
+            img = read_frame_fn(1)
+        except Exception as e:
+            logging.warning(f"Could not read first frame of {pivraw_file}: {e}")
+            result["valid"] = False
+            result["error"] = (
+                f"PIVRAW file found but could not read the first frame: {e}"
+            )
+            result["read_error"] = str(e)
+            return result
+        # The frame read, so the run file and its dark are valid: say when the
+        # images are raw because the run was recorded without a dark.
+        from .readers.pivraw_reader import pivraw_dark_note
+
+        note = pivraw_dark_note(pivraw_file)
+        if note is not None:
+            result["notes"].append(note)
+        # The frame read, so a preview that will not render is cosmetic: the
+        # user reads why there is none, and no size is reported for it.
+        try:
+            preview = _image_to_base64(img)
+        except Exception as e:
+            result["notes"].append(
+                f"No preview of {pivraw_file.name} frame 1: it read, but could "
+                f"not be rendered ({type(e).__name__}: {e})."
+            )
+        else:
+            result["image_size"] = (img.shape[1], img.shape[0])
+            result["first_image_preview"] = preview
+
+        return result
+
     elif image_type == "lavision_im7":
         # Count .im7 files in directory
         pattern = format_to_glob(image_format)
-        matching_files = sorted(_glob_images(camera_path, pattern))
+        matching_files = sorted(glob_images(camera_path, pattern))
 
         if not matching_files:
             try:
@@ -1019,7 +1152,7 @@ def _validate_core(
             result["error"] = error_msg
 
             # List the .im7 files present (the pattern rule suggests a pattern).
-            im7_files = sorted(_glob_images(camera_path, "*.im7"))
+            im7_files = sorted(glob_images(camera_path, "*.im7"))
             if im7_files:
                 im7_names = [f.name for f in im7_files]
                 _fold_pattern_reason(result, im7_names, image_type, calibration)
@@ -1065,7 +1198,7 @@ def _validate_core(
     else:
         # Standard formats
         pattern = format_to_glob(image_format)
-        matching_files = sorted(_glob_images(camera_path, pattern))
+        matching_files = sorted(glob_images(camera_path, pattern))
 
         if not matching_files:
             try:
@@ -1269,7 +1402,8 @@ def validate_single_pattern(
     pattern : str
         Image format pattern to validate (e.g., "B%05d_A.tif")
     image_type : str
-        One of "lavision_set", "lavision_im7", "cine", "standard"
+        One of "lavision_set", "lavision_im7", "cine", "pivraw",
+        "standard"
     expected_count : int
         Expected number of files matching this pattern
     zero_based_indexing : bool
@@ -1311,7 +1445,7 @@ def validate_single_pattern(
         if camera_path.exists() and camera_path.is_dir():
             all_images = []
             if image_type == "lavision_im7":
-                all_images = _glob_images(camera_path, "*.im7")
+                all_images = glob_images(camera_path, "*.im7")
             else:
                 all_images.extend(_raster_images(camera_path))
             if all_images:
@@ -1323,7 +1457,7 @@ def validate_single_pattern(
         return result
 
     # Container formats don't use per-pattern validation
-    if image_type in ("lavision_set", "cine"):
+    if image_type in ("lavision_set", "cine", "pivraw"):
         result["valid"] = True
         result["found_count"] = "container"
         return result
@@ -1338,7 +1472,7 @@ def validate_single_pattern(
 
     # Convert pattern to glob pattern
     glob_pattern = format_to_glob(pattern)
-    matching_files = sorted(_glob_images(camera_path, glob_pattern))
+    matching_files = sorted(glob_images(camera_path, glob_pattern))
 
     # Calculate the first expected filename
     start_idx = 0 if zero_based_indexing else 1
@@ -1354,7 +1488,7 @@ def validate_single_pattern(
     # Find all image files (for suggestions)
     all_images = []
     if image_type == "lavision_im7":
-        all_images = _glob_images(camera_path, "*.im7")
+        all_images = glob_images(camera_path, "*.im7")
     else:
         all_images.extend(_raster_images(camera_path))
     all_image_names = [f.name for f in sorted(all_images)] if all_images else []

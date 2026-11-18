@@ -1,0 +1,8 @@
+{
+  "format_version": 1,
+  "view_rotation": "none",
+  "dark_id": null,
+  "dark_subtracted": false,
+  "pixel_rule": "bayer_rggb_superpixel_sum",
+  "camera_serial": "U512345"
+}

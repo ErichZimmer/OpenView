@@ -10,21 +10,37 @@ import threading
 import time
 import webbrowser
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 import dask
 import dask.array as da
 import numpy as np
 from dask import config as dask_config
-from flask import Blueprint, Flask, abort, jsonify, request, send_from_directory
+from flask import (
+    Blueprint,
+    Flask,
+    Response,
+    abort,
+    jsonify,
+    request,
+    send_from_directory,
+)
 from flask_compress import Compress
 from flask_cors import CORS
 from loguru import logger
 
 from pivtools_cli.preprocessing.preprocess import apply_filters_to_batch
-from pivtools_core.config import Config, get_config, reload_config
+from pivtools_cli.run_import import RunImportConflict, import_run
+from pivtools_core.config import (
+    ActivePathsError,
+    Config,
+    PairingStrideError,
+    get_config,
+    reload_config,
+)
 from pivtools_core.fft_sizes import BUILT_FFT_SIZES, SINGLE_MODE_WINDOW_SIZES
 from pivtools_core.image_handling.load_images import (
+    MaskError,
     create_piv_frame_reader,
     is_colour_pair,
     load_mask_for_camera,
@@ -32,10 +48,12 @@ from pivtools_core.image_handling.load_images import (
 )
 from pivtools_core.image_handling.path_utils import (
     build_piv_camera_path,
+    camera_path_for,
     validate_images_generic,
 )
+from pivtools_core.image_handling.readers.pivraw_reader import PivrawError
 from pivtools_core.paths import count_vector_files_by_name, get_data_paths
-from pivtools_core.validation import validate_memory_for_images
+from pivtools_core.validation import later_loop_findings, validate_memory_for_images
 
 # Calibration is calibration (the legacy v1 `calibration` package was retired — its
 # shared leaves relocated to pivtools_gui/services, calibration/detection, and
@@ -43,7 +61,7 @@ from pivtools_core.validation import validate_memory_for_images
 from pivtools_gui.calibration.app import calibration_bp, calibration_stepped_bp
 from pivtools_gui.errors import register_json_error_handlers
 from pivtools_gui.masking.app.views import masking_bp
-from pivtools_gui.piv_runner import get_runner
+from pivtools_gui.piv_runner import get_runner, job_paths, require_piv_job_inputs
 from pivtools_gui.plotting.app.plotting_views import vector_plot_bp
 
 # Transform endpoints (per-file storage with backup/restore, used by frontend)
@@ -56,6 +74,12 @@ from pivtools_gui.utils import (
 from pivtools_gui.vector_merging.app.views import merging_bp
 from pivtools_gui.vector_statistics.app.views import statistics_bp
 from pivtools_gui.video_maker.app.views import video_maker_bp
+
+# Why a source has no pair count: a .pivraw run the reader refuses, strides
+# the image type cannot be read with, or a dataset selection naming no real
+# dataset (a .pivraw count aligns the selected runs). Routes that read pairs
+# answer 400 with the message; the config routes carry it as pairing_error.
+PAIR_COUNT_ERRORS = (PivrawError, PairingStrideError, ActivePathsError)
 
 app = Flask(__name__, static_folder="static", static_url_path="")
 register_json_error_handlers(app)
@@ -172,11 +196,6 @@ def _log_cache_contents():
             logger.debug(f"Cache: {raw_str}")
 
 
-def cam_folder_key(camera, cfg):
-    """Get camera folder using config to respect custom subfolders."""
-    return cfg.get_camera_folder(camera_number(camera))
-
-
 def make_raw_cache_key(
     source_path_idx: int,
     camera: int,
@@ -185,49 +204,44 @@ def make_raw_cache_key(
     display_bounds: tuple[float, float] | None,
     cfg,
 ) -> tuple:
-    """Generate consistent cache key for raw images. Include all parameters that affect output."""
-    image_type = cfg.image_type
-    # For .set files, source_path IS the .set file; for others, may need camera folder
-    if image_type in ("lavision_set", "lavision_im7"):
-        source_path = cfg.source_paths[source_path_idx]
-    else:
-        folder = cfg.get_camera_folder(camera)
-        source_path = (
-            cfg.source_paths[source_path_idx] / folder
-            if folder
-            else cfg.source_paths[source_path_idx]
-        )
-    return (str(source_path), camera, idx, img_format, display_bounds)
+    """Generate consistent cache key for raw images. Include all parameters that affect output.
+
+    The image settings are in it (CLAUDE.md gotcha 6): the type and format
+    decide the files read, and the pairing settings decide which recorded
+    frames pair ``idx`` is (time_resolved pair 2 is frames 2 and 3,
+    skip_frames pair 2 is frames 3 and 4). The camera path carries
+    ``use_camera_subfolders`` and the subfolder names.
+    """
+    source_path = build_piv_camera_path(cfg, source_path_idx, camera)
+    images = (
+        cfg.image_type,
+        tuple(cfg.image_format),
+        cfg.pairing_preset,
+        cfg.frame_stride,
+        cfg.pair_stride,
+        cfg.start_index,
+        cfg.num_images,
+    )
+    return (str(source_path), camera, idx, img_format, images, display_bounds)
 
 
 def cache_key(source_path_idx, camera, cfg):
     """Generate cache key for processed images (no frame index - stores dict of frames)."""
-    image_type = cfg.image_type
-    # For .set files, source_path IS the .set file; for others, may need camera folder
-    if image_type in ("lavision_set", "lavision_im7"):
-        source_path = cfg.source_paths[source_path_idx]
-    else:
-        folder = cfg.get_camera_folder(camera_number(camera))
-        source_path = (
-            cfg.source_paths[source_path_idx] / folder
-            if folder
-            else cfg.source_paths[source_path_idx]
-        )
+    source_path = build_piv_camera_path(cfg, source_path_idx, camera_number(camera))
     return (str(source_path), str(camera))
 
 
 def _resolve_loop_read(cfg, source_path_idx, pair_idx, camera):
-    """Resolve multi-loop pair to (source_path, local_pair_idx) for read_pair.
+    """Resolve a global pair to (camera path, local pair) for read_pair.
 
-    For single-loop, returns the normal source_path and original pair_idx.
-    For multi-loop, resolves the global pair to the correct loop source
-    and local pair index within that loop.
+    For single-loop, the configured source and ``pair_idx`` itself. For
+    multi-loop, the loop's source and the pair's index within that loop.
 
-    Always operates on the raw cfg.source_paths entry (before camera folder),
-    so get_loop_source_path modifies the correct path component.
+    The loop is resolved on the raw cfg.source_paths entry (before the camera
+    folder), so get_loop_source_path renames the right path component; the
+    camera folder is then added by the one rule, ``camera_path_for``.
     """
     base_source = cfg.source_paths[source_path_idx]
-    image_type = cfg.image_type
 
     if cfg.num_loops > 1:
         loop_idx, local_pair = cfg.resolve_loop_for_pair(pair_idx)
@@ -236,12 +250,7 @@ def _resolve_loop_read(cfg, source_path_idx, pair_idx, camera):
         effective_base = base_source
         local_pair = pair_idx
 
-    # Derive camera-specific path
-    if image_type in ("lavision_set", "lavision_im7", "cine"):
-        return effective_base, local_pair
-    folder = cfg.get_camera_folder(camera)
-    source = effective_base / folder if folder else effective_base
-    return source, local_pair
+    return camera_path_for(cfg, effective_base, camera), local_pair
 
 
 def get_cached_pair(frame, typ, camera, source_path_idx, cfg, auto_limits=False):
@@ -298,11 +307,15 @@ def _preload_surrounding_frames(
     Loads 'window' frames forward from current_idx, encoded with the manual
     'display_bounds' or, when None, the auto window (see
     encode_display_frame). Thread-safe.
+
+    It runs on a background thread after the request has answered, so a pair
+    that will not read cannot reach the user in a response. It is reported as
+    one warning per run in the server log instead, naming the camera, how many
+    pairs failed, and the first failure's pair and reason.
     """
     import time as time_module
 
     try:
-        cfg.image_format[0]
         num_pairs = cfg.num_frame_pairs
 
         # Calculate range to preload: current_idx through current_idx + window - 1
@@ -310,6 +323,8 @@ def _preload_surrounding_frames(
         end_idx = min(num_pairs, current_idx + window - 1)
 
         preloaded = 0
+        attempted = 0
+        failures = []  # (pair, exception) per pair that would not read
         for idx in range(start_idx, end_idx + 1):
 
             # Use consistent cache key function
@@ -322,6 +337,7 @@ def _preload_surrounding_frames(
                 if cache_key_tuple in raw_image_cache:
                     continue  # Already cached
 
+            attempted += 1
             try:
                 # Multi-loop: resolve global pair index to loop-specific source
                 resolved_source, local_idx = _resolve_loop_read(
@@ -352,17 +368,23 @@ def _preload_surrounding_frames(
                         FRAME_1_KEYS.add(cache_key_tuple)
                 preloaded += 1
             except Exception as e:
-                logger.debug(f"Failed to preload frame {idx}: {e}")
-                continue
+                failures.append((idx, e))
 
         manage_cache_size()
+        if failures:
+            first_idx, first_error = failures[0]
+            logger.warning(
+                f"Preload: {len(failures)} of {attempted} pairs for camera "
+                f"{camera} could not be read; first, pair {first_idx}: "
+                f"{type(first_error).__name__}: {first_error}"
+            )
         if preloaded > 0:
             logger.debug(
                 f"Preloaded {preloaded} {img_format} frames for camera {camera}"
             )
             _log_cache_contents()
     except Exception as e:
-        logger.debug(f"Error in background preload: {e}")
+        logger.warning(f"Preload for camera {camera} stopped: {e}")
 
 
 # --- Endpoints ---
@@ -394,20 +416,11 @@ def get_frame_pair():
         source_path_idx, camera, idx, img_format, display_bounds, cfg
     )
 
-    # Determine source path for reading (if cache miss)
     if not cfg.image_format:
         return jsonify({"error": "No image format configured"}), 400
-    cfg.image_format[0]
-    image_type = cfg.image_type
-    if image_type in ("lavision_set", "lavision_im7"):
-        source_path = cfg.source_paths[source_path_idx]
-    else:
-        folder = cfg.get_camera_folder(camera)
-        source_path = (
-            cfg.source_paths[source_path_idx] / folder
-            if folder
-            else cfg.source_paths[source_path_idx]
-        )
+    # The path the errors below name: this camera's path in the configured
+    # source, replaced by the loop's own once the pair is resolved.
+    source_path = build_piv_camera_path(cfg, source_path_idx, camera)
 
     # Thread-safe cache check
     hit_response = None
@@ -429,10 +442,8 @@ def get_frame_pair():
 
     try:
         # Multi-loop: resolve global pair index to loop-specific source and local index
-        resolved_source, local_idx = _resolve_loop_read(
-            cfg, source_path_idx, idx, camera
-        )
-        pair = read_pair(local_idx, resolved_source, camera, cfg)
+        source_path, local_idx = _resolve_loop_read(cfg, source_path_idx, idx, camera)
+        pair = read_pair(local_idx, source_path, camera, cfg)
     except FileNotFoundError as e:
         # Provide detailed error with search path and patterns
         image_format = cfg.image_format
@@ -453,6 +464,9 @@ def get_frame_pair():
             ),
             404,
         )
+    except PAIR_COUNT_ERRORS as e:
+        # The source has no pair count: the message names the cause and the fix.
+        return jsonify({"error": str(e), "source_path": str(source_path)}), 400
     except Exception as e:
         return (
             jsonify(
@@ -500,7 +514,7 @@ def clear_raw_cache():
     with cache_lock:
         if exclude_camera is not None:
             cam = camera_number(exclude_camera)
-            # Cache key is (source_path, camera, idx, img_format, display_bounds) — camera is index 1
+            # Cache key is make_raw_cache_key's (source_path, camera, idx, ...) — camera is index 1
             keys_to_remove = [k for k in raw_image_cache if k[1] != cam]
         else:
             keys_to_remove = list(raw_image_cache.keys())
@@ -588,6 +602,15 @@ def preload_images():
     )
 
 
+def _query_selection(text: str) -> list:
+    """A query string's comma-separated dataset selection, as its entries.
+
+    Blank entries are skipped, as the job skips them. The entries stay text,
+    for ``job_paths`` to accept or refuse by name.
+    """
+    return [entry.strip() for entry in text.split(",") if entry.strip()]
+
+
 def _source_path_idx_error(idx: object, n_sources: int) -> Optional[str]:
     """Return an error message when ``idx`` is not a valid index into the sources.
 
@@ -644,6 +667,11 @@ def filter_images_endpoint():
 
     cfg.image_format[0]
 
+    # Load the mask here, not in the worker thread, so a refused mask (wrong
+    # size, or masking on with no mask file) reaches the browser as a 400
+    # (MaskError, errors.py).
+    mask = load_mask_for_camera(camera, cfg, source_path_idx)
+
     def load_pairs_parallel():
         """Load pairs in parallel using ThreadPoolExecutor."""
         from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -679,28 +707,6 @@ def filter_images_endpoint():
 
             # Compute to numpy array first (required for apply_filters_to_batch)
             batch_np = dask.compute(darr, scheduler="threads")[0]
-
-            # Load mask
-            mask = load_mask_for_camera(camera, cfg, source_path_idx)
-            if mask is not None:
-                logger.info(
-                    f"Preview mask loaded: shape={mask.shape}, dtype={mask.dtype}"
-                )
-                if batch_np.shape[-2:] != mask.shape:
-                    logger.error(
-                        f"Mask shape mismatch! Batch: {batch_np.shape}, Mask: {mask.shape}"
-                    )
-            else:
-                if not cfg.masking_enabled:
-                    logger.info("Masking is DISABLED in config.")
-                else:
-                    expected_path = cfg.get_mask_path(camera, source_path_idx)
-                    logger.info(
-                        f"Masking ENABLED. Expected mask path: {expected_path}. Exists: {expected_path.exists()}"
-                    )
-                logger.info(
-                    "No mask loaded for preview (masking disabled or file not found)"
-                )
 
             # Apply ALL filters (spatial + batch) using unified function
             processed_all = apply_filters_to_batch(
@@ -867,6 +873,9 @@ def filter_single_frame():
 
         return jsonify(response)
 
+    except (*PAIR_COUNT_ERRORS, MaskError) as e:
+        # No pair count, or a refused mask: the message names the cause and the fix.
+        return jsonify({"error": str(e)}), 400
     except Exception as e:
         logger.error(f"Error processing single frame: {e}")
         return jsonify({"error": str(e)}), 500
@@ -971,6 +980,7 @@ def validate_files():
                 "found": BLANK_SOURCE_MESSAGE,
                 "suggestions": [],
                 "streams": None,
+                "warnings": [],
             }
             for camera_num in camera_numbers
         }
@@ -986,7 +996,9 @@ def validate_files():
             camera_path = build_piv_camera_path(cfg, source_path_idx, camera_num)
             image_type = cfg.image_type
             num_images = cfg.num_images
-            num_pairs = cfg.num_frame_pairs
+            # The configured source is loop 0 of a looped recording: its last
+            # pair is the last of one loop, not of all of them.
+            num_pairs = cfg.per_loop_frame_pairs
 
             # Get all patterns (may be single pattern or A/B patterns)
             patterns = (
@@ -1051,6 +1063,7 @@ def validate_files():
                 read_frame_fn=read_frame,
                 diagnosis=diagnosis,
                 scan_cache=scan_cache,
+                pair_strides=(cfg.frame_stride, cfg.pair_stride),
             )
 
             # PIV-specific: Test first and last pairs
@@ -1062,7 +1075,7 @@ def validate_files():
             color_detected = False
 
             if cfg.is_container_format:
-                # Container formats (.set, .cine): validate_images_generic already
+                # Container formats (.set, .cine, .pivraw): validate_images_generic already
                 # read frame 1 for preview. Frame 1 reading does NOT prove the last
                 # requested entry exists — a container index can declare more entries
                 # than it actually holds, and the user may request more than exist.
@@ -1117,16 +1130,9 @@ def validate_files():
                     detected_start, cfg.start_index
                 )
 
-            # Multi-loop validation: check all loop sources exist
-            loop_errors = []
-            if cfg.num_loops > 1:
-                base_source = cfg.source_paths[source_path_idx]
-                for loop_idx in range(cfg.num_loops):
-                    loop_path = cfg.get_loop_source_path(base_source, loop_idx)
-                    if not loop_path.exists():
-                        loop_errors.append(
-                            f"Loop {loop_idx} source not found: {loop_path.name}"
-                        )
+            loop_errors = later_loop_findings(
+                cfg, cfg.source_paths[source_path_idx], camera_num
+            )
 
             # `found_count` is the real int count for standard/im7/.set/.cine; a
             # container whose count cannot be read fails validation with the
@@ -1208,6 +1214,9 @@ def validate_files():
                 "found": validation["found"],
                 "suggestions": validation["suggestions"],
                 "streams": validation["streams"],
+                "warnings": validation["warnings"],
+                "notes": validation["notes"],
+                "pivraw_alignment": validation["pivraw_alignment"],
                 "sample_files": (
                     []
                     if file_found_but_unreadable
@@ -1225,6 +1234,7 @@ def validate_files():
                 "found": None,
                 "suggestions": [],
                 "streams": None,
+                "warnings": [],
             }
             overall_valid = False
 
@@ -1240,25 +1250,14 @@ def validate_files():
             f"Validation passed - preloading first 10 frames for {len(camera_numbers)} camera(s)"
         )
 
-    # Extract detected_count and image_shape from first camera (all cameras should match)
+    # Extract detected_count from first camera (all cameras should match).
+    # Image size is NOT summarised here: cameras can differ in shape, and each
+    # camera's [W, H] is already in details["camera_N"]["image_size"].
     top_detected_count = None
     for cam_key, cam_result in results.items():
         dc = cam_result.get("detected_count")
         if isinstance(dc, int):
             top_detected_count = dc
-            break
-
-    # Store detected image_shape in config data so /config endpoint can return it
-    # (avoids expensive re-read; image_size is [W, H] from validation, store as [H, W]).
-    # This key is a RESPONSE CACHE for the frontend only. Config.image_shape never
-    # reads it (auto-detection is the single source of truth) -- do not "fix" the
-    # near-miss key names into agreement, a stale stored shape would silently
-    # break the window grids.
-    for cam_key, cam_result in results.items():
-        img_size = cam_result.get("image_size")
-        if img_size and len(img_size) == 2:
-            w, h = img_size
-            cfg.data.setdefault("images", {})["image_shape"] = [h, w]
             break
 
     return jsonify(
@@ -1284,14 +1283,37 @@ def _normalize_dict_keys(obj):
     return obj
 
 
+def _frame_pair_counts(cfg: Config) -> dict:
+    """``num_frame_pairs`` and ``per_loop_frame_pairs`` for a config response.
+
+    A source with no pair count (:data:`PAIR_COUNT_ERRORS`: a ``.pivraw`` run
+    the reader refuses, strides the image type cannot be read with, or a
+    dataset selection naming no real dataset) gets nulls. The two config
+    routes must still answer (the GUI loads the config on mount, and the user
+    changes the source through it), so the counts are null and
+    ``pairing_error`` carries the refusal for the GUI to show. Every
+    route that reads pairs answers 400 with the same message instead.
+    """
+    try:
+        return {
+            "num_frame_pairs": cfg.num_frame_pairs,
+            "per_loop_frame_pairs": cfg.per_loop_frame_pairs,
+        }
+    except PAIR_COUNT_ERRORS as e:
+        return {
+            "num_frame_pairs": None,
+            "per_loop_frame_pairs": None,
+            "pairing_error": str(e),
+        }
+
+
 @api_bp.route("/config", methods=["GET"])
 def config_endpoint():
     cfg = get_config()
     # Return full nested config as JSON, including computed properties
     # Use deep copy to avoid mutating cfg.data (shallow copy shares nested dicts)
     config_data = copy.deepcopy(cfg.data)
-    config_data["images"]["num_frame_pairs"] = cfg.num_frame_pairs
-    config_data["images"]["per_loop_frame_pairs"] = cfg.per_loop_frame_pairs
+    config_data["images"].update(_frame_pair_counts(cfg))
     config_data["images"]["start_index"] = cfg.start_index
     config_data["images"]["frame_stride"] = cfg.frame_stride
     config_data["images"]["pair_stride"] = cfg.pair_stride
@@ -1302,6 +1324,84 @@ def config_endpoint():
     # when YAML loads camera numbers as mixed int/str keys
     config_data = _normalize_dict_keys(config_data)
     return jsonify(config_data)
+
+
+def _bad_request(message: str) -> Tuple[Response, int]:
+    """A 400 answer in the backend's JSON error envelope (``errors.py``)."""
+    return jsonify({"success": False, "error": message}), 400
+
+
+@api_bp.route("/import_run", methods=["POST"])
+def import_run_endpoint():
+    """Write the GUI's ``config.yaml`` for a ``.pivraw`` run recorded by the acquisition app.
+
+    Request JSON: ``run_dir`` (the run folder, required), ``base_path`` (where
+    PIV results go; omitted or null for ``<project>/results/<run name>``),
+    ``force`` (bool, default false: replace the config and a different
+    ``rig.dt``).
+
+    200 ``{"success": true, "summary": <RunImport.summary() text>}``, after the
+    config is reloaded and the image caches cleared. 409 when the import would
+    replace something (always the config itself, since the GUI has one, plus a
+    different ``rig.dt``): ``error`` lists every conflict, and the GUI asks
+    before posting again with ``force``. 400 for a malformed request, a run
+    the reader refuses (``PivrawError``, via ``errors.py``), a malformed
+    calibration ``settings.yaml`` or a config that does not validate; nothing
+    is written then. 500 naming the file when a file cannot be read or
+    written; the config is unchanged, so the server is not reloaded.
+    """
+    global raw_image_cache, processed_store, FRAME_1_KEYS
+    data = request.get_json(silent=True) or {}
+    run_dir = data.get("run_dir")
+    if not isinstance(run_dir, str) or not run_dir.strip():
+        return _bad_request("run_dir is required: the folder of the recorded run.")
+    base_path = data.get("base_path")
+    if base_path is not None and not isinstance(base_path, str):
+        return _bad_request("base_path must be a folder path or null.")
+    force = data.get("force", False)
+    if not isinstance(force, bool):
+        return _bad_request("force must be true or false.")
+
+    try:
+        result = import_run(
+            Path(run_dir.strip()),
+            Path(get_config().config_path),
+            base_path=(
+                Path(base_path.strip()) if base_path and base_path.strip() else None
+            ),
+            force=force,
+        )
+    except RunImportConflict as e:
+        return (
+            jsonify({"success": False, "error": " ".join(e.conflicts)}),
+            409,
+        )
+    except PivrawError:
+        raise  # errors.py answers 400 with the reader's message
+    except ValueError as e:
+        # Includes CalibrationSettingsError: a malformed settings.yaml, named.
+        return _bad_request(str(e))
+    except OSError as e:
+        # import_run moves the config into place last, so it is unchanged.
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": (
+                        f"The run import failed on {e.filename or 'a file'}: "
+                        f"{e.strerror or e}. config.yaml is unchanged."
+                    ),
+                }
+            ),
+            500,
+        )
+
+    with cache_lock:
+        raw_image_cache.clear()
+        FRAME_1_KEYS.clear()
+    processed_store["processed"] = {}
+    reload_config()
+    return jsonify({"success": True, "summary": result.summary()})
 
 
 @api_bp.route("/fft_sizes", methods=["GET"])
@@ -1380,9 +1480,13 @@ def preview_frame_pairs():
                 "local_pair": local_pair,
             }
         else:
-            idx_a, idx_b = cfg.get_frame_pair_indices(p)
+            # A .pivraw run is paired by trigger and its file frames differ per
+            # camera: list the frames of the camera the container is named by.
+            idx_a, idx_b = cfg.get_frame_pair_indices(
+                p, camera=cfg.camera_numbers[0] if cfg.is_container_format else None
+            )
             if cfg.is_container_format:
-                # Container files (.cine, .set): frames come from within
+                # Container files (.cine, .pivraw, .set): frames come from within
                 # a single file, not separate files. Format string uses
                 # camera number (not frame index).
                 try:
@@ -1610,11 +1714,13 @@ def update_config():
     cfg.save()
     reload_config()
 
-    # Inject computed image properties into response so frontend stays in sync
+    # Inject computed image properties into response so frontend stays in sync.
+    # A paths change (source, cameras) re-pairs a .pivraw run too, so it carries
+    # the pair status even when no images key was posted: the GUI must never
+    # keep the count, or the refusal, of the previous source.
     cfg = get_config()
-    if "images" in data:
-        data["images"]["num_frame_pairs"] = cfg.num_frame_pairs
-        data["images"]["per_loop_frame_pairs"] = cfg.per_loop_frame_pairs
+    if "images" in data or "paths" in data:
+        data.setdefault("images", {}).update(_frame_pair_counts(cfg))
 
     # Echo server-reconciled camera state so the frontend context tracks the
     # persisted config (camera_numbers/camera_subfolders may differ from what
@@ -1659,6 +1765,11 @@ def run_piv():
     base_path_idx = data.get("base_path_idx", 0)
     active_paths = data.get("active_paths")  # List of path indices to process
     mode = data.get("mode", "instantaneous")  # PIV mode: instantaneous or ensemble
+
+    # The selection and pairing (PAIR_COUNT_ERRORS) and masks (MaskError) are
+    # checked before any job starts; each is a 400 with its message
+    # (errors.py), so the null pair count /config reports can never launch one.
+    require_piv_job_inputs(get_config(), active_paths)
 
     # Get the runner and start the job
     runner = get_runner()
@@ -2034,41 +2145,12 @@ def get_uncalibrated_count():
     base_paths = cfg.base_paths
 
     # active_paths is required: defaulting to dataset 0 is what pinned the progress
-    # bar at 100% for the rest of a multi-dataset run.
-    raw_active = request.args.get("active_paths", "")
-    try:
-        active_paths = [int(p) for p in raw_active.split(",") if p.strip()]
-    except ValueError:
-        return (
-            jsonify(
-                {
-                    "error": "active_paths must be comma-separated integers, "
-                    f"got {raw_active!r}"
-                }
-            ),
-            400,
-        )
-    if not active_paths:
-        return (
-            jsonify(
-                {
-                    "error": "active_paths is required "
-                    "(comma-separated base path indices)"
-                }
-            ),
-            400,
-        )
-    out_of_range = [i for i in active_paths if not 0 <= i < len(base_paths)]
-    if out_of_range:
-        return (
-            jsonify(
-                {
-                    "error": f"active_paths entries out of range: {out_of_range} "
-                    f"({len(base_paths)} base path(s) configured)"
-                }
-            ),
-            400,
-        )
+    # bar at 100% for the rest of a multi-dataset run. It is resolved as the job
+    # resolves it, so an empty, non-integer or out-of-range selection is an
+    # ActivePathsError, a 400 (errors.py).
+    active_paths = job_paths(
+        cfg, _query_selection(request.args.get("active_paths", ""))
+    )
 
     # Camera is part of the key because `files` is camera-specific.
     cache_key = (tuple(active_paths), type_name, cam)
@@ -2144,8 +2226,11 @@ def get_uncalibrated_count():
 def check_output_exists():
     """Check if output data exists for given paths/cameras."""
     cfg = get_config()
-    active_paths_str = request.args.get("active_paths", "")
-    active_paths = [int(p) for p in active_paths_str.split(",") if p.strip()]
+    selection = _query_selection(request.args.get("active_paths", ""))
+    # A selection is resolved as the PIV job resolves it: a dataset outside the
+    # config or a non-integer is ActivePathsError, a 400 (errors.py). No
+    # selection asks about nothing.
+    active_paths = job_paths(cfg, selection) if selection else []
     mode = request.args.get("mode", "")  # "instantaneous" or "ensemble"
     types_to_check = (
         [mode]
@@ -2165,9 +2250,6 @@ def check_output_exists():
     details = {}
 
     for path_idx in active_paths:
-        if path_idx >= len(cfg.base_paths):
-            logger.warning(f"[check_output_exists] Path index {path_idx} out of range")
-            continue
         base = cfg.base_paths[path_idx]
         path_key = f"path_{path_idx}"
         details[path_key] = {}
@@ -2225,9 +2307,13 @@ def clear_output():
     cleared = []
     errors = []
 
+    # Resolved as the PIV job resolves them, before anything is deleted: a
+    # negative index used to clear another dataset's output (Python indexing),
+    # and an out-of-range one was skipped. Both are ActivePathsError, a 400.
+    if active_paths:
+        active_paths = job_paths(cfg, active_paths)
+
     for path_idx in active_paths:
-        if path_idx >= len(cfg.base_paths):
-            continue
         base = cfg.base_paths[path_idx]
 
         for cam_num in camera_numbers:
@@ -2270,8 +2356,10 @@ def memory_check():
     Shown by the Run PIV panel, next to the controls that change the estimate.
     It is a warning, not a gate — validate_config treats it the same way.
 
-    Returns {"warning": str | None}. Reads one image via Config.image_shape;
-    None when no image can be read, because there is nothing to estimate yet.
+    Returns {"warning": str | None}. Reads one image per selected camera via
+    Config.image_shape_for and estimates for the largest; None when nothing is
+    configured yet (``validate_memory_for_images``). A camera whose size cannot
+    be read is named in the warning.
     """
     cfg = get_config()
     return jsonify({"warning": validate_memory_for_images(cfg) or None})

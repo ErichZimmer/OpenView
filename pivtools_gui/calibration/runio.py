@@ -25,7 +25,7 @@ import numpy as np
 import scipy.io
 import yaml
 
-from pivtools_core.config import CALIBRATION_ACTIVE_METHODS
+from pivtools_core.config import CALIBRATION_ACTIVE_METHODS, Config
 from pivtools_core.paths import get_data_paths
 from pivtools_gui.utils.worker_pool import (
     get_max_workers,
@@ -41,12 +41,15 @@ from .apply import (
     calibrate_stress_tensor,
 )
 from .camera_model import CameraModel
+from .frame_match import check_calibration_frames
 from .record import MonoRecord, StereoRecord
 
 logger = logging.getLogger(__name__)
 
 # Ensemble PIV stores its result under this name + struct (vs per-frame "piv_result").
 ENSEMBLE_FILE = "ensemble_result.mat"
+# How a refusal names the datasets an apply was asked to calibrate.
+APPLY_SELECTION = "the calibration apply dataset selection"
 
 
 class ApplyCancelled(Exception):
@@ -167,6 +170,15 @@ def plan_apply_units(
     Every unit also carries ``cameras``: ``(cam,)`` for mono, ``(cam1, cam2)`` in record
     order for stereo, so a caller can say which cameras the run covers.
 
+    Before returning, the calibration's pixel frame is checked against the PIV images
+    of every unit (``frame_match.check_calibration_frames``): the PIV source paired
+    with each planned base path, or every configured source for an ``explicit`` unit,
+    whose vectors name no base path. A mismatch raises ``CalibrationFrameMismatch``
+    (a ``ValueError``) before any job starts, and a ``.pivraw`` run the reader refuses
+    raises its ``PivrawError``. A pairing applied without a comparison puts its warning
+    in every unit's ``frame_warnings`` (a tuple, the same for every unit), which the
+    callers show in the apply result.
+
     Stereo ``uncal1`` / ``uncal2`` follow the RECORD's camera order (``rec.record_pair``),
     not ``camera_pair``'s: the pair dir is shared by ``(1, 2)`` and ``(2, 1)``, and
     ``reconstruct_stereo_run`` pairs ``uncal1`` with ``record.model1``, which is
@@ -182,16 +194,17 @@ def plan_apply_units(
         raise ValueError(
             f"active_paths must be a list of base-path indices, got {active_paths!r}"
         )
+    # A given selection goes through the one dataset check (Config.resolve_active_paths):
+    # a negative index would wrap to the last dataset and calibrate the wrong run, and
+    # int() turned 1.5 and True into dataset 1. None or [] is every dataset here.
     base_indices = (
-        [int(i) for i in active_paths] if active_paths else list(range(len(base_paths)))
-    )
-    # A negative index would wrap to the last dataset and calibrate the wrong run.
-    bad = [i for i in base_indices if not 0 <= i < len(base_paths)]
-    if bad:
-        raise ValueError(
-            f"active_paths {bad} out of range: {len(base_paths)} base path(s) configured "
-            f"(valid indices 0..{len(base_paths) - 1})"
+        full_cfg.resolve_active_paths(
+            list(active_paths),
+            label=f"{APPLY_SELECTION} [{', '.join(str(i) for i in active_paths)}]",
         )
+        if active_paths
+        else list(range(len(base_paths)))
+    )
 
     units = []
     if stereo:
@@ -206,7 +219,7 @@ def plan_apply_units(
         # model1/model2 belong to record.cam1/cam2: read each camera's vectors in that order.
         cam1, cam2 = rec.record_pair(record, out_pair)
         if explicit:
-            return [
+            units = [
                 dict(
                     stereo=True,
                     record=record,
@@ -218,6 +231,8 @@ def plan_apply_units(
                     cameras=(cam1, cam2),
                 )
             ]
+            _check_frames(full_cfg, source, units, None)
+            return units
         for bi in base_indices:
             base = base_paths[bi]
             uncal1 = get_data_paths(base, nfp, cam1, type_name, use_uncalibrated=True)[
@@ -254,7 +269,7 @@ def plan_apply_units(
                 cam,
                 model_type=model_type,
             )
-            return [
+            units = [
                 dict(
                     stereo=False,
                     record=record,
@@ -265,6 +280,8 @@ def plan_apply_units(
                     cameras=(cam,),
                 )
             ]
+            _check_frames(full_cfg, source, units, None)
+            return units
         for bi in base_indices:
             base = base_paths[bi]
             for cam in full_cfg.camera_numbers:
@@ -293,7 +310,45 @@ def plan_apply_units(
                         cameras=(int(cam),),
                     )
                 )
+    _check_frames(full_cfg, source, units, base_indices)
     return units
+
+
+def _check_frames(
+    full_cfg: Config,
+    source: Path,
+    units: List[Dict],
+    base_indices: Optional[List[int]],
+) -> None:
+    """Refuse the plan unless the calibration's pixel frame is the PIV images'.
+
+    Stores the check's warnings in each unit's ``frame_warnings``.
+
+    ``base_indices`` are the planned base paths; each is paired with the PIV source
+    at the same index of ``paths.source_paths``. None (an explicit unit, which names
+    no base path) checks every configured source.
+
+    Raises:
+        ValueError: A planned base path has no source path at its index.
+        CalibrationFrameMismatch: ``frame_match.check_calibration_frames`` refuses.
+    """
+    sources = full_cfg.source_paths
+    if base_indices is None:
+        piv_sources = list(sources)
+    else:
+        unpaired = [i for i in base_indices if i >= len(sources)]
+        if unpaired:
+            raise ValueError(
+                f"base path(s) {unpaired} have no source path at the same index "
+                f"({len(sources)} source path(s) configured), so the PIV images "
+                "behind their vectors are unknown and the calibration cannot be "
+                "checked against them"
+            )
+        piv_sources = [sources[i] for i in base_indices]
+    cameras = sorted({int(c) for u in units for c in u["cameras"]})
+    warnings = check_calibration_frames(full_cfg, source, cameras, piv_sources)
+    for unit in units:
+        unit["frame_warnings"] = warnings
 
 
 # Config.save_timestamped_copy names snapshots "config_<YYYY-MM-DD_HH-MM-SS>.yaml".

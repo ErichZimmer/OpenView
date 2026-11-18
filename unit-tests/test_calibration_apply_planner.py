@@ -10,7 +10,9 @@ explicit single-unit override.
 from __future__ import annotations
 
 import pytest
+from fixtures.vector_sets import plain_piv_source_fields
 
+from pivtools_core.config import ActivePathsError, Config
 from pivtools_core.paths import get_data_paths
 from pivtools_gui.calibration import record as REC
 from pivtools_gui.calibration import runio
@@ -18,12 +20,20 @@ from pivtools_gui.calibration.pipeline import build_scale_factor_record
 
 
 class _FakeCfg:
-    """Minimal stand-in for Config exposing only what plan_apply_units reads."""
+    """Minimal stand-in for Config exposing only what plan_apply_units reads.
+
+    The dataset check is Config's own (``resolve_active_paths``), bound here, so
+    the planner's selection is refused exactly as production refuses it.
+    """
+
+    resolve_active_paths = Config.resolve_active_paths
 
     def __init__(self, base_paths, camera_numbers, num_frame_pairs):
         self.base_paths = base_paths
         self.camera_numbers = camera_numbers
         self.num_frame_pairs = num_frame_pairs
+        self.data = {"paths": {}}
+        self.__dict__.update(plain_piv_source_fields(camera_numbers, base_paths))
 
 
 def _make_source(tmp_path, cams=(1, 2)):
@@ -82,7 +92,10 @@ def test_active_paths_out_of_range_raises(tmp_path, bad):
     wrap to the last dataset (Python indexing) and calibrate the wrong run."""
     source = _make_source(tmp_path)
     cfg = _FakeCfg([tmp_path / "runA", tmp_path / "runB"], [1, 2], 10)
-    with pytest.raises(ValueError, match="active_paths"):
+    with pytest.raises(
+        ActivePathsError,
+        match=r"in the calibration apply dataset selection \[.*\] is out of range",
+    ):
         runio.plan_apply_units(
             cfg, source, "scale_factor", False, "instantaneous", active_paths=bad
         )

@@ -16,6 +16,90 @@ from typing import Optional
 
 from loguru import logger
 
+from pivtools_core.config import ACTIVE_PATHS_ENV, Config
+from pivtools_core.image_handling.load_images import load_mask_for_camera
+
+# How refusals name the dataset checkboxes of the GUI's Run PIV tab.
+RUN_SELECTION = "the Run PIV dataset selection"
+
+
+def active_paths_override(active_paths: Optional[list[int]]) -> Optional[str]:
+    """The ``PIV_ACTIVE_PATHS`` value a job started with ``active_paths`` gets.
+
+    None leaves the variable unset, so the job takes the config file's
+    ``paths.active_paths``.
+    """
+    if active_paths is None:
+        return None
+    return ",".join(str(i) for i in active_paths)
+
+
+def job_units(cfg: Config, active_paths: Optional[list[int]]) -> list[tuple[int, int]]:
+    """(path index, camera) for every dataset and camera a job would process.
+
+    Uses the job's own resolution: ``Config.resolve_active_paths`` on the value
+    :meth:`PIVRunner.start_piv_job` passes, and ``cfg.camera_numbers``, which
+    ``instantaneous.main`` and ``ensemble.main`` loop over. The request's
+    ``cameras`` field is not used by the job, so it is not used here either.
+    """
+    return [
+        (path_idx, camera)
+        for path_idx in job_paths(cfg, active_paths)
+        for camera in cfg.camera_numbers
+    ]
+
+
+def job_paths(cfg: Config, active_paths: Optional[list]) -> list[int]:
+    """The dataset indices a job started with ``active_paths`` processes.
+
+    ``Config.resolve_active_paths``, the job's own resolution, on the request's
+    selection. The job receives it as the :func:`active_paths_override` string,
+    which is accepted or refused exactly as the list is; the list is passed so
+    a refusal names what the user sent, as "the Run PIV dataset selection
+    [5]". None is the config file's ``paths.active_paths``, as for the job.
+    """
+    if active_paths is None:
+        return cfg.resolve_active_paths(None)
+    return cfg.resolve_active_paths(
+        active_paths, label=run_selection_label(active_paths)
+    )
+
+
+def run_selection_label(selection: object) -> str:
+    """How a refusal names a dataset selection sent by the GUI.
+
+    The GUI's Run PIV tab holds the dataset checkboxes, so every route that
+    takes them (run, clear, check, progress) is named after it.
+    """
+    if isinstance(selection, (list, tuple)):
+        shown = "[" + ", ".join(str(entry) for entry in selection) + "]"
+    else:
+        shown = repr(selection)
+    return f"{RUN_SELECTION} {shown}"
+
+
+def require_piv_job_inputs(cfg: Config, active_paths: Optional[list[int]]) -> None:
+    """Refuse, before a PIV job starts, any input the job would refuse.
+
+    The one preflight a job start runs. Each check is the job's own, so a
+    refusal here is the one the job would hit, with the same message:
+
+    1. The pair count over the datasets of :func:`job_paths`
+       (:meth:`Config.require_frame_pairs`): a ``.pivraw`` run that cannot be
+       paired by trigger (``PivrawError``), or strides another image type
+       cannot be read with (``PairingStrideError``).
+    2. Every camera's mask on every dataset of :func:`job_units`
+       (``load_mask_for_camera``): a wrong-size mask, or masking on with no
+       readable mask file (``MaskError``). With masking off it loads nothing.
+
+    Both halves check the same datasets, the ones the job will process.
+    All three errors are bad input, answered 400 with their message
+    (``pivtools_gui.errors.BAD_INPUT_ERRORS``).
+    """
+    cfg.require_frame_pairs(job_paths(cfg, active_paths))
+    for path_idx, camera in job_units(cfg, active_paths):
+        load_mask_for_camera(camera, cfg, source_path_idx=path_idx)
+
 
 class PIVProcess:
     """Manages a single PIV computation subprocess."""
@@ -161,9 +245,10 @@ class PIVRunner:
         env["PYTHONPATH"] = str(self.project_root)
 
         # Pass active paths via environment variable if specified
-        if active_paths is not None:
-            env["PIV_ACTIVE_PATHS"] = ",".join(str(i) for i in active_paths)
-            logger.info(f"Setting PIV_ACTIVE_PATHS={env['PIV_ACTIVE_PATHS']}")
+        override = active_paths_override(active_paths)
+        if override is not None:
+            env[ACTIVE_PATHS_ENV] = override
+            logger.info(f"Setting {ACTIVE_PATHS_ENV}={override}")
 
         try:
             # Start subprocess

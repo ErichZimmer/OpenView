@@ -248,11 +248,25 @@ def config_with_cameras(
     """Config stand-in exposing what the apply route and planner read.
 
     ``camera_numbers`` is ``list(cameras)`` (e.g. ``[2, 3, 4]`` for a rig whose first
-    camera is not 1).
+    camera is not 1). Each base path is paired with a plain TIFF PIV source
+    (``<base>_images``, A/B files in ``Cam<N>``), which records nothing about its
+    pixel frame, so the planner's calibration frame check has nothing to compare.
     """
     return types.SimpleNamespace(
         camera_numbers=[int(c) for c in cameras],
         base_paths=[Path(b) for b in base_paths],
         num_frame_pairs=int(num_frame_pairs),
         vector_format=vector_format,
+        **plain_piv_source_fields(cameras, base_paths),
+    )
+
+
+def plain_piv_source_fields(cameras: Sequence[int], base_paths: Sequence[Path]) -> dict:
+    """The PIV-source members of a Config stand-in: one plain TIFF source per base path."""
+    return dict(
+        source_paths=[Path(f"{b}_images") for b in base_paths],
+        image_type="standard",
+        image_format=("B%05d_A.tif", "B%05d_B.tif"),
+        camera_count=max(int(c) for c in cameras),
+        get_camera_folder=lambda camera: f"Cam{camera}",
     )

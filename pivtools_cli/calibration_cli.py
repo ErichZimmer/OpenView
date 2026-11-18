@@ -42,7 +42,7 @@ import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
@@ -1323,6 +1323,7 @@ def apply_calibration_command(args):
         model_type=model_type,
     )
     _require_units(units, "apply-calibration")
+    _print_frame_warnings(units[0]["frame_warnings"])
     applied_pointer = runio.build_applied_pointer(source, board, False)
     total = 0
     for u in units:
@@ -1341,6 +1342,12 @@ def apply_calibration_command(args):
             f"[calibration] applied {board} {u['label']} -> {len(written)} frame(s) in {u['out']}"
         )
     return total
+
+
+def _print_frame_warnings(warnings: Sequence[str]) -> None:
+    """Print the calibration frame check's warnings where the user reads the result."""
+    for warning in warnings:
+        print(f"[calibration] WARNING: {warning}")
 
 
 def _require_units(units: List[Dict[str, Any]], command: str) -> None:
@@ -1423,6 +1430,7 @@ def apply_stereo_command(args):
         model_type=_stereo_model_type(args, scfg, board),
     )
     _require_units(units, "apply-stereo")
+    _print_frame_warnings(units[0]["frame_warnings"])
     # Laser-sheet plane: flags > the record's saved self-cal > 0.0 (an empty self_cal
     # already means sheet-at-datum). All stereo units share one record; no config source.
     rec0 = units[0]["record"]
@@ -1496,6 +1504,10 @@ def self_calibrate_command(args):
     cam1, cam2 = rec.record_pair(record, (cam1, cam2))
     # Fail on a stale baked block before the expensive correlation loop.
     c2sc.prev_cumulative(record.self_cal)
+    # The particle images must be in the model's pixel frame (ticket K1).
+    _print_frame_warnings(
+        c2sc.check_self_cal_frames(config, source, base_idx, cam1, cam2)
+    )
     figdir = (
         None
         if getattr(args, "no_figures", False)

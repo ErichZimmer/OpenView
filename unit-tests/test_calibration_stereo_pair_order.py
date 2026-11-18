@@ -14,6 +14,7 @@ from __future__ import annotations
 import types
 
 import pytest
+from fixtures.vector_sets import plain_piv_source_fields
 from flask import Flask
 from test_calibration_self_cal import _stereo_record
 
@@ -26,16 +27,22 @@ BOARD = "dotboard"
 
 
 class _FakeConfig:
-    """Only what the stereo routes and CLI read: the calibration block + source."""
+    """Only what the stereo routes and CLI read: the calibration block + source,
+    and a plain TIFF PIV source for self-calibration's frame check."""
 
     camera_count = 2
+    num_frame_pairs = 10
 
     def __init__(self, source):
         self._source = source
         self.calibration = {}
+        self.__dict__.update(plain_piv_source_fields([1, 2], [source / "run"]))
 
     def get_calibration_source(self, idx):
         return self._source
+
+    def require_frame_pairs(self):
+        return self.num_frame_pairs
 
 
 def _save_reversed(source):

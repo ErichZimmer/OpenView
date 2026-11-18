@@ -15,7 +15,8 @@ which silently decoded packed data as unpacked.
 These tests lock in:
   * ``raw-16-bit`` and ``raw-8-bit`` decode, and ``mono-12p`` still decodes.
   * ``raw-8-bit`` widens without rescaling (raw sensor counts, as mono-12p does).
-  * A known-but-unimplemented encoding is refused BY NAME, not silently aliased.
+  * A known-but-unimplemented encoding (rgb-24) is refused BY NAME, not silently
+    aliased.
   * The byte count is checked against the id's bit depth before decoding.
   * A missing or empty decoder XML raises instead of guessing ``mono-16``.
   * The three non-recording .set shapes each name themselves.
@@ -39,15 +40,14 @@ from fixtures.lavision import (  # noqa: E402
     write_dark_im7_float,
     write_manifest,
     write_scales,
-    write_stream_set,
 )
 
 from pivtools_core.image_handling.readers import set_reader  # noqa: E402
 from pivtools_core.image_handling.readers.set_reader import (  # noqa: E402
     _IMPLEMENTED_DECODERS,
     _decode_mono10p,
-    _decode_mono12p,
     clear_set_info_cache,
+    decode_mono12p,
     read_set_frame,
     read_set_info,
     read_set_pair,
@@ -73,7 +73,7 @@ def test_raw16_round_trips(tmp_path):
 def test_raw8_widens_without_rescaling(tmp_path):
     """'raw-8-bit' widens to 16-bit but keeps raw counts: 200 stays 200, not 51200.
 
-    Matches _decode_mono12p, which returns 0-4095 despite its DaVis label also
+    Matches decode_mono12p, which returns 0-4095 despite its DaVis label also
     reading "to 16 bit". Intensity thresholds must mean the same thing whichever
     encoding a recording used.
     """
@@ -91,7 +91,7 @@ def test_raw8_widens_without_rescaling(tmp_path):
 def test_mono12p_still_decodes(tmp_path):
     """Regression: the one encoding that already worked is unchanged.
 
-    Hand-computed from the Mono12Packed rule (2 pixels in 3 bytes):
+    Hand-computed from the PFNC Mono12p (lsb packed) rule (2 pixels in 3 bytes):
         b0=0x34 b1=0x12 b2=0xAB
         p0 = 0x34 | (0x2 << 8) = 0x234 = 564
         p1 = 0x1  | (0xAB << 4) = 0xAB1 = 2737
@@ -130,32 +130,31 @@ def test_pre_paired_pair_reads_both_streams(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "decoder,label",
-    [
-        ("mono-10pmsb", "Mono10pmsb to 16 bit"),
-        ("mono-12packed", "Mono12packed to 16 bit"),
-        ("mono-12pmsb", "Mono12pmsb to 16 bit"),
-        ("rgb-24", "RGB 24"),
-    ],
-)
-def test_known_but_unimplemented_encoding_names_itself(tmp_path, decoder, label):
+def test_known_but_unimplemented_encoding_names_itself(tmp_path):
     """A real DaVis encoding we cannot decode says so, and says what we can decode.
 
-    These share byte counts with encodings we DO support (the three 12-bit ids are
-    all 1.5 bytes/pixel) and differ only in bit order, so aliasing one onto another
-    would produce a scrambled image rather than an error.
+    rgb-24 is the one id left: lvpyio opens no synthetic rgb-24 recording, so there
+    is no oracle for its channel order, and a guess would give a plausible wrong
+    image rather than an error. The packed mono ids are in
+    test_set_packed_decoders.py.
     """
-    set_file = build_set(tmp_path, decoder, [[b"\x00" * 6]], width=4, height=1)
+    set_file = build_set(tmp_path, "rgb-24", [[b"\x00" * 12]], width=4, height=1)
 
     with pytest.raises(ValueError) as exc:
         read_set_frame(set_file, entry_no=1, frame_idx=0)
 
     message = str(exc.value)
-    assert decoder in message
-    assert label in message
+    assert "rgb-24" in message
+    assert "RGB 24" in message
     for implemented in _IMPLEMENTED_DECODERS:
         assert implemented in message
+
+
+def test_every_davis_encoding_but_rgb24_is_implemented():
+    """The eight DaVis ids minus rgb-24, so a removed decoder cannot go unnoticed."""
+    assert sorted(set_reader._DECODER_BITS_PER_PX) == sorted(
+        [*_IMPLEMENTED_DECODERS, "rgb-24"]
+    )
 
 
 def test_unknown_encoding_is_rejected(tmp_path):
@@ -307,7 +306,11 @@ def test_declared_dark_is_subtracted_and_clamped(tmp_path):
     )
     set_dir = tmp_path / "synthetic"
     write_dark_im7(set_dir / "Transformer0-dark.im7", dark)
-    write_stream_set(set_dir, [("dark-image-subtraction", "Transformer0", 0)])
+    write_manifest(
+        set_dir,
+        [("Frame0", 0)],
+        transformers=[("dark-image-subtraction", "Transformer0", 0)],
+    )
 
     img = read_set_frame(set_file, entry_no=1, frame_idx=0)
 
@@ -328,35 +331,16 @@ def test_no_stream_set_means_no_correction(tmp_path):
     np.testing.assert_array_equal(img, raw.astype(np.float32))
 
 
-def test_unimplemented_transformer_is_refused(tmp_path):
-    """A declared correction we cannot apply must fail, not be skipped.
-
-    Silently dropping it would return pixels that differ from DaVis with no
-    indication anything was omitted.
-    """
-    raw = np.zeros((2, 3), dtype=np.uint16)
-    set_file = build_set(
-        tmp_path, "raw-16-bit", [[raw.astype("<u2").tobytes()]], width=3, height=2
-    )
-    write_stream_set(
-        tmp_path / "synthetic", [("flat-field-correction", "Transformer0", 0)]
-    )
-
-    with pytest.raises(ValueError) as exc:
-        read_set_frame(set_file, entry_no=1, frame_idx=0)
-
-    assert "flat-field-correction" in str(exc.value)
-    assert "dark-image-subtraction" in str(exc.value)
-
-
 def test_declared_dark_file_missing_raises(tmp_path):
     """A declared dark image that is not on disk is an incomplete copy."""
     raw = np.zeros((2, 3), dtype=np.uint16)
     set_file = build_set(
         tmp_path, "raw-16-bit", [[raw.astype("<u2").tobytes()]], width=3, height=2
     )
-    write_stream_set(
-        tmp_path / "synthetic", [("dark-image-subtraction", "Transformer0", 0)]
+    write_manifest(
+        tmp_path / "synthetic",
+        [("Frame0", 0)],
+        transformers=[("dark-image-subtraction", "Transformer0", 0)],
     )
 
     with pytest.raises(FileNotFoundError, match="Transformer0-dark.im7"):
@@ -377,7 +361,11 @@ def test_out_of_range_dark_is_refused(tmp_path):
     set_dir = tmp_path / "synthetic"
     big = np.full((2, 3), 70000, dtype=np.int32)
     write_dark_im7_float(set_dir / "Transformer0-dark.im7", big)
-    write_stream_set(set_dir, [("dark-image-subtraction", "Transformer0", 0)])
+    write_manifest(
+        set_dir,
+        [("Frame0", 0)],
+        transformers=[("dark-image-subtraction", "Transformer0", 0)],
+    )
 
     with pytest.raises(ValueError, match=r"not integer counts in \[0, 65535\]"):
         read_set_frame(set_file, entry_no=1, frame_idx=0)
@@ -391,7 +379,11 @@ def test_dark_shape_mismatch_raises(tmp_path):
     )
     set_dir = tmp_path / "synthetic"
     write_dark_im7(set_dir / "Transformer0-dark.im7", np.zeros((4, 5), np.uint16))
-    write_stream_set(set_dir, [("dark-image-subtraction", "Transformer0", 0)])
+    write_manifest(
+        set_dir,
+        [("Frame0", 0)],
+        transformers=[("dark-image-subtraction", "Transformer0", 0)],
+    )
 
     with pytest.raises(ValueError, match="does not belong to this recording"):
         read_set_frame(set_file, entry_no=1, frame_idx=0)
@@ -403,7 +395,7 @@ def test_dark_shape_mismatch_raises(tmp_path):
 
 
 def _decode_mono12p_byte_planes(raw, width, height):
-    """The byte-plane implementation _decode_mono12p replaced (git f052f2b).
+    """The byte-plane implementation decode_mono12p replaced (git f052f2b).
 
     Kept here as the reference. The rewrite is a memory-access change only, so any
     divergence from this is a bug in the rewrite, not a deliberate difference.
@@ -436,7 +428,7 @@ def test_mono12p_matches_byte_plane_reference_on_bit_patterns(name):
     raw = _BIT_PATTERNS[name]
     n_px = (len(raw) // 3) * 2
     expected = _decode_mono12p_byte_planes(raw, n_px, 1)
-    np.testing.assert_array_equal(_decode_mono12p(raw, n_px, 1), expected)
+    np.testing.assert_array_equal(decode_mono12p(raw, n_px, 1), expected)
 
 
 def test_mono12p_matches_byte_plane_reference_on_random_frame():
@@ -445,7 +437,7 @@ def test_mono12p_matches_byte_plane_reference_on_random_frame():
     rng = np.random.default_rng(0)
     raw = rng.integers(0, 256, size=(width * height * 3) // 2, dtype=np.uint8).tobytes()
     expected = _decode_mono12p_byte_planes(raw, width, height)
-    got = _decode_mono12p(raw, width, height)
+    got = decode_mono12p(raw, width, height)
     np.testing.assert_array_equal(got, expected)
     assert got.dtype == np.uint16
     assert got.flags.c_contiguous
@@ -458,12 +450,12 @@ def test_mono12p_odd_pixel_count_raises():
     The pair-wise form would otherwise drop the trailing pixel silently.
     """
     with pytest.raises(ValueError, match="even number of pixels"):
-        _decode_mono12p(b"\x00" * 9, 3, 1)
+        decode_mono12p(b"\x00" * 9, 3, 1)
 
 
 def test_mono12p_short_buffer_raises_rather_than_decoding_garbage():
     with pytest.raises((ValueError, TypeError)):
-        _decode_mono12p(b"\x00" * 5, 4, 1)  # 4 px needs 6 bytes
+        decode_mono12p(b"\x00" * 5, 4, 1)  # 4 px needs 6 bytes
 
 
 # ---------------------------------------------------------------------------
@@ -668,7 +660,11 @@ def test_dark_image_cache_revalidates_on_mtime(tmp_path, _clean_set_cache):
     set_file, set_dir = _dark_set(tmp_path, "darkcache", value=100)
     dark_path = set_dir / "Transformer0-dark.im7"
     write_dark_im7(dark_path, np.full((2, 3), 10, np.uint16))
-    write_stream_set(set_dir, [("dark-image-subtraction", "Transformer0", 0)])
+    write_manifest(
+        set_dir,
+        [("Frame0", 0)],
+        transformers=[("dark-image-subtraction", "Transformer0", 0)],
+    )
 
     np.testing.assert_array_equal(
         read_set_frame(set_file, entry_no=1, frame_idx=0),
@@ -695,13 +691,17 @@ def test_dark_image_is_cached_within_one_mtime(tmp_path, _clean_set_cache):
     """
     set_file, set_dir = _dark_set(tmp_path, "darkhit", value=100)
     write_dark_im7(set_dir / "Transformer0-dark.im7", np.full((2, 3), 10, np.uint16))
-    write_stream_set(set_dir, [("dark-image-subtraction", "Transformer0", 0)])
+    write_manifest(
+        set_dir,
+        [("Frame0", 0)],
+        transformers=[("dark-image-subtraction", "Transformer0", 0)],
+    )
 
-    set_reader._load_dark_cached.cache_clear()
+    set_reader._load_correction_cached.cache_clear()
     for _ in range(3):
         read_set_frame(set_file, entry_no=1, frame_idx=0)
 
-    info = set_reader._load_dark_cached.cache_info()
+    info = set_reader._load_correction_cached.cache_info()
     assert info.misses == 1, f"expected one dark read, got {info.misses}"
     assert info.hits == 2, f"expected two cache hits, got {info.hits}"
 
@@ -711,28 +711,15 @@ def test_dark_image_is_cached_within_one_mtime(tmp_path, _clean_set_cache):
 # ---------------------------------------------------------------------------
 
 
-def test_two_transformers_for_one_stream_raises(tmp_path, _clean_set_cache):
-    """Last-one-wins would pick a dark image by XML order and subtract it silently."""
-    set_file, set_dir = _dark_set(tmp_path, "dupe")
-    for prefix in ("Transformer0", "Transformer1"):
-        write_dark_im7(set_dir / f"{prefix}-dark.im7", np.zeros((2, 3), np.uint16))
-    write_stream_set(
-        set_dir,
-        [
-            ("dark-image-subtraction", "Transformer0", 0),
-            ("dark-image-subtraction", "Transformer1", 0),
-        ],
-    )
-
-    with pytest.raises(ValueError, match="two transformers for frame stream 0"):
-        read_set_frame(set_file, entry_no=1, frame_idx=0)
-
-
 def test_non_numeric_start_frame_names_the_problem(tmp_path, _clean_set_cache):
     """A bare "invalid literal for int()" would be the only unnamed failure here."""
     set_file, set_dir = _dark_set(tmp_path, "badframe")
     write_dark_im7(set_dir / "Transformer0-dark.im7", np.zeros((2, 3), np.uint16))
-    write_stream_set(set_dir, [("dark-image-subtraction", "Transformer0", "first")])
+    write_manifest(
+        set_dir,
+        [("Frame0", 0)],
+        transformers=[("dark-image-subtraction", "Transformer0", "first")],
+    )
 
     with pytest.raises(ValueError, match="not a frame-stream number"):
         read_set_frame(set_file, entry_no=1, frame_idx=0)
@@ -833,8 +820,7 @@ def test_mono10p_is_now_decoded_end_to_end(tmp_path, _clean_set_cache):
 # A real five-camera PLIF+STB recording (E:\cavityim7data\set trial, 2026-08-24)
 # names its streams Camera1..Camera5 and its scales CameraScale1..5. The alk235
 # recording names them Frame0..9 / FrameScales0..9 -- through the SAME manifest
-# mechanism. The Frame{N} glob is only the fallback for a manifest that declares
-# no streams.
+# mechanism. The manifest is the only source: a recording without one is refused.
 
 
 def _camera_layout(tmp_path, name="cams", transformers=(), scale_readers=()):
@@ -865,7 +851,8 @@ def test_manifest_discovers_camera_prefixed_streams(tmp_path, _clean_set_cache):
 
     info = read_set_info(set_file)
     assert [f.frame_idx for f in info.frames] == [0, 1]
-    assert [(f.height, f.width) for f in info.frames] == [(3, 4), (5, 6)]
+    assert [f.shape for f in info.frames] == [(3, 4), (5, 6)]
+    assert [f.stored_shape for f in info.frames] == [(3, 4), (5, 6)]
     assert info.frames[1].data_path.name == "Camera2-1.ims"
 
     np.testing.assert_array_equal(
@@ -943,16 +930,30 @@ def test_manifest_non_numeric_start_frame_raises(tmp_path, _clean_set_cache):
         read_set_info(set_file)
 
 
-def test_transformer_only_manifest_still_uses_frame_glob(tmp_path, _clean_set_cache):
-    """A manifest that declares no FrameReader (our fixtures, older exports)
-    falls back to the Frame{N} convention -- the existing dark-image tests
-    depend on this, and so does every recording the glob served before."""
+def test_transformer_only_manifest_is_refused(tmp_path, _clean_set_cache):
+    """A manifest that declares no FrameReader names no stream. lvpyio opens no
+    image for it, and the Frame{N} file-name guess that used to read it is gone."""
     raw = np.array([[7, 8, 9]], dtype=np.uint16)
     set_file = build_set(tmp_path, "raw-16-bit", [[raw.tobytes()]], width=3, height=1)
-    write_manifest(tmp_path / "synthetic", frame_readers=[])
-    np.testing.assert_array_equal(
-        read_set_frame(set_file, 1, 0), raw.astype(np.float32)
+    write_manifest(
+        tmp_path / "synthetic",
+        frame_readers=[],
+        transformers=[("rotate-180", "Transformer0", 0)],
     )
+    with pytest.raises(ValueError, match="declares no FrameReader") as exc:
+        read_set_frame(set_file, 1, 0)
+    assert "Frame0" in str(exc.value)
+
+
+def test_frame_named_streams_without_manifest_are_refused(tmp_path, _clean_set_cache):
+    """Frame{N} file names are not read as streams when StreamSet.xml is absent."""
+    raw = np.array([[7, 8, 9]], dtype=np.uint16)
+    set_file = build_set(
+        tmp_path, "raw-16-bit", [[raw.tobytes()]], width=3, height=1, manifest=False
+    )
+    with pytest.raises(FileNotFoundError, match="StreamSet.xml is missing") as exc:
+        read_set_info(set_file)
+    assert "Frame0" in str(exc.value)
 
 
 def test_camera_prefix_without_manifest_is_named_not_misdiagnosed(
@@ -1001,52 +1002,6 @@ def test_rotate_180_needs_no_data_file(tmp_path, _clean_set_cache):
     )
     assert not (tmp_path / "cams" / "Transformer2-dark.im7").exists()
     read_set_info(set_file)
-
-
-def test_unimplemented_transformer_refuses_only_its_stream(tmp_path, _clean_set_cache):
-    """The real case: a PLIF camera with intensity-correction-1 alongside four
-    STB cameras with rotate-180. The container parses, the four read, the one
-    refuses by name when asked for."""
-    set_file, _cam1, cam2 = _camera_layout(
-        tmp_path,
-        transformers=[
-            ("intensity-correction-1", "Transformer1", 0),
-            ("rotate-180", "Transformer2", 1),
-        ],
-    )
-    info = read_set_info(set_file)
-    assert info.frames[0].transformer.id == "intensity-correction-1"
-
-    np.testing.assert_array_equal(
-        read_set_frame(set_file, 1, 1), cam2[::-1, ::-1].astype(np.float32)
-    )
-    with pytest.raises(ValueError) as exc:
-        read_set_frame(set_file, 1, 0)
-    message = str(exc.value)
-    assert "intensity-correction-1" in message
-    assert "Frame stream 0" in message
-    assert "Other streams of this recording are unaffected" in message
-
-
-def test_two_transformers_of_different_kinds_on_one_stream_raise(
-    tmp_path, _clean_set_cache
-):
-    """Dark subtraction and rotation do not commute; with no sample proving
-    the order, neither is guessed."""
-    set_file, _, _ = _camera_layout(tmp_path)
-    write_dark_im7(
-        tmp_path / "cams" / "Transformer1-dark.im7", np.zeros((5, 6), np.uint16)
-    )
-    write_manifest(
-        tmp_path / "cams",
-        frame_readers=[("Camera1", 0), ("Camera2", 1)],
-        transformers=[
-            ("dark-image-subtraction", "Transformer1", 1),
-            ("rotate-180", "Transformer2", 1),
-        ],
-    )
-    with pytest.raises(ValueError, match="'dark-image-subtraction' and 'rotate-180'"):
-        read_set_info(set_file)
 
 
 def test_pre_paired_read_refuses_mismatched_stream_shapes(tmp_path, _clean_set_cache):

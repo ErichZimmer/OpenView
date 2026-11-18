@@ -41,6 +41,7 @@ from pivtools_cli.processing.dask_pipeline import (
     create_filter_pipeline,
     scatter_immutable_data,
 )
+from pivtools_cli.processing.unique_scatter import scatter_unique
 from pivtools_core.config import Config
 from pivtools_core.image_handling.load_images import (
     compute_vector_mask,
@@ -270,7 +271,7 @@ def run_instantaneous_piv(
     # 2. Scatter immutable data once
     logger.info("Scattering immutable data...")
     scattered = scatter_immutable_data(
-        client, config, vector_masks, pixel_mask, ensemble=False
+        client, config, camera_num, vector_masks, pixel_mask, ensemble=False
     )
 
     # 3. Optional gain-normalisation pre-pass (two extra reads of the data)
@@ -301,7 +302,7 @@ def run_instantaneous_piv(
     logger.info(f"Processing {num_chunks} chunks using sliding window...")
 
     # Scatter config once to avoid repeated serialization
-    scattered_config = client.scatter(config, broadcast=True)
+    scattered_config = scatter_unique(client, config, broadcast=True)
 
     # Use sliding window: parallel I/O without loading all data into RAM
     all_saved_paths = process_instantaneous_sliding_window(
@@ -316,9 +317,11 @@ def run_instantaneous_piv(
 
     # Save coordinates
     logger.info("Saving coordinates...")
-    temp_correlator = make_correlator_backend(config)
+    temp_correlator = make_correlator_backend(config, camera=camera_num)
     correlator_cache = temp_correlator.get_cache_data()
-    scattered_cache_for_coords = client.scatter(correlator_cache, broadcast=True)
+    scattered_cache_for_coords = scatter_unique(
+        client, correlator_cache, broadcast=True
+    )
 
     coords_future = client.submit(
         save_coordinates_from_config_distributed,
@@ -426,7 +429,9 @@ def main():
                 vector_masks = None
                 if config.masking_enabled and mask is not None:
                     logger.info("Computing vector masks...")
-                    vector_masks = compute_vector_mask(mask, config, ensemble=False)
+                    vector_masks = compute_vector_mask(
+                        mask, config, camera_num, ensemble=False
+                    )
                     logger.info(f"  Vector masks: {len(vector_masks)} passes")
 
                 # Get output path
@@ -468,12 +473,9 @@ def main():
                 # Clean up (local only — gc.collect on workers historically caused SIGSEGV (attributed to FFTW plan teardown; FFTW is gone and this is unverified against the codelet engine — guard retained))
                 gc.collect()
 
-    except Exception as e:
-        import traceback
-
-        logger.error(f"Error: {e}")
-        traceback.print_exc()
-
+    # No except clause: a failure stops the remaining cameras and propagates
+    # after the cluster is shut down, so the process exits non-zero with the
+    # message (the CLI wrapper prints it; a direct script run shows the traceback).
     finally:
         # Clean shutdown - suppress noisy distributed logs during teardown
         import io as _io

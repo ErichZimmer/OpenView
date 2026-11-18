@@ -7,24 +7,55 @@ No dependency on lvpyio -- works on macOS, Linux, and Windows.
 Stream discovery: StreamSet.xml is the companion folder's manifest. Its
 ReaderInfo nodes name each stream's file prefix and bind it to a frame-stream
 index; the prefix is DaVis's choice per recording ("Frame0".. on one, "Camera1"..
-on another), not a format constant. A recording whose manifest declares no
-streams falls back to the ``Frame{N}`` naming convention.
+on another), not a format constant. A recording without a manifest, or whose
+manifest declares no FrameReader, is refused: streams are never guessed from
+file names.
+
+Frame span: a FrameReader may cover several frame positions of each image
+(``StartFrame..EndFrame``). DaVis 11.4 writes a double-frame camera's A and B
+into one stream file this way, with index header word 2 equal to the span. Each
+covered position becomes its own frame stream over the shared files: frame f of
+image b is entry ``b * span + (f - StartFrame)`` (container-unknowns REPORT §2
+H1-H3).
+
+Strictness: every .ims index header field and FrameReader attribute the reader
+does not decode must hold the value measured on real DaVis recordings, otherwise
+the recording is refused with the field and the value named (see
+``_IMS_REQUIRED_WORDS`` and ``_FRAME_READER_NAME``).
 
 Pixel encodings: DaVis names the encoding in {prefix}-decoder.xml. The full set of
-ids DaVis 10/11 can write is in ``_DECODER_BITS_PER_PX`` below; ``mono-10p``,
-``mono-12p``, ``raw-16-bit`` and ``raw-8-bit`` are decoded here. The rest are
-recognised and refused by name -- their bit or channel order cannot be derived
-from the id alone, and a wrong guess yields a plausible-looking wrong image rather
-than a failure.
+ids DaVis 10/11 can write is in ``_DECODER_BITS_PER_PX`` below, and the ones
+decoded here, each with its layout proven against lvpyio, are in
+``_IMPLEMENTED_DECODERS``. ``rgb-24`` is recognised and refused by name -- its
+channel order cannot be derived from the id, and a wrong guess yields a
+plausible-looking wrong image rather than a failure.
 
-Stream transformers: StreamSet.xml declares a post-decode correction per stream
-that DaVis applies on read (see ``_IMPLEMENTED_TRANSFORMERS``).
-``dark-image-subtraction`` is applied as ``clamp(decoded - Transformer{N}-dark.im7,
-0)`` and ``rotate-180`` as a 180-degree rotation. A declared correction this reader
-does not implement is refused when that stream is read -- not skipped, because
-skipping one returns different pixels from DaVis with nothing to indicate it
-happened, and not at parse time, because the other streams of the recording are
-still readable.
+Compression: the index header names a codec per stream (``_IMS_CODECS``). A
+"Zlib", "LZ4" or "IMX" entry is decompressed to the packed payload before the
+pixel decoder (``_decompress_entry``), and must come out at exactly the size the
+encoding and geometry need, or the read is refused naming the codec.
+
+Stream transformers: StreamSet.xml binds post-decode transformers to a stream,
+which DaVis applies on read (see ``_CORRECTIONS`` and ``_GEOMETRIES``). Three
+subtract a per-pixel image stored beside the streams, seven are file-less
+geometry. They run in LaVision's fixed order whatever order the manifest lists:
+the corrections in sensor coordinates, each clipped, then at most one geometry.
+Four geometries turn the frame by 90 degrees, so a stream's OUTPUT shape
+(``IMSFrameInfo.shape``) is (W, H) of what its index header stores
+(``IMSFrameInfo.stored_shape``); every caller sizes buffers and splits cameras on
+the output shape. Three known DaVis ids with no measured effect are refused when
+their stream is read, not skipped, because skipping one returns different pixels
+from DaVis with nothing to indicate it happened. An id outside the 13 DaVis ids
+leaves its stream's output shape unknown. With camera labels (below) it blocks
+only the camera that stream belongs to; without them the whole recording is
+refused at parse, because cameras are then mapped to streams by shape.
+
+Cameras: a DaVis 10.2+ recording names its cameras in its ``MetaData{N}.attr``
+files (``davis_attr``), which StreamSet.xml binds to frame streams by
+AttributeReader, never by ``N``. When they carry camera keys, the cameras are
+those labels (``SetInfo.cameras``): numbered by first frame stream, double frame
+(A/B) or single frame. Without labels, the stream shapes decide
+(:func:`valid_stream_splits`), and only a unique split is accepted.
 
 Also supports:
 - Pre-paired pairs: the camera's two streams (camera_streams) via read_set_pair
@@ -35,17 +66,32 @@ Also supports:
 Reference: LaVision DaVis 10.x .set recording format
 """
 
+import re
 import struct
 import threading
 import xml.etree.ElementTree as ET
+import zlib
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple, Union
+from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
+from .davis_attr import (
+    DOUBLE_FRAME_ROLES,
+    AttrBinding,
+    AttrFormatError,
+    LabelledCamera,
+    RecordingAttributes,
+    camera_list_text,
+    group_cameras,
+    read_recording_attributes,
+    streams_text,
+)
+from .davis_tokens import TokenStreamError, decode_imx_words
+from .im7_reader import lz4_block_decompress
 from .out_buffer import check_out
 
 # ---------------------------------------------------------------------------
@@ -55,71 +101,135 @@ from .out_buffer import check_out
 
 @dataclass
 class IMSIndexEntry:
-    """One entry in a Frame{N}-0.ims index file."""
+    """One 20-byte entry of a {prefix}-0.ims index: where one stored frame lives.
 
-    flag: int
+    ``file_no`` names the data file holding the bytes, ``{prefix}-{file_no}.ims``;
+    ``offset`` is absolute inside that file and ``size`` is the stored size.
+    """
+
+    file_no: int
     offset: int
     size: int
 
 
 @dataclass(frozen=True)
 class StreamTransformer:
-    """One post-decode correction StreamSet.xml binds to a frame stream.
+    """One post-decode transformer StreamSet.xml binds to a frame stream.
 
     ``id`` is the DaVis transformer id (``dark-image-subtraction``,
     ``rotate-180``, ...); ``label`` is what the DaVis UI shows for it, kept so a
-    refusal names what the user can see. ``dark_path`` is set only for
-    dark-image subtraction. A stream carries at most one transformer: the order
-    DaVis applies two in is not knowable from the manifest, so two are refused
-    at parse time rather than guessed.
+    refusal names what the user can see. ``correction_path`` is the per-pixel
+    image a correction subtracts (``{FilePrefix}-dark.im7``, ``-bgnd.im7``,
+    ``-scmos-1.im7``), None for geometry and for the refused ids.
     """
 
     id: str
     label: str
-    dark_path: Optional[Path] = None
+    correction_path: Optional[Path] = None
 
 
 @dataclass
 class IMSFrameInfo:
-    """Metadata for one frame stream (one {prefix}-0/1.ims pair plus sidecars)."""
+    """Metadata for one frame stream: one frame position of every image.
 
-    frame_idx: int  # 0-based frame-stream index
+    Usually one {prefix}-0/1.ims pair of its own. When the FrameReader spans
+    several frames, the streams of that span share the pair, and ``entries``
+    holds only this frame's entries, one per image.
+
+    ``stored_shape`` is the index header's (H, W), in sensor coordinates: what
+    the payload decodes to, before the transformers. Only the decoder and the
+    correction-image check use it. Everything that sizes a buffer, compares
+    cameras or reports a shape uses :attr:`shape`.
+    """
+
+    frame_idx: int  # 0-based frame-stream index (the frame position in an image)
     data_path: Path  # {prefix}-1.ims
     index_path: Path  # {prefix}-0.ims
     decoder: str  # DaVis encoding id, e.g. "mono-12p", "raw-16-bit"
-    width: int
-    height: int
+    codec: str  # compression name from the index header, one of _IMS_CODECS
+    stored_shape: Tuple[int, int]
     n_entries: int
     scale_slope: float
     scale_offset: float
     scale_unit: str
     entries: List[IMSIndexEntry]
-    transformer: Optional[StreamTransformer] = None
+    # In application order (LaVision's, not the manifest's); empty when none.
+    transformers: Tuple[StreamTransformer, ...] = ()
+    # From the recording's camera keys; all None when it carries none. Role is
+    # "A" or "B" for a double-frame camera's frames, "" for a single frame.
+    camera_label: Optional[str] = None
+    camera_id: Optional[str] = None
+    frame_role: Optional[str] = None
+    # Why this stream cannot be read, when its camera carries a transformer id
+    # PIVTOOLs does not know; None when it can.
+    blocked: Optional[str] = None
+
+    @property
+    def shape(self) -> Tuple[int, int]:
+        """(H, W) of the frame this stream reads as, after its transformers.
+
+        (W, H) of :attr:`stored_shape` when its geometry turns the frame by 90
+        degrees. A refused id is taken to keep the shape: all three are intensity
+        corrections by their DaVis label (HYPOTHESIS, rotation-shape REPORT §5).
+
+        Raises:
+            ValueError: If the stream carries a transformer id PIVTOOLs does not
+                know: its output shape is unknown (the message is
+                :attr:`blocked`).
+        """
+        if self.has_unknown_transformer:
+            raise ValueError(self.blocked)
+        h, w = self.stored_shape
+        for tf in self.transformers:
+            geometry = _GEOMETRIES.get(tf.id)
+            if geometry is not None and geometry.swaps_axes:
+                return (w, h)
+        return (h, w)
+
+    @property
+    def has_unknown_transformer(self) -> bool:
+        """True when a transformer id is outside the 13 DaVis ids PIVTOOLs knows."""
+        return any(tf.id not in _APPLICATION_RANK for tf in self.transformers)
 
 
 @dataclass(frozen=True)
 class _StreamSource:
-    """Where one frame stream's files live, before any of them is opened.
+    """Where one frame stream's entries live, as StreamSet.xml declares them.
 
-    ``declared`` is True when the manifest (StreamSet.xml) named this stream,
-    so a missing file is an incomplete copy and must raise. Under the glob
-    fallback the scale file is a naming convention and its absence is
-    legitimately "no scale".
+    One per frame position of an image buffer. A FrameReader spanning
+    ``StartFrame..EndFrame`` stores that many frames of each buffer in one
+    stream file (DaVis 11.4 writes A and B this way), so it yields one source
+    per frame, all naming the same files. ``frames_per_image`` is the span
+    ``EndFrame - StartFrame + 1``, which the index header's word 2 must equal;
+    frame ``index`` of buffer ``b`` is entry ``b * frames_per_image +
+    span_offset`` of the file (container-unknowns REPORT §2 H1).
     """
 
     index: int
     prefix: str
     scale_prefix: Optional[str]
-    declared: bool
+    frames_per_image: int
+    span_offset: int
 
 
 @dataclass
 class SetInfo:
-    """Parsed .set container metadata."""
+    """Parsed .set container metadata.
+
+    ``cameras`` are the recording's own camera labels, in frame-stream order;
+    None when it has no ``.attr`` files or none of them carries camera keys
+    (``attribute_files`` tells the two apart: the declared file names, empty
+    when there are none). ``suspicious_flag`` is the text of DaVis's
+    ``SetIsSuspicious`` key in the ``.set`` file, None when absent; DaVis does
+    not record why it sets it.
+    """
 
     set_dir: Path
     frames: List[IMSFrameInfo]
     n_entries: int  # number of images (same across all frames)
+    cameras: Optional[Tuple[LabelledCamera, ...]]
+    attribute_files: Tuple[str, ...]
+    suspicious_flag: Optional[str]
     # Resolved stream->camera split per camera count, filled lazily by
     # set_camera_streams. Lives on SetInfo so it dies with the cache entry.
     stream_splits: Dict[int, Tuple[Tuple[int, ...], ...]] = field(
@@ -132,44 +242,176 @@ class SetInfo:
 # ---------------------------------------------------------------------------
 
 
-def _parse_ims_index(index_path: Path) -> Tuple[int, int, int, List[IMSIndexEntry]]:
-    """Parse a Frame{N}-0.ims index file.
+# The {prefix}-0.ims index, as measured on 20 real stream files over four drives
+# and against lvpyio 1.3.1 (container-unknowns REPORT, §1 and §2 A, B, C, G). A
+# 1024-byte header of int32 words, then one 20-byte entry per stored frame.
+_IMS_HEADER_BYTES = 1024
+# File number, offset inside that file, stored size. The file number is unsigned:
+# lvpyio names the data file with it as an unsigned decimal (-1 opens
+# "-4294967295.ims"), so a refusal names the same file lvpyio would open.
+_IMS_ENTRY = struct.Struct("<Iqq")
+_IMS_WORD = struct.Struct("<i")
+_IMS_WORD_FRAMES_PER_IMAGE = 2
+_IMS_WORD_WIDTH = 3
+_IMS_WORD_HEIGHT = 4
 
-    Returns (width, height, n_entries, entries).
+# Header words that hold one measured value on every real stream file. lvpyio
+# reads other values differently or not at all, and no real file shows what
+# DaVis means by them, so any other value is refused with the field named.
+# word: (field name, accepted values, what another value does).
+_IMS_REQUIRED_WORDS: Dict[int, Tuple[str, Tuple[int, ...], str]] = {
+    0: (
+        "version",
+        (1,),
+        "Every real stream file is version 1. lvpyio also opens 2 and 3, but "
+        "what they change is unknown",
+    ),
+    1: (
+        "image count",
+        (0,),
+        "0 means the count is the number of index entries. lvpyio takes a "
+        "non-zero value as the count even where it hides entries or invents "
+        "ones that do not exist",
+    ),
+    5: (
+        "bits per decoded pixel",
+        (16,),
+        "At 8 lvpyio keeps only the low byte of each decoded pixel, and it opens "
+        "no other value",
+    ),
+    # Only the measured 0 (Morgan, 17 Nov 2026). lvpyio reads 1 as it reads 0
+    # and fails or crashes on 2 or more, but no real file has 1 or more
+    # (HYPOTHESIS: planes per frame).
+    14: (
+        "planes per frame",
+        (0,),
+        "0 is the only value any real recording has; lvpyio fails or crashes "
+        "on 2 or more",
+    ),
+    15: (
+        "sample type",
+        (0,),
+        "0 is uint16 counts; 1 and 2 are float32 and float64 streams",
+    ),
+}
+
+# Bytes 24..55 name the compression, NUL-terminated and case-sensitive. These
+# are the names lvpyio opens a stream for; it opens none for "zlib", "ZLIB",
+# "lz4" or "None" (container-unknowns REPORT §2 C1). Real files carry "" or
+# "IMX".
+_IMS_CODEC_FIELD = slice(24, 56)
+_IMS_CODECS = ("", "Uncompressed", "Zlib", "LZ4", "IMX")
+_IMS_UNCOMPRESSED_CODECS = ("", "Uncompressed")
+
+# The data file every entry must name. A stream split across {prefix}-1.ims,
+# {prefix}-2.ims, ... is read by lvpyio entry by entry, but no real recording on
+# any surveyed drive has one, and when DaVis writes one is unknown. File number 0
+# names the index itself and is invalid in lvpyio too.
+_IMS_DATA_FILE_NO = 1
+
+
+def _ims_header_word(data: bytes, word: int) -> int:
+    """int32 header word ``word`` of an index file's bytes."""
+    return _IMS_WORD.unpack_from(data, 4 * word)[0]
+
+
+def _parse_ims_index(
+    index_path: Path, prefix: str, frames_per_image: int
+) -> Tuple[int, int, str, List[IMSIndexEntry]]:
+    """Parse a {prefix}-0.ims index file, refusing every unmeasured layout.
+
+    Args:
+        index_path: the index file.
+        prefix: the stream's file prefix, used to name data files in refusals.
+        frames_per_image: the span of the stream's FrameReader
+            (``EndFrame - StartFrame + 1``), which header word 2 must equal.
+
+    Returns:
+        (width, height, codec, entries).
+
+    Raises:
+        ValueError: If the file is shorter than the header, holds a partial
+            entry, holds an entry count that is not a whole number of images at
+            ``frames_per_image`` frames each, or any checked header word or entry
+            field differs from the measured value. The message names the field
+            and the value found.
     """
     data = index_path.read_bytes()
-    if len(data) < 256:
-        raise IOError(f"Index file too small: {index_path}")
+    where = f"{index_path.name} in {index_path.parent}"
+    if len(data) < _IMS_HEADER_BYTES:
+        raise ValueError(
+            f"{where} is {len(data)} bytes, shorter than the {_IMS_HEADER_BYTES}-"
+            f"byte .ims index header. The index is truncated."
+        )
+    stray = (len(data) - _IMS_HEADER_BYTES) % _IMS_ENTRY.size
+    if stray:
+        raise ValueError(
+            f"{where} holds {stray} bytes after the last whole {_IMS_ENTRY.size}-"
+            f"byte entry. The index is truncated or not an .ims index."
+        )
 
-    # Header: 256 bytes. Dimensions at int32 offsets [3] and [4] (12 and 16).
-    width = struct.unpack_from("<i", data, 12)[0]
-    height = struct.unpack_from("<i", data, 16)[0]
+    for word, (name, accepted, why) in _IMS_REQUIRED_WORDS.items():
+        value = _ims_header_word(data, word)
+        if value not in accepted:
+            shown = " or ".join(str(a) for a in accepted)
+            raise ValueError(
+                f"{where}: index header word {word} ({name}) is {value}; PIVTOOLs "
+                f"reads only {shown}. {why}. No real recording seen so far "
+                f"carries this value, so it is refused rather than read on a guess."
+            )
 
-    # Entry table starts at offset 1024 (256 header + 768 padding)
-    # Each entry: int32 flag + int64 offset + int64 size = 20 bytes
-    table_offset = 256 + 768
-    if table_offset > len(data):
-        # Smaller padding — try to detect
-        table_offset = 256
-        # Scan for first non-zero after header
-        for i in range(256, len(data), 4):
-            val = struct.unpack_from("<i", data, i)[0]
-            if val != 0:
-                table_offset = i
-                break
+    word2 = _ims_header_word(data, _IMS_WORD_FRAMES_PER_IMAGE)
+    if word2 != frames_per_image:
+        raise ValueError(
+            f"{where}: index header word {_IMS_WORD_FRAMES_PER_IMAGE} (frames per "
+            f"image) is {word2}, but StreamSet.xml's FrameReader '{prefix}' spans "
+            f"{frames_per_image} frame(s) (EndFrame - StartFrame + 1). The two must "
+            f"agree; lvpyio refuses this as a frame count inconsistency."
+        )
 
-    entry_size = 20
-    n_entries = (len(data) - table_offset) // entry_size
+    codec_bytes = data[_IMS_CODEC_FIELD].split(b"\0", 1)[0]
+    codec = codec_bytes.decode("latin-1")
+    if codec not in _IMS_CODECS:
+        raise ValueError(
+            f"{where}: compression name at index header bytes 24..55 is "
+            f"{codec!r}; PIVTOOLs knows {', '.join(repr(c) for c in _IMS_CODECS)}. "
+            f"Names are case-sensitive, and lvpyio opens no stream for any other."
+        )
 
-    entries = []
-    for i in range(n_entries):
-        pos = table_offset + i * entry_size
-        flag = struct.unpack_from("<i", data, pos)[0]
-        offset = struct.unpack_from("<q", data, pos + 4)[0]
-        size = struct.unpack_from("<q", data, pos + 12)[0]
-        entries.append(IMSIndexEntry(flag=flag, offset=offset, size=size))
+    width = _ims_header_word(data, _IMS_WORD_WIDTH)
+    height = _ims_header_word(data, _IMS_WORD_HEIGHT)
 
-    return width, height, n_entries, entries
+    entries = [
+        IMSIndexEntry(*_IMS_ENTRY.unpack_from(data, pos))
+        for pos in range(_IMS_HEADER_BYTES, len(data), _IMS_ENTRY.size)
+    ]
+    partial = len(entries) % frames_per_image
+    if partial:
+        # lvpyio counts ceil(entries / word2) images and fails reading the last
+        # one (container-unknowns REPORT §2 A1); no real file has a partial image.
+        raise ValueError(
+            f"{where} holds {len(entries)} entries at {frames_per_image} frames per "
+            f"image (header word {_IMS_WORD_FRAMES_PER_IMAGE}), so its last image "
+            f"has only {partial} of its {frames_per_image} frames. The recording "
+            f"is truncated; lvpyio fails reading that image too."
+        )
+    foreign = [k for k, e in enumerate(entries) if e.file_no != _IMS_DATA_FILE_NO]
+    if foreign:
+        k = foreign[0]
+        file_no = entries[k].file_no
+        what = (
+            "file number 0, which names the index itself and is invalid"
+            if file_no == 0
+            else f"data file {prefix}-{file_no}.ims"
+        )
+        raise ValueError(
+            f"{where}: entry {k} ({len(foreign)} of {len(entries)} entries in all) "
+            f"names {what}, not {prefix}-{_IMS_DATA_FILE_NO}.ims. PIVTOOLs reads "
+            f"only streams held in one data file: no real recording seen so far is "
+            f"split across files, so this layout is refused rather than read on a "
+            f"guess."
+        )
+    return width, height, codec, entries
 
 
 # ---------------------------------------------------------------------------
@@ -192,8 +434,8 @@ def _read_decoder(decoder_path: Path) -> str:
     if not decoder_path.exists():
         raise FileNotFoundError(
             f"Pixel encoding unknown: {decoder_path.name} is missing from "
-            f"{decoder_path.parent}. DaVis writes this file with every recording. "
-            f"The encoding will not be guessed -- re-export the recording from DaVis."
+            f"{decoder_path.parent}. The encoding will not be guessed -- copy the "
+            f"complete companion folder, or re-export the recording from DaVis."
         )
     root = ET.parse(decoder_path).getroot()
     id_elem = root.find("id")
@@ -209,20 +451,160 @@ def _read_decoder(decoder_path: Path) -> str:
 # Stream transformers (post-decode corrections declared by DaVis)
 # ---------------------------------------------------------------------------
 
-# Transformer IDs this reader implements. StreamSet.xml declares a per-stream
-# post-decode correction; DaVis (and lvpyio) apply it on read, so skipping one
-# silently returns different pixels from what DaVis shows for the same
-# recording. An undeclared correction is normal -- plenty of recordings have
-# none -- but a DECLARED one we do not implement must fail loudly rather than be
-# dropped. The refusal is per STREAM, at read time (see _read_single_image): a
-# five-camera recording whose PLIF camera carries an unimplemented correction
-# still serves its four other cameras.
+# StreamSet.xml binds post-decode transformers to a stream; DaVis (and lvpyio)
+# apply them on read, so skipping one silently returns different pixels from
+# what DaVis shows for the same recording. The 13 ids are LaVision's list, read
+# from lvpyio 1.3.1's Core.DataObjects.dll string table (01-lavision-readers
+# REPORT B3). The effect of the 10 below was measured against lvpyio on
+# synthetic non-square recordings (y down, row 0 at top; rotation-shape REPORT
+# A1, A3); dark-image-subtraction, rotate-180 and intensity-correction-1 also on
+# real recordings. Every transformer declares a FilePrefix, but only the three
+# corrections own a file.
 #
-# rotate-180 declares a FilePrefix like every transformer but has no data file
-# on disk; only dark-image-subtraction owns a Transformer{N}-dark.im7. Both
-# verified bit-exact against lvpyio 1.3.1 on real recordings (2026-08-22 and
-# 2026-08-24).
-_IMPLEMENTED_TRANSFORMERS = ("dark-image-subtraction", "rotate-180")
+# Order (transformer-order REPORT R1, 324 of 324 synthetic cases and two real
+# recordings): lvpyio applies the corrections in the order of _CORRECTIONS, in
+# sensor coordinates, each clipped to its own range, then one geometry, whatever
+# order the manifest lists them in and whatever their FilePrefixes. Dark and
+# background commute (both orders are max(x - D - B, 0)).
+
+# lvpyio adds this pedestal inside intensity-correction-1. Measured constant:
+# lvpyio - raw + T == 300 on 44 M real NTNU pixels, and still 300 with T constant
+# 1000, so it is not derived from T (01-lavision-readers REPORT B1).
+_SCMOS1_PEDESTAL = 300
+_UINT16_MAX = np.iinfo(np.uint16).max
+
+
+def _subtract_clamped(img: np.ndarray, corr: np.ndarray) -> np.ndarray:
+    """``max(img - corr, 0)`` in uint16: one full-frame allocation plus the mask.
+
+    The uint16 subtraction wraps where corr > img, and the wrapped elements are
+    then zeroed in place, so they never reach the output. Not done in place on
+    ``img``: _decode_raw16 returns a read-only np.frombuffer view. Measured on a
+    5312x3528 frame: 23.0 ms here, against 42.9 ms for
+    ``np.where(img > corr, img - corr, 0).astype(np.uint16)``, which allocates four
+    full-frame temporaries.
+    """
+    out = img - corr
+    np.copyto(out, 0, where=img <= corr)
+    return out
+
+
+def _scmos_correction_1(img: np.ndarray, corr: np.ndarray) -> np.ndarray:
+    """``clip(img - corr + 300, 0, 65535)``, DaVis 'Intensity correction 1'.
+
+    int32 holds every intermediate: -65535 + 300 at the low end, 65535 + 300 at
+    the high end. Both clips are observable: a raw pixel near saturation with
+    corr below 300 exceeds 65535 (transformer-order REPORT Q3).
+    """
+    out = img.astype(np.int32)
+    out -= corr
+    out += _SCMOS1_PEDESTAL
+    np.clip(out, 0, _UINT16_MAX, out=out)
+    return out.astype(np.uint16)
+
+
+@dataclass(frozen=True)
+class _Correction:
+    """A transformer that subtracts the per-pixel image ``{FilePrefix}-{suffix}.im7``.
+
+    ``apply(decoded, image)`` takes both in sensor shape, uint16, and returns a
+    new uint16 frame clipped to that step's range.
+    """
+
+    label: str
+    suffix: str
+    apply: Callable[[np.ndarray, np.ndarray], np.ndarray]
+
+
+@dataclass(frozen=True)
+class _Geometry:
+    """A file-less transformer that rearranges pixels.
+
+    ``swaps_axes`` is True when the output is (W, H) of the stored frame. ``apply``
+    returns a negative-stride or transposed VIEW, deliberately not materialised:
+    every caller performs exactly one widening copy into float32 (``result[i] =
+    img``, ``np.copyto``, ``astype``), which absorbs any source strides, and none
+    of them mutates the returned array. On a 90 degree view that copy costs about
+    68 ms more per 5120 x 5120 frame (rotation-shape REPORT C6), accepted for now.
+    """
+
+    label: str
+    swaps_axes: bool
+    apply: Callable[[np.ndarray], np.ndarray]
+
+
+# In LaVision's application order.
+_CORRECTIONS: Dict[str, _Correction] = {
+    "intensity-correction-1": _Correction(
+        "Intensity correction 1", "scmos-1", _scmos_correction_1
+    ),
+    "dark-image-subtraction": _Correction(
+        "Dark image subtraction", "dark", _subtract_clamped
+    ),
+    "background-subtraction": _Correction(
+        "Background subtraction", "bgnd", _subtract_clamped
+    ),
+}
+
+_GEOMETRIES: Dict[str, _Geometry] = {
+    "rotate-180": _Geometry("Rotation by 180", False, lambda x: x[::-1, ::-1]),
+    "vertical-mirror": _Geometry("Vertical mirroring", False, lambda x: x[::-1]),
+    # LaVision's spelling. The correctly spelled id opens 0 buffers in lvpyio,
+    # so it is not matched (it is refused as unknown).
+    "horinzontal-mirror": _Geometry(
+        "Horizontal mirroring", False, lambda x: x[:, ::-1]
+    ),
+    # Clockwise as displayed with row 0 at the top: the sensor's top-left pixel
+    # lands top-right. np.rot90 turns from axis 0 towards axis 1, so k=-1.
+    "rotate-cw-90": _Geometry(
+        "Clockwise rotation by 90", True, lambda x: np.rot90(x, -1)
+    ),
+    "rotate-ccw-90": _Geometry(
+        "Counterclockwise rotation by 90", True, lambda x: np.rot90(x, 1)
+    ),
+    # Rotate, then mirror rows: np.rot90(x, -1)[::-1] is x[::-1, ::-1].T.
+    "rotate-cw-90-vertical-mirror": _Geometry(
+        "Clockwise rotation by 90 plus vertical mirror",
+        True,
+        lambda x: x[::-1, ::-1].T,
+    ),
+    # np.rot90(x, 1)[::-1] is x.T.
+    "rotate-ccw-90-vertical-mirror": _Geometry(
+        "Counterclockwise rotation by 90 plus vertical mirror", True, lambda x: x.T
+    ),
+}
+
+# Known DaVis ids that are refused when their stream is read: lvpyio opens no
+# synthetic recording carrying any of them, so there is no oracle for their
+# effect (01-lavision-readers REPORT B3). id: DaVis label.
+_REFUSED_TRANSFORMERS: Dict[str, str] = {
+    "white-image-correction": "White image subtraction",
+    "add-offset": "Add fixed pixel offset",
+    "image-intensity-correction-2": "Intensity correction 2",
+}
+
+
+def stream_geometry(frame: "IMSFrameInfo") -> Optional[str]:
+    """The id of the geometry transformer a stream carries, None when it has none.
+
+    A stream carries at most one (parse refuses two). Used to prove that two
+    recordings were turned the same way, e.g. a calibration and its PIV source.
+
+    Raises:
+        ValueError: The stream carries a transformer id PIVTOOLs does not know,
+            so its geometry is unknown (the message is :attr:`IMSFrameInfo.blocked`).
+    """
+    if frame.has_unknown_transformer:
+        raise ValueError(frame.blocked)
+    return next((tf.id for tf in frame.transformers if tf.id in _GEOMETRIES), None)
+
+
+# Position of each id in a stream's transformer tuple. A refused id never runs
+# (its stream is refused first), so where it sits among the others is moot.
+_APPLICATION_RANK: Dict[str, int] = {
+    tid: rank
+    for rank, tid in enumerate([*_CORRECTIONS, *_REFUSED_TRANSFORMERS, *_GEOMETRIES])
+}
 
 # StreamSet.xml is the companion folder's manifest. ReaderInfo nodes declare each
 # file group by FilePrefix and bind it to a frame-stream index through
@@ -231,6 +613,27 @@ _IMPLEMENTED_TRANSFORMERS = ("dark-image-subtraction", "rotate-180")
 # scale files "FrameScales0" / "CameraScale1" respectively. Both seen in the wild.
 _FRAME_READER_TYPE = "Core.Set.Recording.FrameReader"
 _SCALE_READER_TYPE = "Core.Set.Recording.ScaleReader"
+_ATTRIBUTE_READER_TYPE = "Core.Set.Recording.AttributeReader"
+# The Name of every AttributeReader on the surveyed drives (DaVis 10.2.1, 11.4).
+_ATTRIBUTE_READER_NAME = "AttributeReaderV1"
+
+# The FrameReader Name of a LaVision image stream. lvpyio opens a stream only
+# for this exact, case-sensitive Name, and one foreign Name makes it open no
+# image of the whole recording (container-unknowns REPORT §2 F1, F2). It is the
+# only Name on the 24 FrameReaders of the surveyed drives.
+_FRAME_READER_NAME = "Images_16bit_8Bit"
+
+# Reader Names LaVision's own DLL describes for other vendors' camera formats
+# ("Reads Photron MRAW format.", "Reads Vision Research cine X format."), matched
+# case-insensitively so the refusal names the vendor. Upper-cased Name: advice.
+_FOREIGN_READER_NAMES = {
+    "MRAW": "a Photron MRAW stream. PIVTOOLs has no Photron reader; export the "
+    "images from DaVis as .im7 or TIFF",
+    "GRAW": "a Photron GRAW stream. PIVTOOLs has no Photron reader; export the "
+    "images from DaVis as .im7 or TIFF",
+    "CINE": "a Vision Research cine stream. PIVTOOLs reads the original .cine "
+    "file directly with image_type 'cine'",
+}
 
 
 def _load_stream_manifest(set_dir: Path) -> Optional[ET.Element]:
@@ -250,12 +653,17 @@ def _load_stream_manifest(set_dir: Path) -> Optional[ET.Element]:
         raise ValueError(f"{stream_xml} is not valid XML: {exc}") from exc
 
 
-def _bound_stream_index(node: ET.Element, what: str, stream_xml: Path) -> int:
-    """The frame-stream index a ReaderInfo/Transformer node is bound to.
+def _bound_frame_span(node: ET.Element, what: str, stream_xml: Path) -> Tuple[int, int]:
+    """The frame positions ``(StartFrame, EndFrame)`` a manifest node is bound to.
 
-    ``ContentPurpose StartFrame``/``EndFrame`` carry the binding. Every failure
+    ``ContentPurpose StartFrame``/``EndFrame`` are frame positions within one
+    image buffer, inclusive (container-unknowns REPORT §2 H1). Every failure
     names the node and what is wrong: a bare ``int()`` traceback or a KeyError
     would be the only unnamed failure in this module.
+
+    Raises:
+        ValueError: If ContentPurpose or either bound is missing, a bound is not
+            an integer, StartFrame is negative, or EndFrame precedes StartFrame.
     """
     purpose = node.find("ContentPurpose")
     if purpose is None:
@@ -263,40 +671,103 @@ def _bound_stream_index(node: ET.Element, what: str, stream_xml: Path) -> int:
             f"{what} in {stream_xml} has no ContentPurpose, so the frame stream "
             f"it applies to is unknown."
         )
-    start, end = purpose.get("StartFrame"), purpose.get("EndFrame")
-    if start is None or end is None or start != end:
+    bounds = []
+    for attr in ("StartFrame", "EndFrame"):
+        text = purpose.get(attr)
+        try:
+            bounds.append(int(text))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"{what} in {stream_xml} gives {attr} '{text}', which is not a "
+                f"frame-stream number. The stream it belongs to cannot be "
+                f"determined."
+            ) from exc
+    start, end = bounds
+    if start < 0:
         raise ValueError(
-            f"{what} in {stream_xml} spans frames {start}..{end}. This reader only "
-            f"handles a declaration bound to exactly one frame stream."
+            f"{what} in {stream_xml} gives StartFrame {start}; frame positions "
+            f"start at 0."
         )
-    try:
-        index = int(start)
-    except ValueError as exc:
+    if end < start:
         raise ValueError(
-            f"{what} in {stream_xml} gives StartFrame '{start}', which is not a "
-            f"frame-stream number. The stream it belongs to cannot be determined."
-        ) from exc
-    if index < 0:
-        raise ValueError(
-            f"{what} in {stream_xml} gives StartFrame {index}; frame-stream "
-            f"indices start at 0."
+            f"{what} in {stream_xml} spans frames {start}..{end}: EndFrame comes "
+            f"before StartFrame, so it is bound to no frame."
         )
-    return index
+    return start, end
+
+
+def _bound_stream_index(node: ET.Element, what: str, stream_xml: Path) -> int:
+    """The one frame position a ScaleReader or Transformer node is bound to.
+
+    Only a FrameReader may span several frames (:func:`_streams_from_manifest`).
+    Every scale file and correction on the surveyed drives is bound to exactly
+    one frame, including on the two recordings whose FrameReader spans A and B
+    (each frame gets its own ``CameraScale{N}``), so a span here is refused
+    rather than applied to every frame on a guess.
+
+    Raises:
+        ValueError: Via :func:`_bound_frame_span`, or if the node spans frames.
+    """
+    start, end = _bound_frame_span(node, what, stream_xml)
+    if start != end:
+        raise ValueError(
+            f"{what} in {stream_xml} spans frames {start}..{end}. Scale files and "
+            f"corrections are read only when bound to exactly one frame; no real "
+            f"recording seen so far binds one to several."
+        )
+    return start
+
+
+def _check_frame_reader(node: ET.Element, prefix: str, stream_xml: Path) -> None:
+    """Refuse a FrameReader that is not a LaVision image stream bound to frames.
+
+    Raises:
+        ValueError: If its Name is a foreign camera format, is any Name other
+            than ``Images_16bit_8Bit``, or its ContentPurpose is not
+            ``IsAssociatedToFrames="true"``. The message names the attribute and
+            its value.
+    """
+    name = node.get("Name") or ""
+    what = f"FrameReader '{prefix}' in {stream_xml}"
+    if name.upper() in _FOREIGN_READER_NAMES:
+        raise ValueError(
+            f"{what} has Name '{name}': {_FOREIGN_READER_NAMES[name.upper()]}."
+        )
+    if name != _FRAME_READER_NAME:
+        raise ValueError(
+            f"{what} has Name '{name}'. The only LaVision image-stream reader is "
+            f"'{_FRAME_READER_NAME}' (case-sensitive); lvpyio opens no image of "
+            f"this recording either."
+        )
+    purpose = node.find("ContentPurpose")
+    associated = None if purpose is None else purpose.get("IsAssociatedToFrames")
+    if purpose is not None and associated != "true":
+        raise ValueError(
+            f"{what}: ContentPurpose IsAssociatedToFrames is '{associated}'; "
+            f"an image stream is associated to frames ('true'). lvpyio refuses "
+            f"this recording too."
+        )
 
 
 def _streams_from_manifest(
     set_dir: Path, root: ET.Element, frame_readers: List[ET.Element]
 ) -> List[_StreamSource]:
-    """Frame streams as StreamSet.xml declares them, sorted by stream index.
+    """Frame streams as StreamSet.xml declares them, one per frame position.
+
+    A FrameReader spanning ``StartFrame..EndFrame`` is expanded into one stream
+    per frame it covers. The order is the frame position, not the declaration
+    order: lvpyio returns a reader declared second but bound to frame 0 as the
+    buffer's first frame (container-unknowns REPORT §2 H1).
 
     Callers locate a camera's stream positionally (``(camera-1) * fpc``), so the
-    declared indices must be exactly 0..N-1. DaVis can write a sparse manifest
+    covered positions must be exactly 0..N-1. DaVis can write a sparse manifest
     when a camera is disabled mid-session; a gap is reported as such rather than
     silently shifting every camera after it.
     """
     stream_xml = set_dir / "StreamSet.xml"
 
-    prefixes: dict = {}
+    # frame position -> (prefix, StartFrame, EndFrame) of the reader covering it
+    owners: Dict[int, Tuple[str, int, int]] = {}
     for node in frame_readers:
         prefix = (node.get("FilePrefix") or "").strip()
         if not prefix:
@@ -304,16 +775,18 @@ def _streams_from_manifest(
                 f"A FrameReader in {stream_xml} has no FilePrefix, so its stream "
                 f"files cannot be located."
             )
-        index = _bound_stream_index(node, f"FrameReader '{prefix}'", stream_xml)
-        if index in prefixes:
-            raise ValueError(
-                f"{stream_xml.name} binds two image streams to frame stream "
-                f"{index}: '{prefixes[index]}' and '{prefix}'. Camera mapping is "
-                f"positional, so this cannot be resolved by choosing one."
-            )
-        prefixes[index] = prefix
+        _check_frame_reader(node, prefix, stream_xml)
+        start, end = _bound_frame_span(node, f"FrameReader '{prefix}'", stream_xml)
+        for frame in range(start, end + 1):
+            if frame in owners:
+                raise ValueError(
+                    f"{stream_xml.name} binds two image streams to frame stream "
+                    f"{frame}: '{owners[frame][0]}' and '{prefix}'. Camera mapping "
+                    f"is positional, so this cannot be resolved by choosing one."
+                )
+            owners[frame] = (prefix, start, end)
 
-    found = sorted(prefixes)
+    found = sorted(owners)
     if found != list(range(len(found))):
         raise ValueError(
             f"{stream_xml.name} declares StartFrames {found}; expected contiguous "
@@ -339,124 +812,263 @@ def _streams_from_manifest(
     return [
         _StreamSource(
             index=i,
-            prefix=prefixes[i],
+            prefix=owners[i][0],
             scale_prefix=scale_prefixes.get(i),
-            declared=True,
+            frames_per_image=owners[i][2] - owners[i][1] + 1,
+            span_offset=i - owners[i][1],
         )
         for i in found
     ]
 
 
-def _streams_from_glob(set_dir: Path) -> List[_StreamSource]:
-    """Frame streams by the ``Frame{N}`` naming convention, for recordings whose
-    StreamSet.xml is absent or declares no FrameReader (older exports)."""
-    indices = sorted(
-        {
-            int(p.name.split("-")[0].replace("Frame", ""))
-            for p in set_dir.glob("Frame*-1.ims")
-        }
-    )
-    return [
-        _StreamSource(
-            index=i, prefix=f"Frame{i}", scale_prefix=f"FrameScales{i}", declared=False
-        )
-        for i in indices
-    ]
-
-
 def _discover_streams(set_dir: Path, root: Optional[ET.Element]) -> List[_StreamSource]:
-    """Locate every frame stream: manifest-driven when the manifest names any,
-    ``Frame{N}`` glob otherwise.
+    """Every frame stream StreamSet.xml declares, in stream order.
 
-    The condition is "declares at least one FrameReader", not "StreamSet.xml
-    exists": a manifest that only declares transformers (our synthetic fixtures,
-    and possibly older DaVis exports) still relies on the naming convention.
+    The manifest is the only source. Guessing streams from ``Frame{N}`` file
+    names read sets lvpyio opens no image for (a foreign FrameReader type, or no
+    FrameReader at all), and named nothing when the guess was wrong.
+
+    Raises:
+        FileNotFoundError, ValueError: Via :func:`_raise_no_streams` when the
+            recording has no StreamSet.xml or it declares no FrameReader.
     """
-    if root is not None:
-        frame_readers = [
-            n for n in root.iter("ReaderInfo") if n.get("Type") == _FRAME_READER_TYPE
-        ]
-        if frame_readers:
-            return _streams_from_manifest(set_dir, root, frame_readers)
-    return _streams_from_glob(set_dir)
+    frame_readers = (
+        []
+        if root is None
+        else [n for n in root.iter("ReaderInfo") if n.get("Type") == _FRAME_READER_TYPE]
+    )
+    if not frame_readers:
+        _raise_no_streams(set_dir, manifest_present=root is not None)
+    return _streams_from_manifest(set_dir, root, frame_readers)
 
 
-def _parse_stream_transformers(set_dir: Path, root: Optional[ET.Element]) -> dict:
-    """Map frame-stream index to its declared correction, from StreamSet.xml.
+def _attribute_bindings(set_dir: Path, root: Optional[ET.Element]) -> List[AttrBinding]:
+    """The AttributeReaders StreamSet.xml declares, in declaration order.
 
-    DaVis declares each correction as, for example::
+    Each binds ``{FilePrefix}.attr`` to one frame stream (``IsAssociatedToFrames
+    ="true"``, ``StartFrame == EndFrame``) or to the whole image buffer
+    (``IsAssociatedToFrames="false" IsAssociatedToEntireImage="true"``), the
+    only two forms on the surveyed drives (attr-decode REPORT A4).
+
+    Raises:
+        AttrFormatError: If a reader has no FilePrefix, a Name other than
+            ``AttributeReaderV1`` (the only one seen; another may be another
+            layout), or any other binding.
+        ValueError: Via :func:`_bound_stream_index` for a frame binding with a
+            bad or spanning frame range.
+    """
+    if root is None:
+        return []
+    stream_xml = set_dir / "StreamSet.xml"
+    bindings: List[AttrBinding] = []
+    for node in root.iter("ReaderInfo"):
+        if node.get("Type") != _ATTRIBUTE_READER_TYPE:
+            continue
+        prefix = (node.get("FilePrefix") or "").strip()
+        what = f"AttributeReader '{prefix}'"
+        if not prefix:
+            raise AttrFormatError(
+                f"An AttributeReader in {stream_xml} has no FilePrefix, so its "
+                f".attr file cannot be located."
+            )
+        name = node.get("Name") or ""
+        if name != _ATTRIBUTE_READER_NAME:
+            raise AttrFormatError(
+                f"{what} in {stream_xml} has Name '{name}'. The only attribute "
+                f"reader seen is '{_ATTRIBUTE_READER_NAME}'; another may be another "
+                f"file layout, so it is refused rather than parsed on a guess."
+            )
+        purpose = node.find("ContentPurpose")
+        frames = None if purpose is None else purpose.get("IsAssociatedToFrames")
+        entire = None if purpose is None else purpose.get("IsAssociatedToEntireImage")
+        if (frames, entire) == ("false", "true"):
+            bindings.append(AttrBinding(prefix, None))
+        elif (frames, entire) == ("true", "false"):
+            bindings.append(
+                AttrBinding(prefix, _bound_stream_index(node, what, stream_xml))
+            )
+        else:
+            raise AttrFormatError(
+                f"{what} in {stream_xml} has IsAssociatedToFrames={frames!r} and "
+                f"IsAssociatedToEntireImage={entire!r}. Only a file bound to one "
+                f"frame or to the whole image is understood."
+            )
+    return bindings
+
+
+# ``SetIsSuspicious = 1;`` in the .set file's "#GROUP Sets" block. DaVis 11.4
+# wrote it on both recordings whose camera keys stop partway through, one of
+# which holds blank images 501..899 (attr-decode REPORT C3, D5 ledger note).
+_SUSPICIOUS_LINE = re.compile(rb"^SetIsSuspicious\s*=\s*([^;\r\n]*);", re.MULTILINE)
+
+
+def _read_suspicious_flag(set_path: Path) -> Optional[str]:
+    """The text of the ``.set`` file's ``SetIsSuspicious`` key, None when absent.
+
+    A missing ``.set`` file has no flag to read; the companion folder alone is
+    what the streams come from.
+    """
+    if not set_path.is_file():
+        return None
+    match = _SUSPICIOUS_LINE.search(set_path.read_bytes())
+    return None if match is None else match.group(1).decode("latin-1").strip()
+
+
+def _parse_stream_transformers(
+    set_dir: Path, root: Optional[ET.Element]
+) -> Dict[int, Tuple[StreamTransformer, ...]]:
+    """Map frame-stream index to its declared transformers, from StreamSet.xml.
+
+    DaVis declares each transformer as, for example::
 
         <Transformer ID="dark-image-subtraction" Label="Dark image subtraction"
                      FilePrefix="Transformer0" MinDaVisVersion="10.2.0">
             <ContentPurpose IsAssociatedToFrames="true" StartFrame="0" EndFrame="0"/>
         </Transformer>
 
-    Unimplemented ids are recorded here and refused when THAT stream is read;
-    structural faults are refused now, because a correction that cannot be bound
-    to a stream cannot be deferred to one.
+    A stream may carry each correction once and at most one geometry. They are
+    returned in LaVision's application order, not the manifest's. Refused ids
+    are recorded here and refused when THAT stream is read. An id outside the
+    13 DaVis ids is recorded too: :func:`_block_unknown_transformers` decides,
+    once the camera labels are known, whether it blocks one camera or the whole
+    recording. Everything else that is wrong is refused now.
 
     Args:
         set_dir: The .set companion directory.
         root: Parsed StreamSet.xml, or None when the recording has none.
 
     Returns:
-        dict: {stream index: StreamTransformer}. Empty when nothing is declared.
+        {stream index: transformers in application order}. Empty when nothing is
+        declared.
 
     Raises:
-        ValueError: If a transformer's binding is missing, spans several streams,
-            or a stream is given more than one transformer.
-        FileNotFoundError: If a declared dark image is not on disk.
+        ValueError: If a transformer's binding is missing or spans several
+            streams; a stream declares one id twice or two geometries (lvpyio
+            silently keeps only the last of each, and this reader drops nothing
+            silently).
+        FileNotFoundError: If a declared correction image is not on disk.
     """
     if root is None:
         return {}
     stream_xml = set_dir / "StreamSet.xml"
 
-    transformers: dict = {}
+    declared: Dict[int, List[Tuple[StreamTransformer, str]]] = {}
     for node in root.iter("Transformer"):
         tid = (node.get("ID") or "").strip()
         label = (node.get("Label") or "").strip()
         prefix = (node.get("FilePrefix") or "").strip()
         stream_index = _bound_stream_index(node, f"Transformer '{prefix}'", stream_xml)
 
-        dark_path = None
-        if tid == "dark-image-subtraction":
-            dark_path = set_dir / f"{prefix}-dark.im7"
-            if not dark_path.exists():
-                raise FileNotFoundError(
-                    f"{stream_xml.name} declares dark-image subtraction for frame "
-                    f"stream {stream_index}, but {dark_path.name} is missing from "
-                    f"{set_dir}. Copy the complete companion folder -- the "
-                    f"correction is part of the recording, not an optional extra."
+        on_stream = declared.setdefault(stream_index, [])
+        for other, other_prefix in on_stream:
+            if other.id == tid:
+                raise ValueError(
+                    f"{stream_xml.name} declares '{tid}' twice for frame stream "
+                    f"{stream_index} (FilePrefix '{other_prefix}' and '{prefix}'). "
+                    f"lvpyio applies only the later declaration and drops the other "
+                    f"without a message; PIVTOOLs refuses rather than drop one."
+                )
+            if tid in _GEOMETRIES and other.id in _GEOMETRIES:
+                raise ValueError(
+                    f"{stream_xml.name} declares two geometric transformers for "
+                    f"frame stream {stream_index}: '{other.id}' (FilePrefix "
+                    f"'{other_prefix}') and '{tid}' (FilePrefix '{prefix}'). lvpyio "
+                    f"applies only the one listed last and drops the other without "
+                    f"a message; PIVTOOLs refuses rather than drop one."
                 )
 
-        if stream_index in transformers:
-            # Which order DaVis applies two corrections in is not knowable from the
-            # file, and dark subtraction and rotation do not commute, so neither
-            # order is guessed.
-            other = transformers[stream_index]
-            raise ValueError(
-                f"{stream_xml.name} declares two transformers for frame stream "
-                f"{stream_index}: '{other.id}' and '{tid}'. This reader applies at "
-                f"most one correction per stream and will not choose an order."
-            )
+        correction_path = None
+        correction = _CORRECTIONS.get(tid)
+        if correction is not None:
+            correction_path = set_dir / f"{prefix}-{correction.suffix}.im7"
+            if not correction_path.exists():
+                raise FileNotFoundError(
+                    f"{stream_xml.name} declares '{tid}' ({correction.label}) for "
+                    f"frame stream {stream_index}, but {correction_path.name} is "
+                    f"missing from {set_dir}. Copy the complete companion folder -- "
+                    f"the correction is part of the recording, not an optional extra."
+                )
 
-        transformers[stream_index] = StreamTransformer(
-            id=tid, label=label, dark_path=dark_path
+        on_stream.append(
+            (
+                StreamTransformer(id=tid, label=label, correction_path=correction_path),
+                prefix,
+            )
         )
 
-    return transformers
+    # An unknown id never runs (its camera is blocked first), so where it sorts
+    # is moot; last keeps the known ones in LaVision's order.
+    unknown_rank = len(_APPLICATION_RANK)
+    return {
+        index: tuple(
+            sorted(
+                (tf for tf, _prefix in found),
+                key=lambda tf: _APPLICATION_RANK.get(tf.id, unknown_rank),
+            )
+        )
+        for index, found in declared.items()
+    }
 
 
-def _load_dark(dark_path_str: str) -> np.ndarray:
-    """Load one Transformer{N}-dark.im7 as uint16, cached and revalidated by mtime.
+def _unknown_transformer_text(frame: IMSFrameInfo, set_name: str) -> str:
+    """What is unknown about a stream's transformer id, in plain words."""
+    tf = next(t for t in frame.transformers if t.id not in _APPLICATION_RANK)
+    return (
+        f"StreamSet.xml of {set_name} declares the transformer '{tf.id}' (DaVis "
+        f"label '{tf.label}') for frame stream {frame.frame_idx}. It is not one of "
+        f"the 13 DaVis transformer ids PIVTOOLs knows, so its effect on the frame, "
+        f"and on the frame's shape, is unknown. PIVTOOLs applies: "
+        f"{', '.join([*_CORRECTIONS, *_GEOMETRIES])}."
+    )
 
-    A dark image is the full sensor -- 37 MB as uint16 for a 5312x3528 camera --
-    so the cache trades memory for not re-reading it on every pair, which would
-    otherwise dominate read time. The cache is per process, which is what Dask
-    workers need.
+
+def _block_unknown_transformers(
+    set_name: str,
+    frames: List[IMSFrameInfo],
+    cameras: Optional[Tuple[LabelledCamera, ...]],
+) -> None:
+    """Refuse, or block one camera for, each transformer id PIVTOOLs does not know.
+
+    With camera labels, the camera owning such a stream is blocked: every one of
+    its streams carries the reason in ``blocked`` and refuses to read, while the
+    other cameras read (decided 17 Nov). Without labels, cameras are mapped to
+    streams by shape and this stream's is unknown, so the recording is refused.
+
+    Raises:
+        ValueError: Without camera labels, for the first such stream.
+    """
+    unknown = [f for f in frames if f.has_unknown_transformer]
+    if not unknown:
+        return
+    if cameras is None:
+        raise ValueError(
+            f"{_unknown_transformer_text(unknown[0], set_name)} The recording "
+            f"carries no camera labels, so cameras are mapped to streams by shape, "
+            f"and no camera of this recording can be read."
+        )
+    for frame in unknown:
+        camera = next(c for c in cameras if frame.frame_idx in c.frames)
+        reason = (
+            f"Camera {camera.number}, {camera.describe()}, of {set_name} cannot be "
+            f"read. {_unknown_transformer_text(frame, set_name)} The recording's "
+            f"other cameras are unaffected."
+        )
+        for stream in camera.frames:
+            if frames[stream].blocked is None:
+                frames[stream].blocked = reason
+
+
+def _load_correction(path_str: str) -> np.ndarray:
+    """Load one correction image as uint16, cached and revalidated by mtime.
+
+    The dark (``-dark.im7``), background (``-bgnd.im7``) and sCMOS
+    (``-scmos-1.im7``) maps are each the full sensor -- 37 MB as uint16 for a
+    5312x3528 camera -- so the cache trades memory for not re-reading one on
+    every pair, which would otherwise dominate read time. The cache is per
+    process, which is what Dask workers need.
 
     The mtime is part of the cache key, not decoration. Keying on the path alone
-    means re-exporting a recording leaves the previous dark image cached in a
+    means re-exporting a recording leaves the previous image cached in a
     long-lived process -- the Flask GUI outlives many recordings -- and every
     subsequent read then subtracts the wrong pixels with nothing to indicate it.
     Silently wrong data is the one outcome this reader refuses everywhere else, so
@@ -464,30 +1076,30 @@ def _load_dark(dark_path_str: str) -> np.ndarray:
     of the LRU normally; it is never served again.
 
     Args:
-        dark_path_str: Path to the dark .im7, as a string so it is hashable.
+        path_str: Path to the correction .im7, as a string so it is hashable.
 
     Returns:
-        np.ndarray: (H, W) uint16 dark image.
+        np.ndarray: (H, W) uint16 correction image, in sensor coordinates.
 
     Raises:
-        ValueError: If the dark image is not 2D, or is not integer counts in
-            [0, 65535] -- the range the uint16 subtraction below assumes.
-        OSError: If the dark image is missing. _parse_stream_transformers already
+        ValueError: If the image is not 2D, or is not integer counts in
+            [0, 65535] -- the range the uint16 corrections assume.
+        OSError: If the image is missing. _parse_stream_transformers already
             checks existence at parse time, so reaching this means it was deleted
             mid-session.
     """
-    return _load_dark_cached(dark_path_str, Path(dark_path_str).stat().st_mtime)
+    return _load_correction_cached(path_str, Path(path_str).stat().st_mtime)
 
 
 @lru_cache(maxsize=4)
-def _load_dark_cached(dark_path_str: str, mtime: float) -> np.ndarray:
-    """Cached body of :func:`_load_dark`. Call that, not this.
+def _load_correction_cached(path_str: str, mtime: float) -> np.ndarray:
+    """Cached body of :func:`_load_correction`. Call that, not this.
 
     ``mtime`` is a cache key only and is deliberately unused in the body: a changed
-    dark image produces a different key and therefore a fresh read.
+    image produces a different key and therefore a fresh read.
 
     Size is a compromise, not a fit. Four entries hold two cameras' worth of
-    pre-paired streams (~150 MB). A rig with three or more dark-bearing cameras
+    pre-paired streams (~150 MB). A rig with three or more corrected cameras
     whose worker interleaves them will evict and re-read; the alk235 recordings
     have ten such streams, so sizing to hold them all would cost ~370 MB per
     worker. Raise this only with a measurement showing the re-reads matter more
@@ -495,28 +1107,29 @@ def _load_dark_cached(dark_path_str: str, mtime: float) -> np.ndarray:
     """
     from .im7_reader import read_im7
 
-    _header, pixels, _scales = read_im7(dark_path_str)
-    dark = np.squeeze(np.asarray(pixels))
-    if dark.ndim != 2:
+    _header, pixels, _scales = read_im7(path_str)
+    image = np.squeeze(np.asarray(pixels))
+    if image.ndim != 2:
         raise ValueError(
-            f"Dark image {Path(dark_path_str).name} is {dark.ndim}-dimensional "
-            f"(shape {dark.shape}); expected a single 2D frame."
+            f"Correction image {Path(path_str).name} is {image.ndim}-dimensional "
+            f"(shape {image.shape}); expected a single 2D frame."
         )
 
     # read_im7 hands back float32 for a WORD buffer, so the integrality check is
-    # needed -- but only for a float dtype. Running `dark == np.floor(dark)` on an
-    # integer array promotes a 19 Mpx frame to float64 (~150 MB) to learn nothing.
-    lo, hi = dark.min(), dark.max()
-    integral = np.issubdtype(dark.dtype, np.integer) or bool(
-        np.all(dark == np.floor(dark))
+    # needed -- but only for a float dtype. Running `image == np.floor(image)` on
+    # an integer array promotes a 19 Mpx frame to float64 (~150 MB) to learn
+    # nothing.
+    lo, hi = image.min(), image.max()
+    integral = np.issubdtype(image.dtype, np.integer) or bool(
+        np.all(image == np.floor(image))
     )
-    if not integral or lo < 0 or hi > np.iinfo(np.uint16).max:
+    if not integral or lo < 0 or hi > _UINT16_MAX:
         raise ValueError(
-            f"Dark image {Path(dark_path_str).name} is not integer counts in "
-            f"[0, 65535] (min {lo}, max {hi}, dtype {dark.dtype}). The uint16 "
-            f"subtraction below would wrap and silently return wrong pixels."
+            f"Correction image {Path(path_str).name} is not integer counts in "
+            f"[0, 65535] (min {lo}, max {hi}, dtype {image.dtype}). The uint16 "
+            f"correction would wrap and silently return wrong pixels."
         )
-    return dark.astype(np.uint16)
+    return image.astype(np.uint16)
 
 
 # ---------------------------------------------------------------------------
@@ -527,12 +1140,11 @@ def _load_dark_cached(dark_path_str: str, mtime: float) -> np.ndarray:
 def _read_scales(scales_path: Optional[Path]) -> Tuple[float, float, str]:
     """Read intensity scale from a {scaleprefix}.scales XML.
 
-    ``None`` (the manifest declares no scale file for this stream) and a
-    missing conventional file (glob fallback) both mean identity scale -- that
-    is the declared state, not a fallback. A DECLARED file that is missing is
-    caught before this is called.
+    ``None`` (the manifest declares no scale file for this stream) means
+    identity scale -- that is the declared state, not a fallback. A declared
+    file that is missing is refused before this is called.
     """
-    if scales_path is None or not scales_path.exists():
+    if scales_path is None:
         return 1.0, 0.0, ""
     tree = ET.parse(scales_path)
     root = tree.getroot()
@@ -579,21 +1191,6 @@ _DECODER_LABELS = {
     "rgb-24": "RGB 24",
 }
 
-# What this reader decodes. The others are refused by name: the three 12-bit
-# encodings share a byte count and differ only in bit order, the two 10-bit ones
-# likewise, and rgb-24's channel order is not derivable from the id, so size alone
-# cannot disambiguate them. Each needs a real sample file and a cross-check
-# against lvpyio before it can be added.
-#
-# That cross-check IS a plain equality assertion, with two adjustments: lvpyio
-# pads the frame height up to a multiple of 16 with zero rows (3528 -> 3536), and
-# in a multi-camera buffer it pads every frame to the LARGEST frame's shape,
-# unmasked (a 1984x1264 stream comes back as 2160x2560 with zeros outside the
-# top-left block). Compare against its top-left `height` x `width` block.
-# Everything else agrees bit for bit, declared corrections included. See
-# [[piv-data-formats]].
-_IMPLEMENTED_DECODERS = ("mono-10p", "mono-12p", "raw-16-bit", "raw-8-bit")
-
 
 def _decode_mono10p(raw: bytes, width: int, height: int) -> np.ndarray:
     """Decode Mono10p (USB3 Vision packed 10-bit) bytes to uint16 array.
@@ -608,7 +1205,7 @@ def _decode_mono10p(raw: bytes, width: int, height: int) -> np.ndarray:
 
     Each is a little-endian uint16 window over two adjacent bytes, shifted down
     by its bit offset and masked to 10 bits -- the same memory-access trick as
-    :func:`_decode_mono12p`, four overlapping windows at stride 5 instead of two
+    :func:`decode_mono12p`, four overlapping windows at stride 5 instead of two
     at stride 3. Verified bit-exact against lvpyio 1.3.1 on the 1984x1264
     MiniShaker streams of a real five-camera recording (2026-08-24).
 
@@ -645,8 +1242,58 @@ def _decode_mono10p(raw: bytes, width: int, height: int) -> np.ndarray:
     return pixels.reshape(height, width)
 
 
-def _decode_mono12p(raw: bytes, width: int, height: int) -> np.ndarray:
-    """Decode Mono12Packed (GigE Vision) bytes to uint16 array.
+def _decode_mono10pmsb(raw: bytes, width: int, height: int) -> np.ndarray:
+    """Decode PFNC Mono10pmsb (msb packed 10-bit) bytes to a uint16 array.
+
+    Packing: 4 pixels in 5 bytes, most-significant bits first, as one continuous
+    big-endian bit stream (PFNC 2.4, section 6.3.2, figure 6-11)::
+
+        pixel0 =  b0         << 2 | b1 >> 6
+        pixel1 = (b1 & 0x3F) << 4 | b2 >> 4
+        pixel2 = (b2 & 0x0F) << 6 | b3 >> 2
+        pixel3 = (b3 & 0x03) << 8 | b4
+
+    Each is a BIG-endian uint16 window over two adjacent bytes (``b_k << 8 |
+    b_k+1``), shifted down by (6, 4, 2, 0) and masked to 10 bits: the mirror of
+    :func:`_decode_mono10p`, same four windows at stride 5. ``>u2`` pins the byte
+    order whatever the host. This is the encoding of the NTNU Imager MX PIV
+    cameras. Verified bit-exact against lvpyio 1.3.1 on 16 real 5120x5120 NTNU
+    frames and on every single-bit and every pixel-pair input (2026-11-14 and
+    2026-11-16 research).
+
+    Raises:
+        ValueError: If the pixel count is not a multiple of 4, for the reason
+            given in :func:`_decode_mono10p`.
+    """
+    n_pixels = width * height
+    if n_pixels % 4:
+        raise ValueError(
+            f"mono-10pmsb packs four pixels into five bytes, so a frame must hold a "
+            f"multiple of four pixels; {width}x{height} is {n_pixels}. The declared "
+            f"frame geometry does not match a mono-10pmsb payload."
+        )
+    n_quads = n_pixels // 4
+
+    # The final window starts at byte 5*n_quads - 2 and reads two bytes, ending
+    # exactly at the end of the payload -- no over-read.
+    def window(offset: int) -> np.ndarray:
+        return np.ndarray(
+            (n_quads,), dtype=">u2", buffer=raw, offset=offset, strides=(5,)
+        )
+
+    pixels = np.empty((n_quads, 4), dtype=np.uint16)
+    # (b0<<8 | b1) >> 6 is at most 10 bits wide, so no mask is needed.
+    np.right_shift(window(0), 6, out=pixels[:, 0])
+    np.right_shift(window(1), 4, out=pixels[:, 1])
+    np.bitwise_and(pixels[:, 1], 0x03FF, out=pixels[:, 1])
+    np.right_shift(window(2), 2, out=pixels[:, 2])
+    np.bitwise_and(pixels[:, 2], 0x03FF, out=pixels[:, 2])
+    np.bitwise_and(window(3), 0x03FF, out=pixels[:, 3])
+    return pixels.reshape(height, width)
+
+
+def decode_mono12p(raw: bytes, width: int, height: int) -> np.ndarray:
+    """Decode PFNC Mono12p (lsb packed) bytes to a uint16 array.
 
     Packing: 2 pixels in 3 bytes.
         pixel0 = byte0 | (byte1 & 0x0F) << 8
@@ -698,6 +1345,95 @@ def _decode_mono12p(raw: bytes, width: int, height: int) -> np.ndarray:
     return pixels.reshape(height, width)
 
 
+def _require_even_pixels(decoder: str, width: int, height: int) -> int:
+    """Pixel pairs in a 2-px-in-3-bytes frame, refusing an odd pixel count.
+
+    Raises:
+        ValueError: If the frame holds an odd number of pixels, for the reason
+            given in :func:`decode_mono12p`.
+    """
+    n_pixels = width * height
+    if n_pixels % 2:
+        raise ValueError(
+            f"{decoder} packs two pixels into three bytes, so a frame must hold an "
+            f"even number of pixels; {width}x{height} is {n_pixels}. The declared "
+            f"frame geometry does not match a {decoder} payload."
+        )
+    return n_pixels // 2
+
+
+def _decode_mono12pmsb(raw: bytes, width: int, height: int) -> np.ndarray:
+    """Decode PFNC msb packed 12-bit bytes (DaVis 'mono-12pmsb') to a uint16 array.
+
+    Packing: 2 pixels in 3 bytes, most-significant bits first, as one continuous
+    big-endian bit stream::
+
+        pixel0 =  b0         << 4 | b1 >> 4
+        pixel1 = (b1 & 0x0F) << 8 | b2
+
+    The mirror of :func:`decode_mono12p` with BIG-endian windows::
+
+        uint16 at byte 3k+0  =  b0<<8 | b1  ->  >> 4      ==  pixel0
+        uint16 at byte 3k+1  =  b1<<8 | b2  ->  & 0x0FFF  ==  pixel1
+
+    Layout settled against lvpyio 1.3.1, which decodes a synthetic recording
+    carrying this id equal to this rule on all 2^24 three-byte groups, and to no
+    other candidate layout (01-lavision-readers REPORT A3). No real recording in
+    this encoding has been seen.
+
+    Raises:
+        ValueError: If the frame holds an odd number of pixels.
+    """
+    n_pairs = _require_even_pixels("mono-12pmsb", width, height)
+
+    # The final window starts at byte 3*n_pairs - 2 and reads two bytes, ending
+    # exactly at the end of the payload -- no over-read.
+    first = np.ndarray((n_pairs,), dtype=">u2", buffer=raw, offset=0, strides=(3,))
+    second = np.ndarray((n_pairs,), dtype=">u2", buffer=raw, offset=1, strides=(3,))
+
+    pixels = np.empty((n_pairs, 2), dtype=np.uint16)
+    np.right_shift(first, 4, out=pixels[:, 0])
+    np.bitwise_and(second, 0x0FFF, out=pixels[:, 1])
+    return pixels.reshape(height, width)
+
+
+def _decode_mono12packed(raw: bytes, width: int, height: int) -> np.ndarray:
+    """Decode DaVis 'mono-12packed' bytes to a uint16 array.
+
+    Packing: 2 pixels in 3 bytes, the two low nibbles in the MIDDLE byte::
+
+        pixel0 = b0 << 4 | (b1 & 0x0F)
+        pixel1 = b2 << 4 | (b1 >> 4)
+
+    This is not a PFNC packed style, and not PFNC Mono12g, which puts the nibble
+    byte last. Layout settled against lvpyio 1.3.1, which decodes a synthetic
+    recording carrying this id equal to this rule on all 2^24 three-byte groups,
+    and to no other candidate layout (01-lavision-readers REPORT A3). No real
+    recording in this encoding has been seen.
+
+    Two windows give it without byte gathers:
+
+        big-endian uint16 at 3k+0     =  b0<<8 | b1  ->  (w >> 4) & 0x0FF0 | w & 0x000F
+        little-endian uint16 at 3k+1  =  b1 | b2<<8  ->   w >> 4
+
+    Raises:
+        ValueError: If the frame holds an odd number of pixels.
+    """
+    n_pairs = _require_even_pixels("mono-12packed", width, height)
+
+    # The final window starts at byte 3*n_pairs - 2 and reads two bytes, ending
+    # exactly at the end of the payload -- no over-read.
+    first = np.ndarray((n_pairs,), dtype=">u2", buffer=raw, offset=0, strides=(3,))
+    second = np.ndarray((n_pairs,), dtype="<u2", buffer=raw, offset=1, strides=(3,))
+
+    pixels = np.empty((n_pairs, 2), dtype=np.uint16)
+    np.right_shift(first, 4, out=pixels[:, 0])
+    np.bitwise_and(pixels[:, 0], 0x0FF0, out=pixels[:, 0])
+    np.bitwise_or(pixels[:, 0], np.bitwise_and(first, 0x000F), out=pixels[:, 0])
+    np.right_shift(second, 4, out=pixels[:, 1])
+    return pixels.reshape(height, width)
+
+
 def _decode_raw16(raw: bytes, width: int, height: int) -> np.ndarray:
     """Decode raw uint16 little-endian bytes (DaVis 'raw-16-bit')."""
     return np.frombuffer(raw, dtype=np.dtype("<u2")).reshape(height, width)
@@ -707,7 +1443,7 @@ def _decode_raw8(raw: bytes, width: int, height: int) -> np.ndarray:
     """Decode raw uint8 bytes to uint16 (DaVis 'raw-8-bit').
 
     Values are widened, NOT rescaled: an 8-bit count of 200 stays 200, it does not
-    become 51200. This matches :func:`_decode_mono12p`, which returns 0-4095 even
+    become 51200. This matches :func:`decode_mono12p`, which returns 0-4095 even
     though its DaVis label also reads "to 16 bit". Every encoding in this module
     therefore returns raw sensor counts, so intensity thresholds (masking, peak
     magnitude) mean the same thing whichever encoding a recording used.
@@ -715,22 +1451,44 @@ def _decode_raw8(raw: bytes, width: int, height: int) -> np.ndarray:
     return np.frombuffer(raw, dtype=np.uint8).astype(np.uint16).reshape(height, width)
 
 
-def _decode_pixels(raw: bytes, decoder: str, width: int, height: int) -> np.ndarray:
-    """Dispatch to the correct pixel decoder, refusing anything unproven.
+# What this reader decodes, and the function that decodes each id. One table, so
+# "implemented" and "dispatched" cannot disagree. The 10-bit ids share a byte
+# count, as do the 12-bit ones, and differ only in bit order, so size alone never
+# picks a layout: each layout here was settled against lvpyio, not from its name.
+# mono-10pmsb on real NTNU frames, the two 12-bit ids on all 2^24 three-byte groups
+# of a synthetic recording lvpyio decodes (01-lavision-readers REPORT A1-A3).
+# rgb-24 alone is refused: lvpyio 1.3.1 opens no synthetic rgb-24 recording, so
+# there is no oracle for its channel order (REPORT A5).
+#
+# The cross-check against lvpyio IS a plain equality assertion, with two
+# adjustments: lvpyio pads the frame height up to a multiple of 16 with zero rows
+# (3528 -> 3536), and in a multi-camera buffer it pads every frame to the LARGEST
+# frame's shape, unmasked (a 1984x1264 stream comes back as 2160x2560 with zeros
+# outside the top-left block). Compare against its top-left `height` x `width`
+# block. Everything else agrees bit for bit, declared corrections included. See
+# [[piv-data-formats]].
+_IMPLEMENTED_DECODERS: dict[str, Callable[[bytes, int, int], np.ndarray]] = {
+    "mono-10p": _decode_mono10p,
+    "mono-10pmsb": _decode_mono10pmsb,
+    "mono-12p": decode_mono12p,
+    "mono-12packed": _decode_mono12packed,
+    "mono-12pmsb": _decode_mono12pmsb,
+    "raw-16-bit": _decode_raw16,
+    "raw-8-bit": _decode_raw8,
+}
+
+
+def _payload_bytes(decoder: str, width: int, height: int) -> int:
+    """Bytes of one packed frame in encoding ``decoder``, refusing unproven ids.
 
     Args:
-        raw: Pixel bytes for one entry, as stored in Frame{N}-1.ims.
         decoder: Encoding id from Frame{N}-decoder.xml.
         width: Frame width in pixels.
         height: Frame height in pixels.
 
-    Returns:
-        np.ndarray: (height, width) uint16 of raw sensor counts.
-
     Raises:
-        ValueError: If the id is unknown to DaVis 10/11, if it is a known DaVis
-            encoding this reader does not implement, or if the byte count does not
-            match the id's bit depth.
+        ValueError: If the id is unknown to DaVis 10/11, or if it is a known
+            DaVis encoding this reader does not implement.
     """
     implemented = ", ".join(_IMPLEMENTED_DECODERS)
 
@@ -751,10 +1509,30 @@ def _decode_pixels(raw: bytes, decoder: str, width: int, height: int) -> np.ndar
             f"the PIVTOOLs maintainers. Re-exporting from DaVis as Raw 16 bit is a "
             f"workaround in the meantime."
         )
+    return (width * height * _DECODER_BITS_PER_PX[decoder]) // 8
 
-    bits = _DECODER_BITS_PER_PX[decoder]
-    expected = (width * height * bits) // 8
+
+def _decode_pixels(raw: bytes, decoder: str, width: int, height: int) -> np.ndarray:
+    """Dispatch to the correct pixel decoder, refusing anything unproven.
+
+    Args:
+        raw: Packed pixel bytes for one entry: the stored bytes of an
+            uncompressed entry, or the output of :func:`_decompress_entry`.
+        decoder: Encoding id from Frame{N}-decoder.xml.
+        width: Frame width in pixels.
+        height: Frame height in pixels.
+
+    Returns:
+        np.ndarray: (height, width) uint16 of raw sensor counts.
+
+    Raises:
+        ValueError: If the id is unknown to DaVis 10/11, if it is a known DaVis
+            encoding this reader does not implement, or if the byte count does not
+            match the id's bit depth.
+    """
+    expected = _payload_bytes(decoder, width, height)
     if len(raw) != expected:
+        bits = _DECODER_BITS_PER_PX[decoder]
         raise ValueError(
             f"Pixel data size mismatch for encoding '{decoder}': entry holds "
             f"{len(raw)} bytes but a {width}x{height} frame at {bits} bits/pixel "
@@ -762,18 +1540,149 @@ def _decode_pixels(raw: bytes, decoder: str, width: int, height: int) -> np.ndar
             f"may not match the stored data."
         )
 
-    if decoder == "mono-10p":
-        return _decode_mono10p(raw, width, height)
-    if decoder == "mono-12p":
-        return _decode_mono12p(raw, width, height)
-    if decoder == "raw-16-bit":
-        return _decode_raw16(raw, width, height)
-    return _decode_raw8(raw, width, height)
+    return _IMPLEMENTED_DECODERS[decoder](raw, width, height)
+
+
+# ---------------------------------------------------------------------------
+# Entry decompression (index header bytes 24..55)
+# ---------------------------------------------------------------------------
+
+
+def _decompress_entry(
+    stored: bytes, frame_info: IMSFrameInfo, entry_idx: int, expected: int
+) -> Union[bytes, np.ndarray]:
+    """Turn one entry's stored bytes into the packed payload the pixel decoder reads.
+
+    The layouts are the ones lvpyio 1.3.1 opens (container-unknowns REPORT §2
+    C1, C2, C5): Zlib is one bare RFC 1950 stream, LZ4 one bare block with no
+    size prefix, and IMX the DaVis token grammar over the payload's
+    little-endian uint16 words. An uncompressed entry is returned as stored, and
+    :func:`_decode_pixels` checks its size.
+
+    Args:
+        stored: The entry's bytes as stored in {prefix}-1.ims.
+        frame_info: The stream, for its codec and for naming it in a refusal.
+        entry_idx: 0-based entry, for naming it in a refusal.
+        expected: Packed payload bytes the decoder needs (:func:`_payload_bytes`).
+
+    Returns:
+        The packed payload, ``expected`` bytes long.
+
+    Raises:
+        IOError: If the entry does not decompress, decompresses to a size other
+            than ``expected``, or holds bytes after its compressed data. The
+            message names the stream, the entry and the codec.
+    """
+    codec = frame_info.codec
+    if codec in _IMS_UNCOMPRESSED_CODECS:
+        return stored
+
+    where = (
+        f"Frame stream {frame_info.frame_idx} of {frame_info.data_path.parent.name}, "
+        f"entry_no {entry_idx + 1} ({frame_info.data_path.name}), stored with "
+        f"'{codec}' compression"
+    )
+    if codec == "Zlib":
+        return _decompress_zlib(stored, expected, where)
+    if codec == "LZ4":
+        try:
+            return lz4_block_decompress(stored, expected)
+        except OSError as exc:
+            raise IOError(
+                f"{where}: the LZ4 block does not decompress to the {expected} "
+                f"bytes the frame's geometry and encoding need ({exc})"
+            ) from exc
+    if codec == "IMX":
+        return _decompress_imx(stored, expected, where)
+    raise RuntimeError(f"{where}: no decompressor for codec {codec!r}")
+
+
+def _decompress_zlib(stored: bytes, expected: int, where: str) -> bytes:
+    """Decompress one bare zlib stream to exactly ``expected`` bytes.
+
+    ``max_length`` caps the output one byte past ``expected``, so an entry that
+    inflates to more is caught without inflating all of it.
+    """
+    inflater = zlib.decompressobj()
+    try:
+        out = inflater.decompress(stored, expected + 1)
+    except zlib.error as exc:
+        raise IOError(f"{where}: the zlib stream does not decompress ({exc})") from exc
+    if len(out) > expected:
+        raise IOError(
+            f"{where}: the zlib stream decompresses to more than the {expected} "
+            f"bytes the frame's geometry and encoding need"
+        )
+    if not inflater.eof:
+        raise IOError(
+            f"{where}: the zlib stream ends after {len(out)} of {expected} bytes, "
+            f"without its end marker. The entry is truncated."
+        )
+    if len(out) != expected:
+        raise IOError(
+            f"{where}: the zlib stream decompresses to {len(out)} bytes, but the "
+            f"frame's geometry and encoding need {expected}"
+        )
+    if inflater.unused_data:
+        raise IOError(
+            f"{where}: {len(inflater.unused_data)} bytes follow the end of the zlib "
+            f"stream inside the entry. lvpyio's reading of such an entry is "
+            f"unmeasured, so it is refused rather than read on a guess."
+        )
+    return out
+
+
+def _decompress_imx(stored: bytes, expected: int, where: str) -> np.ndarray:
+    """Decode one IMX entry to its ``expected`` packed payload bytes.
+
+    The tokens code the payload's little-endian uint16 words, so a payload with
+    an odd byte count has no measured layout (CU §2 C5: three layouts tried on
+    mono-10p, all failed in lvpyio) and is refused.
+
+    The token kernel takes only a writable uint8 array (one compiled
+    specialisation), so the stored bytes are copied into one.
+
+    Returns:
+        A little-endian byte view of the decoded words.
+    """
+    if expected % 2:
+        raise ValueError(
+            f"{where}: IMX codes the packed payload as 16-bit words, but this "
+            f"frame's geometry and encoding pack it into {expected} bytes, an odd "
+            f"count. How DaVis stores the last byte is unmeasured, so the entry is "
+            f"refused rather than read on a guess."
+        )
+    try:
+        words = decode_imx_words(np.frombuffer(stored, np.uint8).copy(), expected // 2)
+    except TokenStreamError as exc:
+        raise type(exc)(f"{where}: {exc}") from exc
+    return words.astype("<u2", copy=False).view(np.uint8)
 
 
 # ---------------------------------------------------------------------------
 # Set container parsing
 # ---------------------------------------------------------------------------
+
+
+# DaVis's own correction files in a companion folder: the data of the
+# <Transformer> nodes StreamSet.xml declares, named <FilePrefix>-<suffix>.im7
+# with FilePrefix "Transformer<n>" (Transformer0-dark.im7,
+# Transformer1-scmos-1.im7). They are .im7 but hold corrections, not images.
+_TRANSFORMER_FILE_PREFIX = "Transformer"
+
+
+def _im7_image_files(set_dir: Path) -> List[Path]:
+    """The .im7 files in a companion folder that hold images, sorted.
+
+    The correction files (:data:`_TRANSFORMER_FILE_PREFIX`) are .im7 too, and
+    are NOT evidence of .im7 layout: advising lavision_im7 on their account
+    would read a correction map as image data.
+    """
+    return sorted(
+        p
+        for p in set_dir.glob("*.im7")
+        if not p.name.startswith(_TRANSFORMER_FILE_PREFIX)
+    )
 
 
 def _parse_set(set_path: Union[str, Path]) -> SetInfo:
@@ -791,22 +1700,31 @@ def _parse_set(set_path: Union[str, Path]) -> SetInfo:
         raise FileNotFoundError(
             f"{set_path.name} has no companion data folder (expected {set_dir}). "
             f"A DaVis recording is a .set file plus a folder of the same name holding "
-            f"its Frame*.ims streams; both must be copied together. A .set with no "
+            f"its .ims image streams; both must be copied together. A .set with no "
             f"folder is usually a DaVis result set (processed vectors), which holds no "
             f"images -- point at the recording .set instead."
         )
 
     root = _load_stream_manifest(set_dir)
-    sources = _discover_streams(set_dir, root)
 
-    if not sources:
-        _raise_no_streams(set_dir)
+    # DaVis can leave a StreamSet.xml declaring .ims streams beside images it
+    # stored as .im7 files (seen on one real recording, drive-survey C7). Why is
+    # unknown; the fix is the same either way, so it is named before the
+    # manifest's streams are looked for and reported missing.
+    im7_files = _im7_image_files(set_dir)
+    if im7_files and not any(set_dir.glob("*.ims")):
+        _raise_im7_layout(set_dir, im7_files, manifest_present=root is not None)
+
+    sources = _discover_streams(set_dir, root)
 
     # Post-decode corrections DaVis declares for this recording (usually none).
     transformers = _parse_stream_transformers(set_dir, root)
 
     frames = []
     n_entries = None
+    # A spanning FrameReader yields one source per frame over the same files, so
+    # each index is parsed once: prefix -> (width, height, codec, entries).
+    parsed_indexes: Dict[str, Tuple[int, int, str, List[IMSIndexEntry]]] = {}
 
     for src in sources:
         index_path = set_dir / f"{src.prefix}-0.ims"
@@ -815,25 +1733,30 @@ def _parse_set(set_path: Union[str, Path]) -> SetInfo:
 
         for required in (index_path, data_path):
             if not required.exists():
-                if src.declared:
-                    raise FileNotFoundError(
-                        f"StreamSet.xml declares frame stream {src.index} with "
-                        f"prefix '{src.prefix}', but {required.name} is missing "
-                        f"from {set_dir}. Copy the complete companion folder."
-                    )
-                raise FileNotFoundError(f"Data file missing: {required}")
+                raise FileNotFoundError(
+                    f"StreamSet.xml declares frame stream {src.index} with "
+                    f"prefix '{src.prefix}', but {required.name} is missing "
+                    f"from {set_dir}. Copy the complete companion folder."
+                )
 
         scales_path = None
         if src.scale_prefix is not None:
             scales_path = set_dir / f"{src.scale_prefix}.scales"
-            if src.declared and not scales_path.exists():
+            if not scales_path.exists():
                 raise FileNotFoundError(
                     f"StreamSet.xml declares scale file '{src.scale_prefix}' for "
                     f"frame stream {src.index}, but {scales_path.name} is missing "
                     f"from {set_dir}. Copy the complete companion folder."
                 )
 
-        width, height, n_ent, entries = _parse_ims_index(index_path)
+        if src.prefix not in parsed_indexes:
+            parsed_indexes[src.prefix] = _parse_ims_index(
+                index_path, src.prefix, src.frames_per_image
+            )
+        stored_width, stored_height, codec, file_entries = parsed_indexes[src.prefix]
+        # Frame `index` of buffer b is entry b * span + span_offset of the file.
+        entries = file_entries[src.span_offset :: src.frames_per_image]
+        n_ent = len(entries)
         decoder = _read_decoder(decoder_path)
         slope, offset, unit = _read_scales(scales_path)
 
@@ -841,8 +1764,10 @@ def _parse_set(set_path: Union[str, Path]) -> SetInfo:
             n_entries = n_ent
         elif n_ent != n_entries:
             raise ValueError(
-                f"{src.prefix} has {n_ent} entries but {sources[0].prefix} "
-                f"has {n_entries}"
+                f"Frame stream {src.index} ('{src.prefix}') holds {n_ent} images "
+                f"but frame stream {sources[0].index} ('{sources[0].prefix}') holds "
+                f"{n_entries}. Every frame stream of a recording holds one frame of "
+                f"each image."
             )
 
         frames.append(
@@ -851,55 +1776,116 @@ def _parse_set(set_path: Union[str, Path]) -> SetInfo:
                 data_path=data_path,
                 index_path=index_path,
                 decoder=decoder,
-                width=width,
-                height=height,
+                codec=codec,
+                stored_shape=(stored_height, stored_width),
                 n_entries=n_ent,
                 scale_slope=slope,
                 scale_offset=offset,
                 scale_unit=unit,
                 entries=entries,
-                transformer=transformers.get(src.index),
+                transformers=transformers.get(src.index, ()),
             )
         )
 
-    return SetInfo(set_dir=set_dir, frames=frames, n_entries=n_entries)
+    bindings = _attribute_bindings(set_dir, root)
+    rec = read_recording_attributes(set_dir, bindings, len(frames), n_entries)
+    cameras = None if rec is None else group_cameras(rec)
+    for camera in cameras or ():
+        for stream, role in zip(
+            camera.frames, DOUBLE_FRAME_ROLES if camera.double_frame else ("",)
+        ):
+            frames[stream].camera_label = camera.label
+            frames[stream].camera_id = camera.camera_id
+            frames[stream].frame_role = role
+    _block_unknown_transformers(set_path.name, frames, cameras)
+
+    return SetInfo(
+        set_dir=set_dir,
+        frames=frames,
+        n_entries=n_entries,
+        cameras=cameras,
+        attribute_files=tuple(f"{b.prefix}.attr" for b in bindings),
+        suspicious_flag=_read_suspicious_flag(set_path),
+    )
 
 
-def _raise_no_streams(set_dir: Path) -> None:
-    """Name which non-recording shape a stream-less companion folder is.
+def read_set_attributes(set_path: Union[str, Path]) -> Optional[RecordingAttributes]:
+    """Every attribute of a recording, per image, frame stream and whole image.
 
-    DaVis reuses the .set extension for project and calibration nodes, stores
-    some recordings as .im7 files, and names stream files by a per-recording
-    prefix the manifest must declare -- each has a different fix, and the bare
-    "no data files" message fitted none of them.
+    For inspection and checks against lvpyio; the reader itself keeps only the
+    camera identity (:attr:`SetInfo.cameras`), not the attributes, so a cached
+    SetInfo stays small.
+
+    Returns:
+        None when StreamSet.xml declares no AttributeReader.
+
+    Raises:
+        Whatever :func:`read_set_info` raises for the recording.
+    """
+    set_path = Path(set_path)
+    info = read_set_info(set_path)
+    bindings = _attribute_bindings(info.set_dir, _load_stream_manifest(info.set_dir))
+    return read_recording_attributes(
+        info.set_dir, bindings, len(info.frames), info.n_entries
+    )
+
+
+def _raise_im7_layout(
+    set_dir: Path, im7_files: List[Path], manifest_present: bool
+) -> None:
+    """Refuse a companion folder whose images are .im7 files, pointing at the
+    .im7 image type.
+
+    Args:
+        set_dir: the companion folder.
+        im7_files: its image .im7 files, from :func:`_im7_image_files`.
+        manifest_present: whether a StreamSet.xml sits beside them, which DaVis
+            leaves declaring .ims streams on some recordings.
+    """
+    shown = im7_files[0].name
+    if len(im7_files) > 1:
+        shown += f" and {len(im7_files) - 1} more"
+    leftover = (
+        " Its StreamSet.xml declares .ims streams, but none are stored here."
+        if manifest_present
+        else ""
+    )
+    raise FileNotFoundError(
+        f"{set_dir} holds .im7 files ({shown}), not .ims frame streams.{leftover} "
+        f"This recording is in DaVis .im7 layout: set image_type to 'lavision_im7' "
+        f"and point the source path at the folder {set_dir} rather than at the "
+        f".set file."
+    )
+
+
+def _raise_no_streams(set_dir: Path, manifest_present: bool) -> None:
+    """Name why a companion folder yields no declared frame stream.
+
+    DaVis reuses the .set extension for project and calibration nodes, and the
+    streams of a recording are found only through the FrameReader entries of its
+    StreamSet.xml -- each case has a different fix. (A folder of .im7 images is
+    named earlier, by :func:`_raise_im7_layout`.)
+
+    Raises:
+        FileNotFoundError: Stream files without a StreamSet.xml, or no image data.
+        ValueError: Stream files whose StreamSet.xml declares no FrameReader.
     """
     ims_prefixes = sorted({p.name[: -len("-1.ims")] for p in set_dir.glob("*-1.ims")})
     if ims_prefixes:
         shown = ", ".join(ims_prefixes[:5])
-        raise FileNotFoundError(
-            f"{set_dir} holds image streams ({shown}) whose prefix is not "
-            f"'Frame{{N}}', and its StreamSet.xml does not declare them (no "
-            f"FrameReader entry). The stream-to-camera mapping comes from that "
-            f"manifest, so it cannot be inferred from the file names. Re-export the "
-            f"recording from DaVis so the companion folder carries its StreamSet.xml."
+        common = (
+            f"{set_dir} holds image streams ({shown}), but the stream-to-camera "
+            f"mapping comes only from the FrameReader entries of StreamSet.xml and "
+            f"is not guessed from file names. Re-export the recording from DaVis, "
+            f"or copy the complete companion folder."
         )
+        if manifest_present:
+            raise ValueError(
+                f"StreamSet.xml in {set_dir} declares no FrameReader "
+                f"(Type '{_FRAME_READER_TYPE}'). {common}"
+            )
+        raise FileNotFoundError(f"StreamSet.xml is missing from {set_dir}. {common}")
 
-    # Transformer data files (Transformer1-scmos-1.im7 and the like) are .im7 too,
-    # and are NOT evidence of .im7 layout; advising a switch to lavision_im7 on
-    # their account would read a correction map as image data.
-    im7_files = sorted(
-        p for p in set_dir.glob("*.im7") if not p.name.startswith("Transformer")
-    )
-    if im7_files:
-        shown = im7_files[0].name
-        if len(im7_files) > 1:
-            shown += f" and {len(im7_files) - 1} more"
-        raise FileNotFoundError(
-            f"{set_dir} holds .im7 files ({shown}), not .ims frame streams. This "
-            f"recording is in DaVis .im7 layout: set image_type to 'lavision_im7' "
-            f"and point the source path at the folder {set_dir} rather than at the "
-            f".set file."
-        )
     found = sorted(p.name for p in set_dir.iterdir())
     raise FileNotFoundError(
         f"{set_dir} holds no image data -- no *-1.ims streams and no .im7 files. "
@@ -935,20 +1921,28 @@ def _read_single_image(
     """
     if entry_idx < 0 or entry_idx >= frame_info.n_entries:
         raise IndexError(f"Entry {entry_idx} out of range [0, {frame_info.n_entries})")
+    if frame_info.blocked is not None:
+        raise ValueError(frame_info.blocked)
+
+    # Refuse an unimplemented encoding before the read; its size is also what a
+    # compressed entry must decompress to.
+    stored_h, stored_w = frame_info.stored_shape
+    expected = _payload_bytes(frame_info.decoder, stored_w, stored_h)
 
     # Refuse before the 37 MB read, not after it. Per stream: a container whose
-    # other streams carry only implemented corrections stays readable.
-    tf = frame_info.transformer
-    if tf is not None and tf.id not in _IMPLEMENTED_TRANSFORMERS:
-        container = frame_info.data_path.parent.name
-        raise ValueError(
-            f"Frame stream {frame_info.frame_idx} of {container} "
-            f"declares the stream transformer '{tf.id}' (DaVis label '{tf.label}'), "
-            f"which PIVTOOLs does not implement. Skipping it would return different "
-            f"pixels from DaVis for the same recording. PIVTOOLs implements: "
-            f"{', '.join(_IMPLEMENTED_TRANSFORMERS)}. Other streams of this "
-            f"recording are unaffected."
-        )
+    # other streams carry only implemented transformers stays readable.
+    for tf in frame_info.transformers:
+        if tf.id in _REFUSED_TRANSFORMERS:
+            raise ValueError(
+                f"Frame stream {frame_info.frame_idx} of "
+                f"{frame_info.data_path.parent.name} declares the stream transformer "
+                f"'{tf.id}' (DaVis label '{tf.label}'). It is a DaVis transformer "
+                f"whose effect PIVTOOLs has no measurement of (lvpyio opens no test "
+                f"recording carrying it), so it is not applied, and skipping it "
+                f"would return different pixels from DaVis for the same recording. "
+                f"PIVTOOLs applies: {', '.join([*_CORRECTIONS, *_GEOMETRIES])}. "
+                f"Other streams of this recording are unaffected."
+            )
 
     entry = frame_info.entries[entry_idx]
     with open(frame_info.data_path, "rb") as f:
@@ -961,46 +1955,41 @@ def _read_single_image(
             f"got {len(raw)}. File may be truncated."
         )
 
-    img = _decode_pixels(raw, frame_info.decoder, frame_info.width, frame_info.height)
+    payload = _decompress_entry(raw, frame_info, entry_idx, expected)
+    # Decoded in sensor coordinates: the index header's stored shape.
+    img = _decode_pixels(payload, frame_info.decoder, stored_w, stored_h)
+    return _apply_transformers(img, frame_info)
 
-    if tf is None:
-        return img
 
-    if tf.id == "rotate-180":
-        # A negative-stride view, deliberately not materialised: every caller
-        # performs exactly one full-frame widening copy into float32 (result[i] =
-        # img / np.copyto / astype), which absorbs arbitrary source strides for
-        # free, and none of them mutates the returned array (the raw-16-bit path
-        # already returns a read-only frombuffer view on that same contract).
-        # Verified bit-exact against lvpyio 1.3.1 on real entries (2026-08-24).
-        return img[::-1, ::-1]
+def _apply_transformers(img: np.ndarray, frame_info: IMSFrameInfo) -> np.ndarray:
+    """Apply a stream's transformers to its decoded sensor frame.
 
-    # Dark-image subtraction, clamped at zero -- DaVis and lvpyio both floor the
-    # result, and on this data ~0.001% of pixels would otherwise go negative.
-    # Verified bit-exact against lvpyio 1.3.1 across three frame streams and two
-    # entries of E:\Softwarex\alk235\images\loop=0.set (2026-08-22).
-    dark = _load_dark(str(tf.dark_path))
-    if dark.shape != img.shape:
-        raise ValueError(
-            f"Dark image {tf.dark_path.name} is {dark.shape} but frame "
-            f"stream {frame_info.frame_idx} is {img.shape}. The dark image does "
-            f"not belong to this recording."
-        )
-    # The uint16 subtraction wraps where dark > img, so the wrapped elements are
-    # then zeroed in place -- they never reach the output. Writing into the
-    # subtraction's own result keeps this to one full-frame allocation plus the
-    # mask.
-    #
-    # Not done in place on `img`: _decode_raw16 returns a np.frombuffer VIEW of
-    # the packed bytes, which is read-only, so `np.subtract(img, dark, out=img)`
-    # raises "output array is read-only" for raw-16-bit while working fine for
-    # mono-12p (which builds a fresh array). Measured on a 5312x3528 frame:
-    # 23.0 ms here, against 42.9 ms for the equivalent
-    # `np.where(img > dark, img - dark, 0).astype(np.uint16)`, which allocates
-    # four full-frame temporaries. That was 35% of a frame read.
-    out = img - dark
-    np.copyto(out, 0, where=img <= dark)
-    return out
+    ``frame_info.transformers`` is already in LaVision's order (parse sorts it):
+    corrections in sensor coordinates, each clipped, then at most one geometry,
+    which may return a view (see :class:`_Geometry`).
+
+    Raises:
+        ValueError: If a correction image is not the stream's stored (sensor)
+            shape. lvpyio checks only the pixel count and reads a transposed
+            image in the sensor raster; DaVis stores corrections in sensor shape
+            (transformer-order REPORT Q1b), so any other shape is refused.
+    """
+    for tf in frame_info.transformers:
+        correction = _CORRECTIONS.get(tf.id)
+        if correction is None:
+            img = _GEOMETRIES[tf.id].apply(img)
+            continue
+        image = _load_correction(str(tf.correction_path))
+        if image.shape != frame_info.stored_shape:
+            raise ValueError(
+                f"Correction image {tf.correction_path.name} ('{tf.id}') is "
+                f"{image.shape} but frame stream {frame_info.frame_idx} stores "
+                f"{frame_info.stored_shape} (sensor rows, columns). DaVis stores "
+                f"corrections in sensor shape, so this image does not belong to "
+                f"this recording."
+            )
+        img = correction.apply(img, image)
+    return img
 
 
 # ---------------------------------------------------------------------------
@@ -1038,7 +2027,7 @@ def _apply_scale_inplace(arr: np.ndarray, fi: IMSFrameInfo) -> None:
 # IMSIndexEntry objects, and each Dask worker gets its own copy of this dict, so an
 # unbounded cache would let a long time-resolved run pin hundreds of MB per worker.
 # Four covers a multi-loop acquisition's working set. Same reasoning, and the same
-# "raise it only with a measurement" caveat, as _load_dark's lru_cache above.
+# "raise it only with a measurement" caveat, as _load_correction's lru_cache above.
 _SET_INFO_CACHE_SIZE = 4
 _set_info_cache: "OrderedDict[str, Tuple[Tuple[float, float], SetInfo]]" = OrderedDict()
 
@@ -1192,9 +2181,17 @@ def _size(width: int, height: int) -> str:
 
 
 def _stream_table(info: SetInfo) -> str:
-    """One-line stream listing for error messages."""
+    """One-line stream listing for error messages: output size, decoder, transformers."""
     return "; ".join(
-        f"{f.frame_idx}: {_size(f.width, f.height)} {f.decoder}" for f in info.frames
+        f"{f.frame_idx}: "
+        + (
+            "size unknown"
+            if f.has_unknown_transformer
+            else _size(f.shape[1], f.shape[0])
+        )
+        + f" {f.decoder}"
+        + "".join(f" {tf.id}" for tf in f.transformers)
+        for f in info.frames
     )
 
 
@@ -1203,10 +2200,13 @@ def set_camera_streams(
     num_cameras: int,
     set_info: Optional[SetInfo] = None,
 ) -> List[Tuple[int, ...]]:
-    """The unique stream->camera split of a .set container.
+    """The stream->camera split of a .set container.
 
-    Cached on the SetInfo, so it is computed once per container and follows the
-    SetInfo cache's invalidation. Errors are not cached.
+    With camera labels (:attr:`SetInfo.cameras`) the split is the labelled
+    cameras' streams, and the camera count must be theirs. Without labels it is
+    the unique split by stream shape. Cached on the SetInfo, so it is computed
+    once per container and follows the SetInfo cache's invalidation. Errors are
+    not cached.
 
     Args:
         set_path: path to the .set file.
@@ -1217,7 +2217,9 @@ def set_camera_streams(
         One tuple of 0-based stream indices per camera, in camera order.
 
     Raises:
-        SetConfigError: If no split fits, or more than one does (ambiguous).
+        SetConfigError: With labels, if ``num_cameras`` is not their count (the
+            message lists the cameras by label, model and ID). Without, if no
+            shape split fits, or more than one does (ambiguous).
     """
     _require_positive_cameras(num_cameras, set_path)
     info = set_info if set_info is not None else read_set_info(set_path)
@@ -1225,7 +2227,21 @@ def set_camera_streams(
     if cached is not None:
         return list(cached)
 
-    shapes = [(f.height, f.width) for f in info.frames]
+    if info.cameras is not None:
+        n = len(info.cameras)
+        if num_cameras != n:
+            raise SetConfigError(
+                f"{Path(set_path).name} holds {n} {'camera' if n == 1 else 'cameras'} "
+                f"by its own camera labels, not {num_cameras}: "
+                f"{camera_list_text(info.cameras)}. Set the camera count to {n}."
+            )
+        split = tuple(c.frames for c in info.cameras)
+        info.stream_splits[num_cameras] = split
+        return list(split)
+
+    # Output shapes: an A/B pair must match as read, after the transformers, and
+    # a rotated stream must not pair with an unrotated one of equal stored shape.
+    shapes = [f.shape for f in info.frames]
     splits = valid_stream_splits(shapes, num_cameras)
     if len(splits) == 1:
         info.stream_splits[num_cameras] = splits[0]
@@ -1278,11 +2294,19 @@ def camera_streams(
         raise SetConfigError(f"Camera {camera} is outside 1..{num_cameras} for {name}.")
     info = set_info if set_info is not None else read_set_info(set_path)
     streams = set_camera_streams(set_path, num_cameras, info)[camera - 1]
+    if pair and len(streams) == 1 and info.cameras is not None:
+        raise SetPairingError(
+            f"Camera {camera} of {name}, {info.cameras[camera - 1].describe()} on "
+            f"{streams_text(streams)}, is a single-frame camera, so it has no A/B "
+            f"pairs. Deselect camera {camera} in the PIV camera selection, or "
+            f"process it time-resolved."
+        )
     if pair and len(streams) == 1:
         frame = info.frames[streams[0]]
         raise SetPairingError(
             f"Camera {camera} has one stream ({frame.frame_idx}: "
-            f"{_size(frame.width, frame.height)}) in {name}, but A/B pairing needs two. "
+            f"{_size(frame.shape[1], frame.shape[0])}) in {name}, but A/B pairing "
+            f"needs two. "
             f"Deselect camera {camera} in the PIV camera selection."
         )
     return streams
@@ -1357,19 +2381,19 @@ def read_set_pair(
     # Streams legitimately differ in shape across cameras (alk235's five span
     # 3472-3536 rows). The resolver only pairs equal shapes, so this guards a
     # caller handing in a hand-built tuple rather than a numpy broadcast error.
-    if (fi_a.height, fi_a.width) != (fi_b.height, fi_b.width):
+    if fi_a.shape != fi_b.shape:
         raise ValueError(
-            f"Frame streams {frame_idx_a} ({fi_a.height}x{fi_a.width}) and "
-            f"{frame_idx_b} ({fi_b.height}x{fi_b.width}) differ in shape, so they "
-            f"are not one camera's A/B pair."
+            f"Frame streams {frame_idx_a} ({fi_a.shape[0]}x{fi_a.shape[1]}) and "
+            f"{frame_idx_b} ({fi_b.shape[0]}x{fi_b.shape[1]}) differ in shape, so "
+            f"they are not one camera's A/B pair."
         )
 
     if out is None:
-        result = np.empty((2, fi_a.height, fi_a.width), dtype=np.float32)
+        result = np.empty((2, *fi_a.shape), dtype=np.float32)
     else:
         result = check_out(
             out,
-            (2, fi_a.height, fi_a.width),
+            (2, *fi_a.shape),
             f"read_set_pair streams {frame_idx_a}+{frame_idx_b} of {Path(set_path).name}",
         )
 
@@ -1441,10 +2465,10 @@ def read_set_frame(
     if out is None:
         result = None
     else:
-        if out.shape != (fi.height, fi.width):
+        if out.shape != fi.shape:
             raise ValueError(
                 f"out has shape {out.shape}, but frame stream {fi.frame_idx} of "
-                f"{Path(set_path).name} is {(fi.height, fi.width)}."
+                f"{Path(set_path).name} reads as {fi.shape}."
             )
         if out.dtype != np.float32:
             raise ValueError(

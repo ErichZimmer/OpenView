@@ -8,22 +8,131 @@ Used by both instantaneous.py and ensemble.py entry points.
 import logging
 import os
 import re
+from pathlib import Path
 from typing import List, Tuple
 
-from pivtools_core.config import Config
+from pivtools_core.config import ActivePathsError, Config
 from pivtools_core.fft_sizes import (
     BUILT_FFT_SIZES,
     SINGLE_MODE_A_SIZES,
     SINGLE_MODE_WINDOW_SIZES,
 )
-from pivtools_core.image_handling.load_images import create_piv_frame_reader
+from pivtools_core.image_handling.load_images import (
+    create_piv_frame_reader,
+    read_pair,
+)
 from pivtools_core.image_handling.path_utils import (
+    camera_path_for,
     format_to_glob,
     validate_images_generic,
 )
 from pivtools_core.image_handling.source_diagnosis import piv_diagnosis_context
 
 logger = logging.getLogger(__name__)
+
+
+def later_loop_findings(config: Config, base_source: Path, camera: int) -> List[str]:
+    """Loops 1..N-1 of a looped recording, each read through its own source.
+
+    Loop 0 is ``base_source`` itself, which the callers (``validate_config``,
+    the GUI's ``/validate_files``) check in full. Every later loop must exist,
+    and its first and last pair must read from its own camera path, as the
+    pipeline (``load_images``) will read them.
+
+    Args:
+        config: Configuration object.
+        base_source: The configured ``paths.source_paths`` entry (loop 0).
+        camera: Camera number (1-based).
+
+    Returns:
+        One sentence per problem, each naming the loop and its source; empty
+        for a single-loop recording.
+    """
+    findings: List[str] = []
+    if config.num_loops <= 1:
+        # Nothing to read, and the pair count is not asked for: a .pivraw run
+        # that cannot be paired raises there, and validate_config reports that
+        # refusal itself (_pivraw_pairing_findings).
+        return findings
+    pairs_per_loop = config.per_loop_frame_pairs
+    for loop_idx in range(1, config.num_loops):
+        loop_source = config.get_loop_source_path(base_source, loop_idx)
+        if not loop_source.exists():
+            findings.append(f"Loop {loop_idx} source not found: {loop_source.name}")
+            continue
+        camera_path = camera_path_for(config, loop_source, camera)
+        for which, pair in (("first", 1), ("last", pairs_per_loop)):
+            try:
+                read_pair(pair, camera_path, camera, config)
+            except Exception as e:
+                findings.append(
+                    f"Loop {loop_idx} ({loop_source.name}): {which} pair "
+                    f"({pair}) could not be read: {e}"
+                )
+    return findings
+
+
+def _pivraw_pairing_findings(config: Config, warnings: List[str]) -> List[str]:
+    """The trigger pairing of a ``.pivraw`` config, reported for every active run.
+
+    Appends to ``warnings``, per active source path: the alignment notes
+    (unprovable A/B phase), each led by the run folder, and a camera in the
+    run that is not selected but would refuse it if it were; then a
+    ``num_images`` cap that bites. Returns the errors: a run that cannot be
+    paired or lost a frame (named by the reader), or active runs that align
+    different pair counts.
+    """
+    from pivtools_core.image_handling.readers.pivraw_reader import PivrawError
+
+    try:
+        n_pairs = config.num_frame_pairs
+        alignments = [config.pivraw_alignment(s) for s in config.active_source_paths]
+    except PivrawError as e:
+        return [str(e)]
+    for alignment in alignments:
+        warnings.extend(f"{alignment.run_dir}: {note}" for note in alignment.notes)
+        warnings.extend(_unselected_camera_notes(config, alignment))
+    # num_frame_pairs refuses runs that align different pair counts, so one
+    # count stands for every run.
+    aligned = len(alignments[0].pairs)
+    if n_pairs < aligned:
+        warnings.append(
+            f"Processing {n_pairs} of {aligned} aligned pairs: "
+            f"images.num_images ({config.num_images}) caps them."
+        )
+    return []
+
+
+def _unselected_camera_notes(config: Config, alignment) -> List[str]:
+    """A note per camera in the run but not selected that would refuse it.
+
+    The alignment covers the selected cameras only. Each other camera of the
+    run is aligned with them in turn, and one the reader refuses is named with
+    the reader's reason, so the user knows the run is not whole.
+    """
+    from pivtools_core.image_handling.readers.pivraw_reader import (
+        PivrawError,
+        align_pivraw_run,
+        run_cameras,
+    )
+
+    notes = []
+    for slot in run_cameras(alignment.run_dir):
+        if slot in alignment.cameras:
+            continue
+        try:
+            align_pivraw_run(
+                alignment.run_dir,
+                config.frame_stride,
+                config.pair_stride,
+                cameras=alignment.cameras + (slot,),
+            )
+        except PivrawError as e:
+            notes.append(
+                f"{alignment.run_dir}: Camera{slot} is in the run but not selected "
+                f"for processing; selected, it would refuse the run: {e}"
+            )
+    return notes
 
 
 def validate_config(config: Config) -> Tuple[bool, str, List[str]]:
@@ -56,11 +165,11 @@ def validate_config(config: Config) -> Tuple[bool, str, List[str]]:
             "must have the same number of entries for paired processing"
         )
 
-    # Check at least one active path
-    if not config.active_paths:
-        errors.append(
-            "No active paths configured. Set active_paths in config or check indices are valid."
-        )
+    # The dataset selection must name real datasets (an empty one is refused too)
+    try:
+        config.active_paths
+    except ActivePathsError as e:
+        errors.append(str(e))
 
     # Check source paths exist
     for i, source_path in enumerate(config.source_paths):
@@ -86,15 +195,10 @@ def validate_config(config: Config) -> Tuple[bool, str, List[str]]:
     diagnosis = piv_diagnosis_context(config, 0)
 
     for camera_num in camera_numbers:
-        # Determine camera path
         format_str = config.image_format[0]
-        if image_type in ("lavision_set", "lavision_im7", "cine"):
-            camera_path = source_path
-        else:
-            folder = config.get_camera_folder(camera_num)
-            camera_path = source_path / folder if folder else source_path
+        camera_path = camera_path_for(config, source_path, camera_num)
 
-        # Use the canonical validator (handles .set, .cine, .im7, standard)
+        # Use the canonical validator (handles .set, .cine, .pivraw, .im7, standard)
         read_frame = create_piv_frame_reader(camera_path, camera_num, config)
 
         result = validate_images_generic(
@@ -106,26 +210,28 @@ def validate_config(config: Config) -> Tuple[bool, str, List[str]]:
             config.start_index == 0,
             read_frame_fn=read_frame,
             diagnosis=diagnosis,
+            pair_strides=(config.frame_stride, config.pair_stride),
         )
 
+        warnings.extend(f"Camera {camera_num}: {note}" for note in result["notes"])
+        # The diagnosis warnings are about the recording (DaVis's SetIsSuspicious
+        # flag), the same for every camera of it: reported once.
+        warnings.extend(w for w in result["warnings"] if w not in warnings)
         if result["error"]:
             errors.append(f"Camera {camera_num}: {result['error']}")
-        elif result["valid"]:
-            # Check for processing subset (found > expected)
+        elif result["valid"] and image_type != "pivraw":
+            # Check for processing subset (found > expected). A .pivraw run is
+            # paired by trigger, so its subset is counted in pairs, below.
             found = result["found_count"]
             if isinstance(found, int) and found > config.num_images:
                 warnings.append(
                     f"Camera {camera_num}: Processing subset - using {config.num_images} of {found} available files"
                 )
 
-        # Supplementary: multi-loop source validation
-        if config.num_loops > 1:
-            for loop_idx in range(config.num_loops):
-                loop_path = config.get_loop_source_path(source_path, loop_idx)
-                if not loop_path.exists():
-                    errors.append(
-                        f"Camera {camera_num}: Loop {loop_idx} source not found: {loop_path}"
-                    )
+        errors.extend(
+            f"Camera {camera_num}: {finding}"
+            for finding in later_loop_findings(config, source_path, camera_num)
+        )
 
         # Supplementary: indexing mismatch check (standard types only)
         if image_type == "standard" and result["valid"] and camera_path.exists():
@@ -148,6 +254,9 @@ def validate_config(config: Config) -> Tuple[bool, str, List[str]]:
                             f"Camera {camera_num}: File indexing mismatch - found files starting at {min_idx}, "
                             f"but start_index is {expected_min}"
                         )
+
+    if image_type == "pivraw" and not errors:
+        errors.extend(_pivraw_pairing_findings(config, warnings))
 
     # Window sizes must be sizes the codelet FFT engine was built for.
     # Fail loud here, at config load, rather than deep in the C hot path.
@@ -506,15 +615,31 @@ def validate_memory_for_images(config: Config) -> str:
     Check if configured memory per worker is sufficient for the image
     resolution and batch size.
 
-    Returns:
-        Warning message string, or empty string if memory is sufficient.
-    """
-    try:
-        image_shape = config.image_shape  # (H, W) — reads an actual image
-    except Exception:
-        return ""  # Can't check if we can't read images
+    Cameras are processed one after another on the same workers, so the
+    largest selected camera sets the requirement.
 
-    h, w = image_shape
+    Returns:
+        Warning message string, or empty string if memory is sufficient or
+        nothing is configured yet (no source path, no camera, or a source path
+        that does not exist). A camera whose image size cannot be read gives a
+        warning naming the camera and the reader's error.
+    """
+    sources = config.source_paths
+    cameras = config.camera_numbers
+    if not sources or not cameras or not sources[0].exists():
+        return ""
+    shapes = []
+    for cam in cameras:
+        try:
+            # (H, W) -- reads an actual image or container metadata
+            shapes.append(config.image_shape_for(cam))
+        except (ValueError, OSError) as e:
+            return (
+                f"Memory per worker not checked: the image size of camera {cam} "
+                f"cannot be read ({e})."
+            )
+
+    h, w = max(shapes, key=lambda hw: hw[0] * hw[1])
     batch_size = config.batch_size
     memory_limit = config.dask_memory_limit
     megapixels = (h * w) / 1e6

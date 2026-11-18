@@ -7,9 +7,12 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import TYPE_CHECKING, List, Optional, Tuple
 
 import yaml
+
+if TYPE_CHECKING:
+    from .image_handling.readers.pivraw_reader import PivrawAlignment
 
 # ===================== ENDPOINT CONSTRAINTS =====================
 # Tool-specific source_endpoint constraints - defines what data sources each tool can use
@@ -49,6 +52,26 @@ CALIBRATION_ACTIVE_METHODS = (
 # (masking.predictor_fill). 'none' leaves the stored zeros (old behaviour). Single source
 # of truth: pivtools_cli/piv/piv_backend/infilling.py imports it.
 PREDICTOR_FILL_METHODS = ("harmonic", "nearest", "none")
+
+# Environment variable the GUI's PIV runner sets to choose a job's datasets.
+ACTIVE_PATHS_ENV = "PIV_ACTIVE_PATHS"
+
+
+def _dataset_number(entry: object) -> Optional[int]:
+    """``entry`` as a dataset index, or None when it is not a whole number.
+
+    An int, or a string of digits with an optional minus sign (the form an
+    override and a quoted YAML entry take). A bool is not a number here, though
+    Python counts it as an int, and neither is a float.
+    """
+    if isinstance(entry, bool):
+        return None
+    if isinstance(entry, int):
+        return entry
+    if isinstance(entry, str) and re.fullmatch(r"-?\d+", entry.strip()):
+        return int(entry)
+    return None
+
 
 _PREDICTOR_BC_KEYS = frozenset({"y_position", "ux", "uy", "edge"})
 _PREDICTOR_BC_EDGES = ("bottom", "top")
@@ -129,6 +152,34 @@ class CalibrationSourceError(ValueError):
     """
 
 
+class PairingStrideError(ValueError):
+    """The pairing strides cannot be read from this image type: the user fixes the config.
+
+    Raised by :meth:`Config.get_frame_pair_indices` and the pair counts, naming
+    the key and the fix. The GUI treats it as it treats a ``.pivraw`` run the
+    reader refuses: the config routes carry it in ``images.pairing_error`` and
+    the routes that read pairs answer HTTP 400 with its message.
+    """
+
+
+class ActivePathsError(ValueError):
+    """A dataset selection that names no real dataset: the user fixes the selection.
+
+    Raised by :meth:`Config.resolve_active_paths` for an index outside the
+    datasets, a non-integer entry or an empty selection, in
+    ``paths.active_paths`` or in ``PIV_ACTIVE_PATHS``. The message names the
+    bad value and how many datasets the config has. The GUI answers it with
+    HTTP 400 and its message; the CLI exits non-zero.
+    """
+
+
+# Image types read by PIVTOOLs' own readers. Every refusal they make is a
+# ValueError (PivrawError, SetConfigError and SetPairingError,
+# CameraIdentityError, AttrFormatError, a blocked camera, the strict-header
+# checks) or an OSError (TokenStreamError, a missing file), and names the file
+# and the fix, so shape detection passes those through unchanged.
+_OWN_READER_IMAGE_TYPES = frozenset({"lavision_set", "lavision_im7", "pivraw", "cine"})
+
 _CONFIG = None  # singleton cache
 _LOGGING_INITIALIZED = False  # Track if logging has been set up
 
@@ -147,8 +198,9 @@ class Config:
         if self.data is None:
             self.data = {}
 
-        # Cache for auto-detected image shape
-        self._detected_image_shape = None
+        # Auto-detected (H, W) per camera number. Cameras on one rig can differ
+        # in sensor size or rotation, so there is no single image shape.
+        self._detected_image_shapes: dict[int, tuple[int, int]] = {}
 
         # Cache for auto-computed parameters
         self._auto_compute_cache = None
@@ -404,7 +456,8 @@ class Config:
     @property
     def image_type(self) -> str:
         """
-        Return image type: 'standard', 'cine', 'lavision_set', 'lavision_im7'.
+        Return image type: 'standard', 'cine', 'pivraw', 'lavision_set',
+        'lavision_im7'.
 
         If explicitly set in config, returns that value.
         Otherwise, auto-detects from image_format pattern.
@@ -412,7 +465,7 @@ class Config:
         Returns
         -------
         str
-            One of: 'standard', 'cine', 'lavision_set', 'lavision_im7'
+            One of: 'standard', 'cine', 'pivraw', 'lavision_set', 'lavision_im7'
         """
         explicit_type = self.data.get("images", {}).get("image_type")
         if explicit_type:
@@ -424,6 +477,8 @@ class Config:
         fmt = self.image_format[0].lower()
         if ".cine" in fmt:
             return "cine"
+        elif ".pivraw" in fmt:
+            return "pivraw"
         elif ".set" in fmt or ".ims" in fmt:
             # A bare .ims is one DaVis stream inside a .set recording's data folder.
             return "lavision_set"
@@ -438,6 +493,7 @@ class Config:
 
         Container formats (one file holds many timestamps):
         - cine: Single-camera video container (one file per camera)
+        - pivraw: PIVTOOLS Acquisition run container (one file per camera)
         - lavision_set: Multi-camera container (all cameras in one file)
 
         NOT containers (one file per timestamp):
@@ -452,17 +508,17 @@ class Config:
         if image_type == "lavision_im7" and "%" in image_format:
             return False
 
-        # Only .set and .cine are true multi-timestamp containers
-        return image_type in ("cine", "lavision_set")
+        # Only .set, .cine and .pivraw are true multi-timestamp containers
+        return image_type in ("cine", "pivraw", "lavision_set")
 
     @property
     def is_single_camera_container(self) -> bool:
-        """Return True if container has one camera per file (like .cine).
+        """Return True if container has one camera per file (.cine, .pivraw).
 
-        .cine files contain frames from a single camera. Multi-camera setups
-        have separate .cine files per camera (e.g., Camera1.cine, Camera2.cine).
+        .cine and .pivraw files contain frames from a single camera. Multi-camera
+        setups have one file per camera (e.g., Camera1.cine, Camera2.cine).
         """
-        return self.image_type == "cine"
+        return self.image_type in ("cine", "pivraw")
 
     @property
     def is_multi_camera_container(self) -> bool:
@@ -622,36 +678,181 @@ class Config:
 
     @property
     def per_loop_frame_pairs(self) -> int:
-        """Frame pairs within a single loop (original stride calculation).
+        """Frame pairs within a single loop.
 
         This is the number of pairs from one source (file or folder) before
         considering multiple loops. The total across all loops is num_frame_pairs.
+
+        Every image type but ``.pivraw`` counts pairs from ``num_images`` with
+        the stride formula. A ``.pivraw`` run pairs its cameras by trigger
+        (:meth:`pivraw_alignment`), so its count is the aligned pairs, capped
+        by the stride formula on ``num_images``: ``num_images`` keeps its
+        meaning of a processing subset (the first aligned pairs, at most as
+        many as that many frames of a clean run give). Only the active source
+        paths are aligned (:attr:`active_source_paths`): an inactive run is not
+        processed, so it cannot block the active ones.
+
+        Raises
+        ------
+        PairingStrideError
+            Every other image type: the strides cannot be read from this image
+            type (:meth:`_require_strides_suit_source`).
+        PivrawError
+            ``.pivraw``: no source path is active, an active run cannot be
+            aligned, the pairing does not suit it, or the active runs align
+            different numbers of pairs.
         """
-        num_images = self.num_images
-        fs = self.frame_stride
-        ps = self.pair_stride
+        return self._per_loop_pairs(self.active_source_paths)
 
-        if fs == 0:
-            return num_images
+    def _per_loop_pairs(self, sources: List[Path]) -> int:
+        """:attr:`per_loop_frame_pairs` for the datasets ``sources``.
 
-        if ps <= 0:
-            ps = 1
+        ``sources`` is used by ``.pivraw`` only, whose runs are each aligned;
+        every other type counts from ``num_images`` alone. Raises as
+        :attr:`per_loop_frame_pairs` does.
+        """
+        if self.image_type != "pivraw":
+            self._require_strides_suit_source()
+            return self._stride_pair_count()
+        from .image_handling.readers.pivraw_reader import PivrawError
 
-        return max(0, (num_images - 1 - fs) // ps + 1)
+        if not sources:
+            raise PivrawError(
+                "No source path is active (paths.active_paths), so no .pivraw "
+                "run is aligned and there is no pair count."
+            )
+        aligned = {
+            str(source): len(self.pivraw_alignment(source).pairs) for source in sources
+        }
+        if len(set(aligned.values())) > 1:
+            listed = "; ".join(f"{s}: {n}" for s, n in aligned.items())
+            raise PivrawError(
+                "Every .pivraw run in one config must hold the same number of "
+                f"aligned pairs, since one pair count serves them all ({listed}). "
+                "Process the runs in separate configs."
+            )
+        # align_pivraw_run has refused strides below 1, so the count is defined.
+        return min(next(iter(aligned.values())), self._stride_pair_count())
+
+    def _stride_pair_count(self) -> int:
+        """Pairs ``num_images`` frames give under the pairing strides.
+
+        Pair n's frame B is ``start_index + (n - 1) * pair_stride +
+        frame_stride``, and the last of ``num_images`` frames is ``start_index
+        + num_images - 1``, so n runs to ``(num_images - 1 - frame_stride) //
+        pair_stride + 1``. ``frame_stride`` 0 (pre-paired) is the same formula:
+        every ``pair_stride``-th of ``num_images`` entries.
+        """
+        span = self.num_images - 1 - self.frame_stride
+        return max(0, span // self.pair_stride + 1)
+
+    # Image types whose frames are numbered from 1 by their own reader, with the
+    # file extension a refusal names. A .set numbers its entries 1..N as DaVis
+    # does (read_set_frame / read_set_pair take 1-based entries), and the .cine
+    # reader takes 1-based frames it offsets by the camera's FirstImageNo. A
+    # start_index of 0 asks these readers for a frame that does not exist.
+    _ONE_BASED_IMAGE_TYPES = {"lavision_set": ".set", "cine": ".cine"}
+
+    def _require_strides_suit_source(self) -> None:
+        """Refuse, by name, strides the image type cannot be read with.
+
+        ``.pivraw`` is not checked here: :meth:`pivraw_alignment` decides its
+        pairing from the trigger record and refuses its own.
+
+        Raises
+        ------
+        PairingStrideError
+            ``frame_stride`` is negative, ``pair_stride`` is below 1 (every pair
+            would read the same or earlier frames), ``start_index`` is below 1
+            on a ``.set`` or ``.cine``, or ``frame_stride`` is 0 on a ``.cine``
+            (a .cine holds one frame per image, so there is no A+B entry to
+            read pre-paired).
+        """
+        fs, ps, si = self.frame_stride, self.pair_stride, self.start_index
+        if fs < 0:
+            raise PairingStrideError(
+                f"images.frame_stride is {fs}; it is the frames from A to B of "
+                "a pair, so it must be 0 (pre-paired) or more."
+            )
+        if ps < 1:
+            raise PairingStrideError(
+                f"images.pair_stride is {ps}; it is the frames from one pair's "
+                "A to the next pair's A, so it must be 1 or more."
+            )
+        ext = self._ONE_BASED_IMAGE_TYPES.get(self.image_type)
+        if ext is not None and si < 1:
+            raise PairingStrideError(
+                f"images.start_index is {si}, but a {ext} numbers its frames "
+                "from 1, so there is no frame 0. Set start_index to 1 (or to "
+                "the first frame to process)."
+            )
+        if self.image_type == "cine" and fs == 0:
+            raise PairingStrideError(
+                "images.frame_stride is 0 (pre-paired), but a .cine holds one "
+                "frame per image, so there is no A+B entry. Set frame_stride 1 "
+                "(pair_stride 1 overlapping, 2 for consecutive pairs)."
+            )
+
+    @property
+    def active_source_paths(self) -> List[Path]:
+        """The source paths of :attr:`active_paths`, in that order."""
+        return [self.source_paths[i] for i in self.active_paths]
+
+    def pivraw_alignment(self, source: Optional[Path] = None) -> "PivrawAlignment":
+        """The trigger alignment of one ``.pivraw`` run, with this config's pairing.
+
+        The strides are in recorded frames: a double-frame run takes the
+        skip_frames preset (A with B of each trigger), a time-resolved run pairs
+        trigger t with t + ``frame_stride``, stepped by ``pair_stride``. The
+        cameras aligned are the ones selected for processing
+        (``paths.camera_numbers``), so a deselected camera cannot block them.
+
+        Parameters
+        ----------
+        source : Path, optional
+            The run folder. None means the first source path.
+
+        Raises
+        ------
+        PivrawError
+            ``start_index`` is not 1 or ``num_loops`` is not 1 (an aligned run
+            numbers its own pairs from 1, and each run is aligned on its own),
+            or :func:`align_pivraw_run` refuses the run.
+        """
+        from .image_handling.readers.pivraw_reader import (
+            PivrawError,
+            align_pivraw_run,
+        )
+
+        if self.start_index != 1:
+            raise PivrawError(
+                f"images.start_index is {self.start_index}; a .pivraw run is "
+                "paired by trigger and numbers its pairs from 1, so it must be 1."
+            )
+        if self.num_loops != 1:
+            raise PivrawError(
+                f"images.num_loops is {self.num_loops}; each .pivraw run is "
+                "aligned by trigger on its own, so loops are not supported. List "
+                "the runs as source_paths."
+            )
+        run_dir = Path(source) if source is not None else self.source_paths[0]
+        return align_pivraw_run(
+            run_dir, self.frame_stride, self.pair_stride, cameras=self.camera_numbers
+        )
 
     @property
     def num_frame_pairs(self):
         """Total frame pairs across all loops.
 
         Uses the unified stride formula per loop, multiplied by num_loops:
-        - frame_stride == 0 (pre-paired/A-B): num_images pairs per loop
-        - frame_stride > 0: (num_images - 1 - frame_stride) // pair_stride + 1 per loop
+        (num_images - 1 - frame_stride) // pair_stride + 1 per loop.
 
         Examples (single loop):
             time_resolved (fs=1, ps=1): 100 images → 99 pairs
             skip_frames   (fs=1, ps=2): 100 images → 50 pairs
             ab_format     (fs=0, ps=1): 100 images → 100 pairs
             pre_paired    (fs=0, ps=1): 100 images → 100 pairs
+            every 2nd pre-paired entry (fs=0, ps=2): 100 images → 50 pairs
 
         With num_loops=3 and 40 per-loop pairs: returns 120.
 
@@ -661,6 +862,39 @@ class Config:
             Number of frame pairs (always >= 0)
         """
         return self.num_loops * self.per_loop_frame_pairs
+
+    def require_frame_pairs(self, active_paths: Optional[List[int]] = None) -> int:
+        """The frame-pair count, for a caller that must refuse an unpairable source first.
+
+        A job start or a calibration check calls it before anything runs, so a
+        source the job cannot pair stops there with the same message rather
+        than later inside the job.
+
+        Parameters
+        ----------
+        active_paths : list of int, optional
+            The datasets the job will process, already resolved (the GUI's Run
+            PIV passes the request's, which never reach ``paths.active_paths``
+            in the file). None pairs :attr:`active_paths`, as the job does with
+            no override.
+
+        Returns
+        -------
+        int
+            :attr:`num_frame_pairs` over those datasets.
+
+        Raises
+        ------
+        PivrawError
+            ``.pivraw``: the run cannot be aligned or the pairing does not suit
+            it (:attr:`per_loop_frame_pairs`).
+        PairingStrideError
+            Every other image type: strides it cannot be read with.
+        """
+        if active_paths is None:
+            return self.num_frame_pairs
+        sources = [self.source_paths[i] for i in active_paths]
+        return self.num_loops * self._per_loop_pairs(sources)
 
     def get_loop_source_path(self, source_path: Path, loop_idx: int) -> Path:
         """Get the source file/directory path for a specific loop index.
@@ -737,10 +971,18 @@ class Config:
             return "sequential"
         return "skip"
 
-    def get_frame_pair_indices(self, pair_number: int) -> tuple:
+    def get_frame_pair_indices(
+        self,
+        pair_number: int,
+        camera: Optional[int] = None,
+        source: Optional[Path] = None,
+    ) -> tuple:
         """Get the file/frame indices for a given pair number.
 
-        Uses the unified stride formula:
+        ``.pivraw`` runs are paired by trigger, and each camera's file frames
+        of pair n come from the run's alignment: ``camera`` is required, and
+        ``source`` names the run folder (None means the first source path).
+        Every other image type ignores both and uses the unified stride formula:
             pair_start = start_index + (pair_number - 1) * pair_stride
             frame_a = pair_start
             frame_b = pair_start + frame_stride  (or pair_start if frame_stride == 0)
@@ -762,7 +1004,23 @@ class Config:
                 pair 1 → (1, 1), pair 2 → (2, 2)
             zero-based time_resolved (si=0, fs=1, ps=1):
                 pair 1 → (0, 1), pair 2 → (1, 2)
+
+        Raises:
+            ValueError: ``.pivraw`` without ``camera``.
+            PairingStrideError: Strides the image type cannot be read with
+                (:meth:`_require_strides_suit_source`).
+            PivrawError: ``.pivraw`` whose run cannot be aligned, or a pair or
+                camera outside it.
         """
+        if self.image_type == "pivraw":
+            if camera is None:
+                raise ValueError(
+                    "A .pivraw run is paired by trigger, and its file frames "
+                    "differ per camera: pass the camera."
+                )
+            return self.pivraw_alignment(source).file_frames(pair_number, camera)
+
+        self._require_strides_suit_source()
         si = self.start_index
         fs = self.frame_stride
         ps = self.pair_stride
@@ -774,32 +1032,74 @@ class Config:
         else:
             return (pair_start, pair_start + fs)
 
-    @property
-    def image_shape(self):
-        """
-        Return image shape (H, W), auto-detected from the first image and
-        cached per process.
+    def frame_pair_indices_batch(
+        self,
+        first_pair: int,
+        count: int,
+        camera: int,
+        source: Optional[Path] = None,
+    ) -> List[Tuple[int, int]]:
+        """:meth:`get_frame_pair_indices` for ``count`` pairs from ``first_pair``.
 
-        There is deliberately no config override. A ``shape`` key was read here
-        for years but nothing ever wrote it (the GUI backend stores
-        ``images["image_shape"]`` purely as a /config response cache), and
-        honoring a stored shape that has gone stale would silently break every
-        window-grid computation downstream. Detection reads metadata or one
-        image and is cached, so the override bought nothing.
-        """
-        if self._detected_image_shape is None:
-            self._detected_image_shape = self._detect_image_shape()
-            logging.info("Auto-detected image shape: %s", self._detected_image_shape)
+        A ``.pivraw`` run's alignment is looked up once for the batch: each
+        lookup lists the run folder and stats every camera's files, so a
+        lookup per pair cost that I/O ``count`` times. The indices are the
+        same as pair by pair.
 
-        return self._detected_image_shape
-
-    def _detect_image_shape(self) -> tuple:
+        Raises:
+            PivrawError: As :meth:`get_frame_pair_indices`.
         """
-        Detect image shape by reading the first image (.set uses container
-        index metadata only -- no pixel decode).
+        pairs = range(first_pair, first_pair + count)
+        if self.image_type != "pivraw":
+            return [self.get_frame_pair_indices(n) for n in pairs]
+        alignment = self.pivraw_alignment(source)
+        return [alignment.file_frames(n, camera) for n in pairs]
+
+    def image_shape_for(self, camera: int) -> tuple[int, int]:
+        """
+        Return camera ``camera``'s image shape (H, W), auto-detected from its
+        first image and cached per camera.
+
+        Each camera keeps its own shape: cameras on one rig can differ in
+        sensor size (alk235's five span 3472-3536 rows) or in rotation (a
+        90 degree transformer presents (W, H)). Every reader of the shape --
+        batch buffers, Dask chunk shapes, window grids, masks -- asks for the
+        camera it is working on.
+
+        There is deliberately no config override. Honouring a stored shape
+        that has gone stale would silently break every window-grid
+        computation downstream. Detection reads metadata or one image and is
+        cached, so an override buys nothing.
+
+        Parameters
+        ----------
+        camera : int
+            1-based camera number.
+
+        Returns
+        -------
+        tuple[int, int]
+            (H, W) of this camera's frames as the reader returns them.
+        """
+        if camera not in self._detected_image_shapes:
+            shape = self._detect_image_shape(camera)
+            self._detected_image_shapes[camera] = shape
+            logging.info("Auto-detected image shape for camera %d: %s", camera, shape)
+
+        return self._detected_image_shapes[camera]
+
+    def _detect_image_shape(self, camera_num: int) -> tuple:
+        """
+        Detect one camera's image shape by reading its first image (.set uses
+        container index metadata only -- no pixel decode).
 
         Handles all image formats including .set, .im7, .cine, and standard formats.
         For container formats, passes the required camera and image parameters.
+
+        Parameters
+        ----------
+        camera_num : int
+            1-based camera number whose shape is detected.
 
         Returns
         -------
@@ -809,7 +1109,6 @@ class Config:
         from .image_handling.load_images import read_image
 
         source_path = self.source_paths[0]
-        camera_num = self.camera_numbers[0]
         image_format = self.image_format
         img_type = self.image_type
 
@@ -820,13 +1119,9 @@ class Config:
 
         format_str = image_format[0]  # Always tuple now
 
-        # Determine camera_path the way load_images._camera_path_from_source
-        # does. get_camera_folder already answers "" for .set, .cine and
-        # multi-camera .im7; single-camera-per-subfolder .im7 gets its folder.
-        # Treating every .im7 as "no subdir" here made shape detection look for
-        # source/B00001.im7 on a Cam1/B00001.im7 layout and fail as not found.
-        folder = self.get_camera_folder(camera_num)
-        camera_path = source_path / folder if folder else source_path
+        from .image_handling.path_utils import camera_path_for
+
+        camera_path = camera_path_for(self, source_path, camera_num)
 
         logging.debug(f"Camera path: {camera_path}")
 
@@ -840,10 +1135,10 @@ class Config:
             file_path = camera_path
         elif img_type == "lavision_im7":
             file_path = camera_path / (format_str % start_idx)
-        elif img_type == "cine":
-            # CINE: format uses %d for camera number
-            cine_filename = format_str % camera_num
-            file_path = camera_path / cine_filename
+        elif img_type in ("cine", "pivraw"):
+            # CINE / PIVRAW: format uses %d for camera number
+            container_filename = format_str % camera_num
+            file_path = camera_path / container_filename
         else:
             # Standard files - use first format for shape detection
             file_path = camera_path / (format_str % start_idx)
@@ -875,8 +1170,9 @@ class Config:
                 stream_idx = camera_streams(
                     file_path, camera_num, self.camera_count, pair=False, set_info=info
                 )[0]
-                fi = info.frames[stream_idx]
-                shape = (fi.height, fi.width)
+                # Output shape, after the stream's transformers: a 90 degree
+                # rotation reads as (W, H) of the index header.
+                shape = info.frames[stream_idx].shape
                 logging.debug(f"Detected image shape: {shape}")
                 return shape
             elif img_type == "lavision_im7":
@@ -910,11 +1206,24 @@ class Config:
                         )
                 logging.debug(f"Detected image shape: {shape}")
                 return shape
+            elif img_type == "pivraw":
+                # Shape comes from the sidecar (BayerRG8 halves it) -- no
+                # pixel decode, and no pairing assumption.
+                from .image_handling.readers.pivraw_reader import (
+                    get_pivraw_image_shape,
+                )
+
+                shape = get_pivraw_image_shape(file_path)
+                logging.debug(f"Detected image shape: {shape}")
+                return shape
             elif img_type == "cine":
-                # For .cine files, read the first pair (idx=1); the shape is
-                # taken off it below. read_cine_pair always reads exactly two
-                # frames — it takes no frame count.
-                img = read_image(str(file_path), idx=1)
+                # The first frame's shape: one decode, and no pairing
+                # assumption (the pair reader needs both frames named).
+                from .image_handling.readers.cine_reader import get_cine_image_shape
+
+                shape = get_cine_image_shape(str(file_path))
+                logging.debug(f"Detected image shape: {shape}")
+                return shape
             else:
                 # Regular files don't need extra parameters
                 img = read_image(str(file_path))
@@ -931,11 +1240,20 @@ class Config:
             return shape
 
         except Exception as e:
-            logging.error("Failed to read image: %s", e)
+            own_reader = img_type in _OWN_READER_IMAGE_TYPES
+            if own_reader and isinstance(e, (ValueError, OSError)):
+                raise
+            if own_reader:
+                advice = (
+                    "PIVTOOLs' reader does not handle what it found in this file: "
+                    "report it, with the file."
+                )
+            else:
+                advice = "Check that the file is a valid image of its format."
             raise ValueError(
-                f"Could not read image file {file_path}. Error: {e}. "
-                "Check that the file exists and is a valid image format."
-            )
+                f"Could not read the image shape from {file_path} "
+                f"({type(e).__name__}: {e}). {advice}"
+            ) from e
 
     @property
     def batch_size(self):
@@ -1704,7 +2022,7 @@ class Config:
         memory usage and captures exit codes/reasons when workers crash.
         Useful for diagnosing worker failures on HPC clusters.
 
-        Default: True.
+        Default: False (matches the CLI template and the GUI fallback).
         """
         return self.data.get("processing", {}).get("dask_nanny", False)
 
@@ -2770,28 +3088,104 @@ class Config:
         list[int]
             List of 0-indexed path indices to process
         """
-        # Check environment variable override (from GUI)
-        env_paths = os.environ.get("PIV_ACTIVE_PATHS")
-        if env_paths:
-            try:
-                indices = [int(i) for i in env_paths.split(",") if i.strip()]
-                # Validate indices
-                max_idx = len(self.source_paths) - 1
-                return [i for i in indices if 0 <= i <= max_idx]
-            except ValueError:
-                pass
+        return self.resolve_active_paths(os.environ.get(ACTIVE_PATHS_ENV))
 
-        # Fall back to config file
-        paths_data = self.data.get("paths", {})
-        active = paths_data.get("active_paths")
+    def resolve_active_paths(
+        self,
+        override: Optional[object] = None,
+        label: Optional[str] = None,
+    ) -> list:
+        """Active path indices given the ``PIV_ACTIVE_PATHS`` value ``override``.
 
-        if active is None:
-            # Default: all paths are active
-            return list(range(len(self.source_paths)))
+        The one resolution a PIV job's datasets come from. ``active_paths``
+        passes the job's environment; the GUI's Run PIV preflight passes the
+        value the runner is about to set, so it checks the datasets the job
+        will process.
 
-        # Validate indices
-        max_idx = len(self.source_paths) - 1
-        return [i for i in active if 0 <= i <= max_idx]
+        Datasets are the entries of ``paths.source_paths``, numbered from 0
+        (``validate_config`` refuses a ``base_paths`` of another length).
+
+        Parameters
+        ----------
+        override : str, list or None
+            The selection: a comma-separated string (blank entries are
+            skipped), a list of entries as a request sent them, or None for the
+            config file's ``paths.active_paths`` (every dataset when that is
+            unset). A list and its ``",".join(map(str, ...))`` string, which is
+            what the job receives, are accepted or refused alike.
+        label : str, optional
+            What the user touched, named in every refusal: "the Run PIV dataset
+            selection [5]", "--active-paths '0,9'". None names the
+            ``PIV_ACTIVE_PATHS`` value, the job's own environment, which a
+            route check has already passed unless it was bypassed.
+
+        Returns
+        -------
+        list[int]
+            0-indexed dataset indices, as selected.
+
+        Raises
+        ------
+        ActivePathsError
+            An index outside the datasets, a non-integer entry, or a selection
+            that names no dataset. Nothing is dropped or replaced.
+        """
+        n = len(self.source_paths)
+        if n == 0:
+            datasets = "this config has no datasets (paths.source_paths is empty)"
+        else:
+            numbered = "0" if n == 1 else f"0 to {n - 1}"
+            plural = "dataset" if n == 1 else "datasets"
+            datasets = f"this config has {n} {plural} (paths.source_paths), numbered {numbered}"
+
+        if override is not None:
+            if label is None:
+                where = f"{ACTIVE_PATHS_ENV} '{override}'"
+                note = (
+                    f" {ACTIVE_PATHS_ENV} holds the datasets chosen in Run PIV or "
+                    "with --active-paths."
+                )
+            else:
+                where, note = label, ""
+            if isinstance(override, str):
+                entries: list = [e.strip() for e in override.split(",") if e.strip()]
+            elif isinstance(override, (list, tuple)):
+                entries = list(override)
+            else:
+                raise ActivePathsError(
+                    f"{where} is {override!r}, not a list of dataset numbers: "
+                    f"{datasets}.{note}"
+                )
+        else:
+            where = "paths.active_paths"
+            note = ""
+            entries = self.data.get("paths", {}).get("active_paths")
+            if entries is None:
+                # Unset: every dataset (none at all is refused below).
+                entries = list(range(n))
+            if not isinstance(entries, list):
+                raise ActivePathsError(
+                    f"{where} is {entries!r}, not a list of dataset numbers: {datasets}."
+                )
+
+        indices = []
+        for entry in entries:
+            index = _dataset_number(entry)
+            if index is None:
+                raise ActivePathsError(
+                    f"Dataset {entry!r} in {where} is not a dataset number: "
+                    f"{datasets}.{note}"
+                )
+            if not 0 <= index < n:
+                raise ActivePathsError(
+                    f"Dataset {index} in {where} is out of range: {datasets}.{note}"
+                )
+            indices.append(index)
+        if not indices:
+            raise ActivePathsError(
+                f"{where} selects no dataset: {datasets}. Select at least one.{note}"
+            )
+        return indices
 
     # --- .set file path helpers ---
 
@@ -2983,7 +3377,7 @@ class Config:
 
         Delegates to ``path_utils.camera_subfolder_name``, the one rule shared
         with calibration images (``path_utils.calibration_camera_folder``):
-        containers (.set, .cine) never use a subfolder, IM7 uses one only when
+        containers (.set, .cine, .pivraw) never use a subfolder, IM7 uses one only when
         ``images.use_camera_subfolders`` is True, a single-camera setup always
         resolves at the source root, and otherwise an explicit
         ``paths.camera_subfolders`` entry wins, else ``Cam{N}``.

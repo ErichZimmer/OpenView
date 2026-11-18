@@ -2,7 +2,7 @@ import logging
 import math
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Tuple
 
 import dask
 import dask.array as da
@@ -11,6 +11,7 @@ import numpy as np
 from ..config import Config
 from ..vector_loading import read_mask_from_mat
 from ..window_utils import compute_window_centers, compute_window_centers_single_mode
+from .path_utils import camera_path_for
 
 # Import all readers to register them
 from .readers import get_reader
@@ -54,13 +55,15 @@ def read_single_frame(
     - lavision_set: All cameras/frames in one .set container
     - lavision_im7: Per-frame .im7 files (or multi-frame)
     - cine: Phantom .cine video containers
+    - pivraw: PIVTOOLS Acquisition run containers (one .pivraw per camera)
     - standard: Individual image files (.tif, .png, .jpg, etc.)
 
     Every container dispatches to that format's genuine single-frame reader
-    (``read_set_frame`` / ``read_cine_single`` / ``read_lavision_im7`` with
-    ``frames=1``). Asking a *pair* reader for one frame via a keyword used to be
-    the mechanism here, and it silently failed in two different ways: the .cine
-    pair reader accepted ``frames=1`` and ignored it (returning a (2,H,W) pair
+    (``read_set_frame`` / ``read_cine_single`` / ``read_pivraw_single`` /
+    ``read_lavision_im7`` with ``frames=1``). Asking a *pair* reader for one
+    frame via a keyword used to be the mechanism here, and it silently failed in
+    two different ways: the .cine pair reader accepted ``frames=1`` and ignored
+    it (returning a (2,H,W) pair
     that later hit cv2.cvtColor as if it were a colour image), while the .set
     pair reader demanded an ``im_no_b`` no caller supplied and raised. There is
     consequently no shape-guessing left in this function — each branch returns
@@ -70,7 +73,8 @@ def read_single_frame(
         file_path: Path to the image file or container
         camera: Camera number (1-based)
         frame_idx: Frame index within the file/container (1-based)
-        image_type: One of "lavision_set", "lavision_im7", "cine", "standard"
+        image_type: One of "lavision_set", "lavision_im7", "cine", "pivraw",
+            "standard"
         frames_per_camera: How many frames each camera occupies in a
                       multi-camera .im7 buffer, used to locate this camera's
                       slice as ``(camera-1) * frames_per_camera`` (2 for
@@ -88,7 +92,7 @@ def read_single_frame(
     """
     # Container formats need an existence check upfront (one file, many frames).
     # Standard formats skip this — the reader raises on missing files directly.
-    if image_type in ("lavision_set", "lavision_im7", "cine"):
+    if image_type in ("lavision_set", "lavision_im7", "cine", "pivraw"):
         file_path = Path(file_path)
         if not file_path.exists():
             raise FileNotFoundError(f"Image file not found: {file_path}")
@@ -131,6 +135,13 @@ def read_single_frame(
         from .readers.cine_reader import read_cine_single
 
         return read_cine_single(str(file_path), idx=frame_idx)
+
+    elif image_type == "pivraw":
+        # .pivraw run container: ``frame_idx`` is the 1-based frame number in
+        # the file (A and B frames of a double-frame run counted separately).
+        from .readers.pivraw_reader import read_pivraw_single
+
+        return read_pivraw_single(file_path, idx=frame_idx)
 
     else:
         # Standard formats (.tif, .png, .jpg, etc.)
@@ -230,6 +241,7 @@ def read_pair(
     config: Config,
     *,
     out: Optional[np.ndarray] = None,
+    frame_indices: Optional[Tuple[int, int]] = None,
 ) -> np.ndarray:
     """Read a pair of images (A and B frames).
 
@@ -245,7 +257,7 @@ def read_pair(
        - Organized as: source_dir/B00001.im7 contains all cameras for time instance 1
        - No camera subdirectories
 
-    3. Single-camera video containers (.cine):
+    3. Single-camera video containers (.cine, .pivraw):
        - One video file per camera in source directory
        - Organized as: source_dir/Camera1.cine, source_dir/Camera2.cine
        - Pattern uses %d for camera number (not frame index)
@@ -275,6 +287,9 @@ def read_pair(
             directly rather than through the extension registry when ``out``
             is in play: a ``**kwargs`` wrapper that dropped it would leave the
             slot as uninitialised memory with no error.
+        frame_indices (tuple, optional): Pair ``idx``'s (frame A, frame B)
+            file indices when the caller resolved them for a whole batch
+            (``Config.frame_pair_indices_batch``); None resolves them here.
 
     Returns:
         np.ndarray: Stacked array of shape (2, H, W) containing frame A and B;
@@ -282,7 +297,13 @@ def read_pair(
     """
     format_str = config.image_format[0]
     image_type = config.image_type
-    frame_a_idx, frame_b_idx = config.get_frame_pair_indices(idx)
+    # A .pivraw run is paired by trigger, per camera, and camera_path is its run
+    # folder; every other type pairs by the stride formula alone.
+    frame_a_idx, frame_b_idx = (
+        frame_indices
+        if frame_indices is not None
+        else config.get_frame_pair_indices(idx, camera=camera, source=camera_path)
+    )
 
     # Handle container formats (single file contains multiple frames/cameras)
     if image_type == "lavision_set":
@@ -307,13 +328,13 @@ def read_pair(
             # read_single_frame would allocate each frame via astype and then copy
             # both again in np.stack -- two full-frame passes where one does. Same
             # pattern read_set_pair already uses for the pre-paired case.
-            fi = info.frames[stream_idx]
+            shape = info.frames[stream_idx].shape  # after the transformers
             if out is None:
-                result = np.empty((2, fi.height, fi.width), dtype=np.float32)
+                result = np.empty((2, *shape), dtype=np.float32)
             else:
                 result = check_out(
                     out,
-                    (2, fi.height, fi.width),
+                    (2, *shape),
                     f"read_pair camera {camera} of {Path(set_file_path).name}",
                 )
             read_set_frame(
@@ -324,13 +345,16 @@ def read_pair(
             )
             return result
         else:
-            # Pre-paired: A+B frames in one entry - read directly
+            # Pre-paired: A and B are two streams of one entry, the entry the
+            # strides name (frame_stride 0 makes frame A and frame B equal).
             from .readers.set_reader import camera_streams, read_set_pair
 
             streams = camera_streams(
                 set_file_path, camera, config.camera_count, pair=True
             )
-            return _written(read_set_pair(set_file_path, streams, idx, out=out), out)
+            return _written(
+                read_set_pair(set_file_path, streams, frame_a_idx, out=out), out
+            )
 
     elif image_type == "lavision_im7":
         from .readers.im7_reader import read_im7_camera
@@ -385,11 +409,30 @@ def read_pair(
     elif image_type == "cine":
         from .readers.cine_reader import read_cine_pair
 
-        # .cine: one video file per camera, frames extracted by index
+        # .cine: one video file per camera, frames A and B as the strides ask.
         cine_filename = format_str % camera
         cine_path = camera_path / cine_filename
-        # For pairs, read 2 consecutive frames starting at frame_a_idx
-        return _written(read_cine_pair(str(cine_path), idx=frame_a_idx, out=out), out)
+        return _written(
+            read_cine_pair(
+                str(cine_path), frame_a_idx, frame_b_idx=frame_b_idx, out=out
+            ),
+            out,
+        )
+
+    elif image_type == "pivraw":
+        from .readers.pivraw_reader import read_pivraw_pair
+
+        # .pivraw: one run container per camera. The pair's file frames on this
+        # camera come from the run's trigger alignment (above), so with unequal
+        # drops pair n is the same trigger on every camera. Both are passed: the
+        # reader honours frame B rather than assuming A + 1.
+        pivraw_path = camera_path / (format_str % camera)
+        return _written(
+            read_pivraw_pair(
+                pivraw_path, idx=frame_a_idx, frame_b_idx=frame_b_idx, out=out
+            ),
+            out,
+        )
 
     else:
         # Standard formats: separate files per frame
@@ -435,8 +478,9 @@ def _read_batch(
 ) -> np.ndarray:
     """Read a batch of image pairs from disk straight into one pre-allocated array.
 
-    One (count, 2, H, W) float32 buffer, sized from ``config.image_shape`` --
-    the same shape ``load_images`` promises Dask -- and every pair is decoded
+    One (count, 2, H, W) float32 buffer, sized from
+    ``config.image_shape_for(camera)`` -- the same shape ``load_images``
+    promises Dask for this camera -- and every pair is decoded
     into its slot through ``read_pair(out=)``. There is no per-pair temporary
     and no copy: earlier versions collected pairs in a list and np.stack-ed them
     (batch held twice, 3 GB peak per task at batch_size 10 on 5312x3528), then
@@ -444,12 +488,14 @@ def _read_batch(
     47 ms of a 298 ms .set pair). The batch is np.empty, not np.zeros -- every
     slot is overwritten, so a zero fill would be a wasted pass.
 
-    A pair whose real shape disagrees with ``config.image_shape`` fails here by
-    name. It used to produce a batch whose shape disagreed with what Dask was
-    told and what the PIV window grid assumes -- wrong vectors, not a working
-    run. ``config.image_shape`` is detected once per process from the first
-    configured camera, and cameras can differ in shape (alk235's five span
-    3472-3536 rows), which is why production runs one camera per subprocess.
+    A pair whose real shape disagrees with the camera's detected shape fails
+    here by name. It used to produce a batch whose shape disagreed with what
+    Dask was told and what the PIV window grid assumes -- wrong vectors, not a
+    working run. The shape is detected per camera, because cameras on one rig
+    can differ (alk235's five span 3472-3536 rows, and a 90 degree rotated
+    camera presents (W, H)). Production loops every selected camera in one
+    process, so a shape shared across cameras would size the second camera's
+    buffer from the first camera's frames.
 
     Args:
         start_idx: 1-based index of the first pair in the batch
@@ -461,19 +507,28 @@ def _read_batch(
     Returns:
         np.ndarray of shape (count, 2, H, W)
     """
-    height, width = config.image_shape
+    height, width = config.image_shape_for(camera)
     batch = np.empty((count, 2, height, width), dtype=np.float32)
+    indices = config.frame_pair_indices_batch(
+        start_idx, count, camera, source=camera_path
+    )
     for i in range(count):
         try:
-            read_pair(start_idx + i, camera_path, camera, config, out=batch[i])
+            read_pair(
+                start_idx + i,
+                camera_path,
+                camera,
+                config,
+                out=batch[i],
+                frame_indices=indices[i],
+            )
         except ValueError as exc:
             if "out has" not in str(exc):
                 raise
             raise ValueError(
                 f"Pair {start_idx + i} of camera {camera} does not fit the batch "
-                f"buffer: config.image_shape {(height, width)} was detected from "
-                f"camera {config.camera_numbers[0]}, and this camera's frames "
-                f"differ. {exc}"
+                f"buffer: camera {camera}'s shape {(height, width)} was detected "
+                f"from its first image, and this pair's frames differ. {exc}"
             ) from exc
     return batch
 
@@ -493,7 +548,8 @@ def load_images(
 
     Multi-loop support: When config.num_loops > 1, creates batches per loop and
     concatenates them. Each batch reads from a single source (file or directory)
-    using LOCAL pair indices. Works with all image types (.set, .cine, standard).
+    using LOCAL pair indices. Works with all image types (.set, .cine, .pivraw,
+    standard).
     The result is a single dask array spanning all loops.
 
     Args:
@@ -512,24 +568,8 @@ def load_images(
     if source is None:
         source = config.source_paths[0]
 
-    # Determine camera_path based on image type
-    image_type = config.image_type
     num_loops = config.num_loops
-
-    # Helper: derive camera_path from a base source directory/file
-    def _camera_path_from_source(base_source: Path) -> Path:
-        if image_type == "lavision_set":
-            return base_source  # .set file IS the camera_path
-        elif image_type == "cine":
-            return base_source  # directory containing Camera%d.cine
-        elif image_type == "lavision_im7":
-            if config.images_use_camera_subfolders:
-                folder = config.get_camera_folder(camera)
-                return base_source / folder if folder else base_source
-            return base_source
-        else:
-            folder = config.get_camera_folder(camera)
-            return base_source / folder if folder else base_source
+    image_shape = config.image_shape_for(camera)
 
     # Multi-loop: create batches per loop, concatenate
     if num_loops > 1:
@@ -538,7 +578,7 @@ def load_images(
 
         for loop_idx in range(num_loops):
             loop_source = config.get_loop_source_path(source, loop_idx)
-            camera_path = _camera_path_from_source(loop_source)
+            camera_path = camera_path_for(config, loop_source, camera)
 
             num_batches = math.ceil(per_loop / batch_size)
             for batch_idx in range(num_batches):
@@ -550,7 +590,7 @@ def load_images(
                 )
                 dask_batch = da.from_delayed(
                     delayed_batch,
-                    shape=(actual_size, 2, *config.image_shape),
+                    shape=(actual_size, 2, *image_shape),
                     dtype=np.float32,  # every reader returns float32; see _read_batch
                 )
                 dask_batches.append(dask_batch)
@@ -565,7 +605,7 @@ def load_images(
         return images
 
     # --- Single-loop logic ---
-    camera_path = _camera_path_from_source(source)
+    camera_path = camera_path_for(config, source, camera)
 
     num_pairs = config.num_frame_pairs
     num_batches = math.ceil(num_pairs / batch_size)
@@ -581,7 +621,7 @@ def load_images(
         )
         dask_batch = da.from_delayed(
             delayed_batch,
-            shape=(actual_size, 2, *config.image_shape),
+            shape=(actual_size, 2, *image_shape),
             dtype=np.float32,  # every reader returns float32; see _read_batch
         )
         dask_batches.append(dask_batch)
@@ -597,21 +637,75 @@ def load_images(
     return images
 
 
-def create_rectangular_mask(config: Config) -> np.ndarray:
+class MaskError(ValueError):
+    """A pixel mask that cannot be used for a camera's images.
+
+    Raised instead of running unmasked or stretching the mask: a wrong-size
+    mask, a missing or unreadable mask file while masking is on, or an
+    unknown masking mode. The message names the camera and what to do.
+    """
+
+
+def require_mask_fits_camera(
+    mask: np.ndarray, config: Config, camera: int, origin: str
+) -> None:
+    """Refuse a pixel mask whose shape is not ``camera``'s image shape.
+
+    A mask is never resampled onto a camera's pixels: a mask drawn for another
+    camera, or before this camera was rotated, would land on the wrong pixels.
+
+    Parameters
+    ----------
+    mask : np.ndarray
+        Boolean pixel mask, True = masked.
+    config : Config
+        Supplies ``image_shape_for(camera)``.
+    camera : int
+        1-based camera number.
+    origin : str
+        Where the mask came from (its file path), named in the refusal.
+
+    Raises
+    ------
+    MaskError
+        If ``mask.shape`` differs from the camera's (H, W).
+    """
+    image_shape = tuple(config.image_shape_for(camera))
+    if mask.shape == image_shape:
+        return
+    H, W = image_shape
+    shape_text = " x ".join(str(n) for n in mask.shape)
+    message = (
+        f"Camera {camera}'s mask {origin} is {shape_text} pixels (height x width), "
+        f"but camera {camera}'s images are {H} x {W}. A mask is never stretched "
+        f"to fit. Redraw the mask on this camera's images in the Masking tab."
+    )
+    if mask.shape == (W, H):
+        message += (
+            " Its height and width are swapped, which is what a mask drawn before "
+            "this camera was rotated looks like: the camera's images are now "
+            "turned a quarter turn."
+        )
+    raise MaskError(message)
+
+
+def create_rectangular_mask(config: Config, camera: int) -> np.ndarray:
     """
     Create a rectangular edge mask based on config settings.
 
     Parameters
     ----------
     config : Config
-        Configuration object containing image shape and rectangular mask settings
+        Configuration object holding the rectangular mask settings
+    camera : int
+        1-based camera number; the mask takes this camera's image shape
 
     Returns
     -------
     np.ndarray
         Boolean mask array of shape (H, W) where True = masked region
     """
-    H, W = config.image_shape
+    H, W = config.image_shape_for(camera)
     mask = np.zeros((H, W), dtype=bool)
 
     rect_settings = config.mask_rectangular_settings
@@ -630,20 +724,17 @@ def create_rectangular_mask(config: Config) -> np.ndarray:
     if right > 0:
         mask[:, -right:] = True
 
-    masked_pixels = np.sum(mask)
-    total_pixels = mask.size
-    mask_fraction = masked_pixels / total_pixels if total_pixels > 0 else 0
-
     logging.debug(
-        "Created rectangular mask: top={}, bottom={}, left={}, right={} "
-        "({}/{:.0f} pixels = {:.1f}%)",
+        "Created rectangular mask for Cam%s: top=%s, bottom=%s, left=%s, right=%s "
+        "(%d/%d pixels = %.1f%%)",
+        camera,
         top,
         bottom,
         left,
         right,
-        masked_pixels,
-        total_pixels,
-        mask_fraction * 100,
+        int(mask.sum()),
+        mask.size,
+        100.0 * mask.mean(),
     )
 
     return mask
@@ -674,8 +765,15 @@ def load_mask_for_camera(
     Returns
     -------
     Optional[np.ndarray]
-        Boolean mask array of shape (H, W) where True = masked region,
-        or None if masking is disabled or mask cannot be loaded
+        Boolean mask of the camera's image shape (H, W), True = masked
+        region, or None when masking is disabled.
+
+    Raises
+    ------
+    MaskError
+        With masking on: the camera's mask file is missing or unreadable, its
+        shape is not the camera's image shape, or the masking mode is unknown.
+        A camera is never run unmasked and a mask is never resampled.
     """
     if not config.masking_enabled:
         logging.debug("Masking is disabled in config")
@@ -686,61 +784,50 @@ def load_mask_for_camera(
     # Rectangular mode: create mask from edge specifications
     if mask_mode == "rectangular":
         logging.debug("Using rectangular edge masking")
-        return create_rectangular_mask(config)
+        return create_rectangular_mask(config, camera_num)
 
     # File mode: load from .mat file
     elif mask_mode == "file":
+        mask_path = config.get_mask_path(camera_num, source_path_idx)
+
+        if not mask_path.is_file():
+            raise MaskError(
+                f"Camera {camera_num} has no mask file at {mask_path}, and masking "
+                f"is on (masking.enabled: true, mode: file). Draw and save a mask "
+                f"on this camera's images in the Masking tab, or turn masking off."
+            )
+
+        logging.debug("Loading mask for Cam%s from %s", camera_num, mask_path)
         try:
-            mask_path = config.get_mask_path(camera_num, source_path_idx)
-
-            if not mask_path.exists():
-                logging.warning(
-                    "Mask file not found for Cam%s at %s. Proceeding without mask.",
-                    camera_num,
-                    mask_path,
-                )
-                return None
-
-            logging.debug("Loading mask for Cam%s from %s", camera_num, mask_path)
-            mask, polygons = read_mask_from_mat(str(mask_path))
-
-            # Ensure mask is boolean
-            mask = np.asarray(mask, dtype=bool)
-
-            # Log mask statistics
-            masked_pixels = np.sum(mask)
-            total_pixels = mask.size
-            mask_fraction = masked_pixels / total_pixels if total_pixels > 0 else 0
-
-            logging.debug(
-                "Mask loaded: {}/{} pixels masked ({:.1f}%)",
-                masked_pixels,
-                total_pixels,
-                mask_fraction * 100,
-            )
-
-            return mask
-
-        except Exception as e:
-            logging.error(
-                "Failed to load mask for Cam{}: {}. Proceeding without mask.",
-                camera_num,
-                e,
-            )
-            return None
-
-    else:
-        logging.warning(
-            "Unknown mask mode '{}'. Must be 'file' or 'rectangular'. "
-            "Proceeding without mask.",
-            mask_mode,
+            mask, _polygons = read_mask_from_mat(str(mask_path))
+        except Exception as e:  # scipy.io raises several types for a bad file
+            raise MaskError(
+                f"Camera {camera_num}'s mask file {mask_path} could not be read "
+                f"({type(e).__name__}: {e}). Redraw and save the mask on this "
+                f"camera's images in the Masking tab, or turn masking off."
+            ) from e
+        mask = np.asarray(mask, dtype=bool)
+        require_mask_fits_camera(mask, config, camera_num, str(mask_path))
+        logging.debug(
+            "Mask loaded for Cam%s: %d/%d pixels masked (%.1f%%)",
+            camera_num,
+            int(mask.sum()),
+            mask.size,
+            100.0 * mask.mean(),
         )
-        return None
+        return mask
+
+    raise MaskError(
+        f"masking.mode '{mask_mode}' is not a masking mode. Masking is on, so "
+        f"camera {camera_num} cannot run unmasked. Use one of 'file', "
+        f"'rectangular' (set it in the Masking tab), or turn masking off."
+    )
 
 
 def compute_vector_mask(
     pixel_mask: np.ndarray,
     config: Config,
+    camera: int,
     ensemble: bool = None,
 ) -> List[np.ndarray]:
     """
@@ -767,6 +854,9 @@ def compute_vector_mask(
         Boolean pixel mask of shape (H, W) where True indicates masked regions
     config : Config
         Configuration object containing window sizes, overlap, and mask threshold
+    camera : int
+        1-based camera number. Its image shape sets the window grid, so the
+        vector masks match the grid that camera's correlator produces.
     ensemble : bool, optional
         If True, use ensemble config (ensemble_window_sizes, etc.).
         If False, use instantaneous config (window_sizes, etc.).
@@ -777,6 +867,11 @@ def compute_vector_mask(
     List[np.ndarray]
         List of binary masks, one per pass. Each mask has shape (n_win_y, n_win_x)
         where True indicates this vector should be masked (set to 0/NaN)
+
+    Raises
+    ------
+    MaskError
+        If ``pixel_mask`` is not the camera's image shape. It is never resized.
 
     Notes
     -----
@@ -791,24 +886,16 @@ def compute_vector_mask(
     if pixel_mask is None:
         return []
 
-    # CRITICAL: Use config.image_shape for window grid computation to match
-    # correlator/accumulator, NOT pixel_mask.shape. This ensures the vector
-    # mask grid dimensions match the PIV data grid.
-    H, W = config.image_shape
-    logging.debug(f"compute_vector_mask: Using config.image_shape = ({H}, {W})")
+    # CRITICAL: Use the camera's image shape for window grid computation to
+    # match correlator/accumulator, NOT pixel_mask.shape. This ensures the
+    # vector mask grid dimensions match the PIV data grid.
+    H, W = config.image_shape_for(camera)
+    logging.debug(f"compute_vector_mask: camera {camera} image shape = ({H}, {W})")
     logging.debug(f"compute_vector_mask: pixel_mask.shape = {pixel_mask.shape}")
 
-    # Validate mask dimensions match config.image_shape
-    if pixel_mask.shape != (H, W):
-        logging.warning(
-            f"Pixel mask shape {pixel_mask.shape} differs from config.image_shape {(H, W)}. "
-            f"Resizing mask to match image dimensions."
-        )
-        from scipy.ndimage import zoom
-
-        zoom_factors = (H / pixel_mask.shape[0], W / pixel_mask.shape[1])
-        # Use order=0 (nearest neighbor) to preserve binary nature of mask
-        pixel_mask = zoom(pixel_mask.astype(np.float32), zoom_factors, order=0) > 0.5
+    require_mask_fits_camera(
+        pixel_mask, config, camera, "(the pixel mask given for the vector grid)"
+    )
 
     vector_masks = []
     threshold = config.mask_threshold

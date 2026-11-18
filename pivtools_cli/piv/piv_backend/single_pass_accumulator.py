@@ -37,6 +37,7 @@ from pivtools_cli.piv.piv_backend.base import CrossCorrelator
 from pivtools_cli.piv.piv_backend.infilling import apply_infilling
 from pivtools_cli.piv.piv_backend.outlier_detection import apply_outlier_detection
 from pivtools_cli.piv.piv_result import PIVEnsemblePassResult, PIVEnsembleResult
+from pivtools_cli.processing.unique_scatter import scatter_unique
 from pivtools_core.config import Config
 
 # Three float32 correlation-plane sums (AA, BB, AB) are held for the whole pass,
@@ -133,8 +134,22 @@ class SinglePassAccumulator:
     Used by UnifiedBatchPipeline for streaming ensemble PIV processing.
     """
 
-    def __init__(self, config: Config, vector_masks: Optional[list[np.ndarray]] = None):
+    def __init__(
+        self,
+        config: Config,
+        camera: int,
+        vector_masks: Optional[list[np.ndarray]] = None,
+    ):
+        """Accumulate one camera's ensemble passes.
+
+        :param config: Configuration object
+        :param camera: 1-based camera number; its image shape sets every
+            pass's window grid
+        :param vector_masks: Pre-computed vector masks for each pass
+        """
         self.config = config
+        self.camera = camera
+        self.image_shape = config.image_shape_for(camera)
         self.vector_masks = vector_masks if vector_masks is not None else []
         self.n_images = 0
         self.passes_data = []
@@ -144,7 +159,7 @@ class SinglePassAccumulator:
         self.profiling_enabled = False
         self.profile_data = {}  # {pass_idx: {section_name: elapsed_seconds}}
 
-        H, W = config.image_shape
+        H, W = self.image_shape
 
         # Initialize accumulators for each pass
         for pass_idx in range(config.ensemble_num_passes):
@@ -409,7 +424,9 @@ class SinglePassAccumulator:
         # Create temporary correlator to get library and window weights
         from pivtools_cli.piv.piv_backend.factory import make_correlator_backend
 
-        correlator = make_correlator_backend(self.config, ensemble=True)
+        correlator = make_correlator_backend(
+            self.config, camera=self.camera, ensemble=True
+        )
 
         # Get computation size (for FFT) and output size (for extraction)
         # These must match how raw correlations are computed in bulkxcorr2d_accumulate
@@ -928,25 +945,29 @@ class SinglePassAccumulator:
                 )
 
                 R_AA_futures.append(
-                    client.scatter(
+                    scatter_unique(
+                        client,
                         R_AA_ensemble[start_idx:end_idx],
                         broadcast=False,
                     )
                 )
                 R_BB_futures.append(
-                    client.scatter(
+                    scatter_unique(
+                        client,
                         R_BB_ensemble[start_idx:end_idx],
                         broadcast=False,
                     )
                 )
                 R_AB_futures.append(
-                    client.scatter(
+                    scatter_unique(
+                        client,
                         R_AB_ensemble[start_idx:end_idx],
                         broadcast=False,
                     )
                 )
                 mask_flat_futures.append(
-                    client.scatter(
+                    scatter_unique(
+                        client,
                         mask_flat[start_idx_win:end_idx_win],
                         broadcast=False,
                     )
@@ -955,7 +976,8 @@ class SinglePassAccumulator:
                     # per-window coloured-floor shape: same plane-element
                     # slicing as the correlation arrays (one plane's size)
                     P_win_futures.append(
-                        client.scatter(
+                        scatter_unique(
+                            client,
                             P_win_flat[start_idx:end_idx],
                             broadcast=False,
                         )
@@ -1054,7 +1076,7 @@ class SinglePassAccumulator:
             runtype = self.config.ensemble_type[pass_idx]
             if runtype == "single":
                 grid_result = compute_window_centers_single_mode(
-                    image_shape=self.config.image_shape,
+                    image_shape=self.image_shape,
                     window_size=tuple(win_size),
                     sum_window=tuple(self.config.ensemble_sum_window),
                     overlap=self.config.ensemble_overlaps[pass_idx],
@@ -1065,7 +1087,7 @@ class SinglePassAccumulator:
                 grid_result_ctrs_y = grid_result.win_ctrs_y - grid_result.padding[0]
             else:
                 grid_result = compute_window_centers(
-                    image_shape=self.config.image_shape,
+                    image_shape=self.image_shape,
                     window_size=tuple(win_size),
                     overlap=self.config.ensemble_overlaps[pass_idx],
                     validate=True,

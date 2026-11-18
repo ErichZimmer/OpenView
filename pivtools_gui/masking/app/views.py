@@ -4,6 +4,11 @@ import numpy as np
 from flask import Blueprint, jsonify, request
 
 from pivtools_core.config import get_config
+from pivtools_core.image_handling.load_images import (
+    MaskError,
+    load_mask_for_camera,
+    require_mask_fits_camera,
+)
 from pivtools_core.vector_loading import read_mask_from_mat, save_mask_to_mat
 
 from ...utils import camera_number, numpy_to_png_base64
@@ -58,20 +63,21 @@ def upload_mask():
         # Empty mask (e.g., after clear all)
         mask = np.zeros((height, width), dtype=bool)
 
+    cfg = _cfg()
     try:
         basePathIdx = meta["basePathIdx"]
-        camera = meta["camera"]
-        cfg = _cfg()
-        try:
-            camera_num = camera_number(camera)
-        except Exception:
-            camera_num = camera
+        camera_num = camera_number(meta["camera"])
         mask_path = cfg.get_mask_path(camera_num, basePathIdx)
-        # Ensure storage directory exists (especially for .set files with per-file storage)
-        mask_path.parent.mkdir(parents=True, exist_ok=True)
-        save_mask_to_mat(mask_path, mask, np.asarray(polygons))
     except Exception:
         return jsonify({"error": "invalid or missing meta fields"}), 400
+
+    # Refuse before writing: a mask of another size than this camera's images
+    # would be refused at every load anyway (MaskError is a 400, errors.py).
+    require_mask_fits_camera(mask, cfg, camera_num, "being saved")
+
+    # Ensure storage directory exists (especially for .set files with per-file storage)
+    mask_path.parent.mkdir(parents=True, exist_ok=True)
+    save_mask_to_mat(mask_path, mask, np.asarray(polygons))
 
     true_count = int(mask.sum())
     return jsonify(
@@ -81,6 +87,57 @@ def upload_mask():
             "true_count": true_count,
             "fraction_true": true_count / (width * height),
             "meta": meta,
+        }
+    )
+
+
+@masking_bp.route("/mask_status", methods=["GET"])
+def mask_status():
+    """Whether PIV can use this camera's mask on this dataset, without running it.
+
+    Query params (both required):
+      - basepath_idx: dataset index into ``paths.source_paths``
+      - camera: camera number, ``2`` or ``Cam2``
+
+    Returns 200 with ``{masking_enabled, mode, ok, message}``. ``ok`` is the
+    outcome of ``load_mask_for_camera``, the check PIV and Run PIV make, and
+    ``message`` is its MaskError text when refused, else null. With masking
+    off nothing is needed, so ``ok`` is true. A bad index or camera is a 400.
+    """
+    cfg = _cfg()
+    missing = [k for k in ("basepath_idx", "camera") if request.args.get(k) is None]
+    if missing:
+        return jsonify({"error": f"mask_status needs {' and '.join(missing)}"}), 400
+    try:
+        basepath_idx = int(request.args["basepath_idx"])
+        camera = camera_number(request.args["camera"])
+    except ValueError as e:
+        return (
+            jsonify({"error": f"basepath_idx and camera must be integers ({e})"}),
+            400,
+        )
+    if not 0 <= basepath_idx < len(cfg.source_paths):
+        return (
+            jsonify(
+                {
+                    "error": f"basepath_idx {basepath_idx} is out of range: "
+                    f"{len(cfg.source_paths)} source paths configured"
+                }
+            ),
+            400,
+        )
+
+    try:
+        load_mask_for_camera(camera, cfg, source_path_idx=basepath_idx)
+        ok, message = True, None
+    except MaskError as e:
+        ok, message = False, str(e)
+    return jsonify(
+        {
+            "masking_enabled": bool(cfg.masking_enabled),
+            "mode": cfg.mask_mode,
+            "ok": ok,
+            "message": message,
         }
     )
 
@@ -100,16 +157,22 @@ def load_mask():
     polygons_only = (
         request.args.get("polygons_only", default="false", type=str).lower() == "true"
     )
+    camera = None
+    if request.args.get("camera") is not None:
+        try:
+            camera = camera_number(request.args.get("camera"))
+        except ValueError as e:
+            return jsonify({"error": f"Could not resolve mask path: {e}"}), 400
 
     # Optionally reconstruct path if not provided
     if not path or not Path(path).exists():
         try:
             basepath_idx = int(request.args.get("basepath_idx", 0))
-            camera = request.args.get("camera")
             base_paths = cfg.source_paths
             if basepath_idx < 0 or basepath_idx >= len(base_paths):
                 return jsonify({"error": "basepath_idx out of range"}), 400
-            camera = camera_number(camera)
+            if camera is None:
+                raise ValueError("no camera given")
             path = str(cfg.get_mask_path(camera, basepath_idx))
         except Exception as e:
             return jsonify({"error": f"Could not resolve mask path: {e}"}), 400
@@ -119,6 +182,10 @@ def load_mask():
 
     try:
         mask, polygons = read_mask_from_mat(path)
+        if camera is not None:
+            # A stale mask (another camera's, or drawn before this camera was
+            # rotated) is refused, so its polygons never land on the wrong pixels.
+            require_mask_fits_camera(np.asarray(mask), cfg, camera, path)
 
         def serialize_polygon(poly):
             return {
@@ -151,6 +218,8 @@ def load_mask():
                 "polygons": polygons_serializable,
             }
         )
+    except MaskError as e:
+        return jsonify({"error": str(e)}), 409
     except Exception as e:
         print("Exception in load_mask:", e)
         return jsonify({"error": f"Failed to load mask: {e}"}), 500

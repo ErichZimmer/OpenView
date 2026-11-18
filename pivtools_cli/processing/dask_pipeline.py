@@ -23,7 +23,9 @@ from scipy.io import savemat
 from scipy.ndimage import median_filter as scipy_median
 
 from pivtools_cli.piv.piv_backend.factory import make_correlator_backend
+from pivtools_cli.processing.unique_scatter import scatter_unique
 from pivtools_core.config import Config
+from pivtools_core.image_handling.load_images import MaskError
 
 logger = logging.getLogger(__name__)
 
@@ -215,18 +217,23 @@ def apply_all_filters_slim(
 
     # 2. Apply pixel mask (zero masked regions) - now in-place
     if pixel_mask is not None:
-        if pixel_mask.shape == (H, W):
-            block[:, :, pixel_mask] = 0
-            logger.debug(f"Applied pixel mask: {np.sum(pixel_mask)} pixels zeroed")
-            if save_intermediate:
-                _save_intermediate_frame(
-                    block, save_dir, f"{filter_idx:02d}_after_pixel_mask"
-                )
-                filter_idx += 1
-        else:
-            logger.warning(
-                f"Pixel mask shape {pixel_mask.shape} != image shape ({H}, {W})"
+        if pixel_mask.shape != (H, W):
+            # load_mask_for_camera refuses a wrong-size mask by name, so this
+            # only fires when a caller passes a mask that did not come from it.
+            mask_text = " x ".join(str(n) for n in pixel_mask.shape)
+            raise MaskError(
+                f"The pixel mask is {mask_text} pixels (height x width) but the "
+                f"images it is applied to are {H} x {W}. A mask is never "
+                f"stretched to fit. Redraw the mask on this camera's images in "
+                f"the Masking tab."
             )
+        block[:, :, pixel_mask] = 0
+        logger.debug(f"Applied pixel mask: {np.sum(pixel_mask)} pixels zeroed")
+        if save_intermediate:
+            _save_intermediate_frame(
+                block, save_dir, f"{filter_idx:02d}_after_pixel_mask"
+            )
+            filter_idx += 1
 
     # 3. Apply filters in user-defined order (spatial and temporal interleaved)
     for spec in filter_specs:
@@ -317,9 +324,7 @@ def _median2d(frame: np.ndarray, size: Tuple[int, int], mode: str) -> np.ndarray
     if size[0] == size[1] and k in (3, 5) and frame.dtype == np.float32:
         r = k // 2
         if mode == "constant":
-            padded = cv2.copyMakeBorder(
-                frame, r, r, r, r, cv2.BORDER_CONSTANT, value=0
-            )
+            padded = cv2.copyMakeBorder(frame, r, r, r, r, cv2.BORDER_CONSTANT, value=0)
         else:
             padded = cv2.copyMakeBorder(frame, r, r, r, r, _CV2_BORDER[mode])
         return np.ascontiguousarray(cv2.medianBlur(padded, k)[r:-r, r:-r])
@@ -632,6 +637,7 @@ def create_filter_pipeline(
 def scatter_immutable_data(
     client: Client,
     config: Config,
+    camera: int,
     vector_masks: Optional[List[np.ndarray]] = None,
     pixel_mask: Optional[np.ndarray] = None,
     ensemble: bool = False,
@@ -645,6 +651,7 @@ def scatter_immutable_data(
     Args:
         client: Dask distributed client
         config: Configuration object
+        camera: 1-based camera number; the cache is built for its image shape
         vector_masks: Pre-computed vector masks per pass
         pixel_mask: Pixel mask for preprocessing
         ensemble: Whether this is ensemble mode
@@ -655,9 +662,9 @@ def scatter_immutable_data(
     logger.info("Scattering immutable data to workers...")
 
     # Create and scatter correlator cache
-    temp_correlator = make_correlator_backend(config, ensemble=ensemble)
+    temp_correlator = make_correlator_backend(config, camera=camera, ensemble=ensemble)
     correlator_cache = temp_correlator.get_cache_data()
-    scattered_cache = client.scatter(correlator_cache, broadcast=True)
+    scattered_cache = scatter_unique(client, correlator_cache, broadcast=True)
 
     cache_size = sum(
         v.nbytes if hasattr(v, "nbytes") else 0
@@ -669,7 +676,7 @@ def scatter_immutable_data(
     # Scatter vector masks if present
     scattered_masks = None
     if vector_masks:
-        scattered_masks = client.scatter(vector_masks, broadcast=True)
+        scattered_masks = scatter_unique(client, vector_masks, broadcast=True)
         mask_size = sum(m.nbytes for m in vector_masks) / 1024
         logger.info(f"  Scattered vector masks ({mask_size:.1f} KB)")
 
@@ -906,6 +913,8 @@ def correlate_worker_batches(
         )
 
     # Create ONE correlator for all batches
+    # The cache was built on the client for camera_num, so it carries that
+    # camera's image shape; the correlator takes the shape from it.
     correlator = EnsembleCorrelatorCPU(
         config,
         precomputed_cache=cache,

@@ -40,14 +40,18 @@ def get_active_paths_from_args(args, config):
     """
     Get active paths, with CLI override support.
 
-    If args.active_paths is provided (e.g., "0,1,2"), parse and return those indices.
-    Otherwise, return config.active_paths.
+    If args.active_paths is provided (e.g., "0,1,2"), those indices are
+    resolved as the PIV job resolves PIV_ACTIVE_PATHS
+    (``Config.resolve_active_paths``); otherwise config.active_paths. Either
+    way an index outside the datasets or a non-integer entry raises
+    ``ActivePathsError`` by name.
 
     Returns list of path indices.
     """
-    if hasattr(args, "active_paths") and args.active_paths:
-        # Parse comma-separated indices
-        return [int(i.strip()) for i in args.active_paths.split(",")]
+    if getattr(args, "active_paths", None):
+        return config.resolve_active_paths(
+            args.active_paths, label=f"--active-paths '{args.active_paths}'"
+        )
     return config.active_paths
 
 
@@ -117,9 +121,6 @@ def transform_command(args):
         )
 
     active_paths = get_active_paths_from_args(args, config)
-    if not active_paths:
-        print("Error: No active paths configured in config.yaml")
-        sys.exit(1)
 
     print("=" * 60)
     print("Vector Transform - Starting")
@@ -187,9 +188,6 @@ def merge_command(args):
     type_name = args.type_name or config.merging_type_name or "instantaneous"
 
     active_paths = get_active_paths_from_args(args, config)
-    if not active_paths:
-        print("Error: No active paths configured in config.yaml")
-        sys.exit(1)
 
     if len(cameras) < 2:
         print("Error: Merging requires at least 2 cameras")
@@ -299,9 +297,6 @@ def statistics_command(args):
         use_merged = config.statistics_workflow == "after_merge"
 
     active_paths = get_active_paths_from_args(args, config)
-    if not active_paths:
-        print("Error: No active paths configured in config.yaml")
-        sys.exit(1)
 
     print("=" * 60)
     print("Vector Statistics - Starting")
@@ -487,9 +482,6 @@ def video_command(args):
     )
 
     active_paths = get_active_paths_from_args(args, config)
-    if not active_paths:
-        print("Error: No active paths configured in config.yaml")
-        sys.exit(1)
 
     print("=" * 60)
     print("Video Creation - Starting")
@@ -560,11 +552,27 @@ def video_command(args):
 
 
 def init_command(args):
-    """Initialize a new PIVTOOLs workspace with default config.yaml"""
+    """Initialize a new PIVTOOLs workspace with default config.yaml.
+
+    With ``--from-run``, the config is written for a ``.pivraw`` run recorded by
+    the acquisition app (:func:`pivtools_cli.run_import.import_run`).
+    """
     cwd = Path.cwd()
+    config_path = cwd / "config.yaml"
+
+    if args.from_run is not None:
+        from pivtools_cli.run_import import import_run
+
+        result = import_run(
+            Path(args.from_run),
+            config_path,
+            base_path=Path(args.base_path) if args.base_path else None,
+            force=args.force,
+        )
+        print(result.summary())
+        return
 
     # Check if config.yaml already exists
-    config_path = cwd / "config.yaml"
     if config_path.exists():
         if not args.force:
             print(f"config.yaml already exists at {config_path}")
@@ -579,9 +587,9 @@ def init_command(args):
     print(f"Edit {config_path} to configure your PIV analysis")
 
 
-def create_default_config(config_path):
-    """Create a default config.yaml file"""
-    default_config = """
+# The CLI layer of the three-layer config defaults (CLAUDE.md gotcha 1): it must
+# agree with the Config properties and the frontend fallbacks.
+DEFAULT_CONFIG_YAML = """
 paths:
   base_paths:
   - /setme
@@ -840,9 +848,12 @@ transforms:
 
 """
 
+
+def create_default_config(config_path):
+    """Create a default config.yaml file"""
     # Explicit UTF-8 so the template never depends on Windows' cp1252 default.
     with open(config_path, "w", encoding="utf-8") as f:
-        f.write(default_config.strip())
+        f.write(DEFAULT_CONFIG_YAML.strip())
     print(f"Created default config.yaml at {config_path}")
 
 
@@ -851,6 +862,11 @@ def instantaneous_command(args):
     from pivtools_core import instantaneous
 
     if args.active_paths:
+        # Checked here first, so a refusal names --active-paths, not the
+        # PIV_ACTIVE_PATHS variable the job is handed.
+        from pivtools_core.config import Config
+
+        get_active_paths_from_args(args, Config())
         os.environ["PIV_ACTIVE_PATHS"] = args.active_paths
     # instantaneous/ensemble delegate to main(), which reads config.camera_numbers,
     # so the camera override is passed via env var (statistics/transform own their
@@ -887,6 +903,11 @@ def ensemble_command(args):
     from pivtools_core import ensemble
 
     if args.active_paths:
+        # Checked here first, so a refusal names --active-paths, not the
+        # PIV_ACTIVE_PATHS variable the job is handed.
+        from pivtools_core.config import Config
+
+        get_active_paths_from_args(args, Config())
         os.environ["PIV_ACTIVE_PATHS"] = args.active_paths
     # instantaneous/ensemble delegate to main(), which reads config.camera_numbers,
     # so the camera override is passed via env var (statistics/transform own their
@@ -941,7 +962,24 @@ def main():
         "init", help="Initialize a new PIVTOOLs workspace with default config.yaml"
     )
     init_parser.add_argument(
-        "--force", "-f", action="store_true", help="Overwrite existing config.yaml"
+        "--force",
+        "-f",
+        action="store_true",
+        help="Overwrite existing config.yaml (with --from-run, also replace a "
+        "different rig.dt in the calibration settings)",
+    )
+    init_parser.add_argument(
+        "--from-run",
+        default=None,
+        metavar="RUN_FOLDER",
+        help="Write the config for a .pivraw run folder recorded by the "
+        "acquisition app (its Camera<k>.pivraw files and run.yaml)",
+    )
+    init_parser.add_argument(
+        "--base-path",
+        default=None,
+        help="With --from-run: where PIV results go (default "
+        "<project>/results/<run name>)",
     )
     init_parser.set_defaults(func=init_command)
 
@@ -1181,6 +1219,10 @@ def main():
     register_calibration_subparsers(subparsers)
 
     args = parser.parse_args()
+    if args.command == "init" and args.base_path is not None and args.from_run is None:
+        init_parser.error(
+            "--base-path needs --from-run (it sets an imported run's output)"
+        )
 
     if not args.command:
         parser.print_help()
@@ -1190,7 +1232,13 @@ def main():
 
     try:
         args.func(args)
-    except (ValueError, FileNotFoundError, InputsCorrupt, InputsReadError) as exc:
+    except (
+        ValueError,
+        FileNotFoundError,
+        FileExistsError,
+        InputsCorrupt,
+        InputsReadError,
+    ) as exc:
         # Expected user-facing failures (a missing key, a missing file, a damaged
         # sidecar) carry their own actionable message; a traceback only buries it.
         if args.debug or os.environ.get(DEBUG_ENV_VAR) == "1":

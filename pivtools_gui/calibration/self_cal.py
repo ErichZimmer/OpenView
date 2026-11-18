@@ -30,6 +30,7 @@ from typing import List, Optional, Tuple
 import cv2
 import numpy as np
 
+from pivtools_core.config import Config
 from pivtools_gui.stereo_reconstruction.self_calibration import (
     PinholeCamera,
     SelfCalibrationResult,
@@ -39,6 +40,7 @@ from pivtools_gui.stereo_reconstruction.self_calibration import (
 )
 
 from .camera_model import CameraModel
+from .frame_match import check_calibration_frames
 from .record import StereoRecord
 
 logger = logging.getLogger(__name__)
@@ -130,6 +132,45 @@ def _to_pair_gray(pair: np.ndarray) -> np.ndarray:
             ]
         )
     return pair  # already (2, H, W)
+
+
+def check_self_cal_frames(
+    config: Config,
+    calibration_source: Path,
+    base_path_idx: int,
+    cam1: int,
+    cam2: int,
+) -> Tuple[str, ...]:
+    """Refuse self-calibration on PIV images not in the stereo model's pixel frame.
+
+    Self-calibration correlates the two cameras' particle images through the model,
+    so a rotated, dark-treated or foreign image set corrupts it as it corrupts an
+    apply. Run before any job starts, by the CLI command and the GUI route alike.
+    The pair count is resolved here too, as :func:`load_particle_pairs` resolves it
+    first, so a ``.pivraw`` run the reader refuses is refused before the job.
+
+    Returns:
+        The frame check's warnings (``frame_match.check_calibration_frames``), for
+        the caller to show with the result.
+
+    Raises:
+        ValueError: ``base_path_idx`` has no PIV source path.
+        PivrawError: The .pivraw reader refuses the run.
+        CalibrationFrameMismatch: The frame check refuses the calibration.
+    """
+    sources = config.source_paths
+    if not 0 <= base_path_idx < len(sources):
+        raise ValueError(
+            f"base_path_idx {base_path_idx} has no PIV source path "
+            f"({len(sources)} configured)"
+        )
+    config.require_frame_pairs()
+    return check_calibration_frames(
+        config,
+        calibration_source,
+        sorted({int(cam1), int(cam2)}),
+        [sources[base_path_idx]],
+    )
 
 
 def load_particle_pairs(

@@ -25,7 +25,6 @@ Usage:
     pytest unit-tests/test_container_error_reporting.py -v
 """
 
-import struct
 import sys
 from pathlib import Path
 
@@ -36,12 +35,10 @@ from flask import Flask
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from fixtures.diagnosis import make_ctx  # noqa: E402
+from fixtures.lavision import build_set  # noqa: E402
 
 import pivtools_gui.app as gui_app  # noqa: E402
 from pivtools_core.config import Config  # noqa: E402
-
-_TABLE_OFFSET = 256 + 768
-_ENTRY_STRUCT = "<iqq"
 
 
 def _write_container(tmp_path, decoder, width=4, height=2, n_entries=2):
@@ -49,25 +46,15 @@ def _write_container(tmp_path, decoder, width=4, height=2, n_entries=2):
 
     Two frame streams, so a single camera's pre-paired A/B read resolves.
     """
-    set_file = tmp_path / "recording.set"
-    set_file.write_bytes(b"stub")
-    set_dir = tmp_path / "recording"
-    set_dir.mkdir()
-
     payload = b"\x00" * (width * height * 2)
-    for stream in range(2):
-        index = bytearray(_TABLE_OFFSET)
-        struct.pack_into("<i", index, 12, width)
-        struct.pack_into("<i", index, 16, height)
-        for entry in range(n_entries):
-            index += struct.pack(_ENTRY_STRUCT, 0, entry * len(payload), len(payload))
-        (set_dir / f"Frame{stream}-0.ims").write_bytes(bytes(index))
-        (set_dir / f"Frame{stream}-1.ims").write_bytes(payload * n_entries)
-        (set_dir / f"Frame{stream}-decoder.xml").write_text(
-            '<?xml version="1.0" encoding="UTF-8"?>\n'
-            f"<FrameDecoder>\n<id>{decoder}</id>\n</FrameDecoder>\n"
-        )
-    return set_file
+    return build_set(
+        tmp_path,
+        decoder,
+        [[payload] * n_entries] * 2,
+        width=width,
+        height=height,
+        name="recording",
+    )
 
 
 def _make_config(tmp_path, set_file, num_images=2):
@@ -125,10 +112,10 @@ def test_unsupported_encoding_reports_the_real_reason(client):
     This is the exact regression: the container is present and its first frame
     read fails on the encoding.
     """
-    result = _camera_result(client, "mono-12pmsb")
+    result = _camera_result(client, "rgb-24")
 
     assert result["status"] == "error"
-    assert "mono-12pmsb" in result["error"]
+    assert "rgb-24" in result["error"]
     assert "First frame not found" not in result["error"]
     # A genuine decode failure is still labelled as one.
     assert result["error"].startswith(
@@ -143,7 +130,7 @@ def test_decode_failure_withholds_the_folder_listing(client):
     (ValidationAlert.tsx), which is what produced "not found … Found files: <the
     file>" in one panel.
     """
-    result = _camera_result(client, "mono-12pmsb")
+    result = _camera_result(client, "rgb-24")
 
     assert result["sample_files"] == []
 
@@ -224,7 +211,7 @@ def test_validation_dict_is_json_serializable(tmp_path):
 
     from pivtools_core.image_handling.path_utils import validate_images_generic
 
-    set_file = _write_container(tmp_path, "mono-12pmsb")
+    set_file = _write_container(tmp_path, "rgb-24")
 
     def _read(_idx):
         from pivtools_core.image_handling.readers.set_reader import read_set_frame
@@ -245,7 +232,7 @@ def test_validation_dict_is_json_serializable(tmp_path):
     )
 
     assert result["valid"] is False
-    assert "mono-12pmsb" in result["read_error"]
+    assert "rgb-24" in result["read_error"]
     # The assertion that matters: this must not raise.
     json.dumps(result)
 

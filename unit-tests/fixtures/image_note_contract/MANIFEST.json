@@ -1,0 +1,26 @@
+{
+ "writer_commit": "0081187",
+ "format_version": 1,
+ "note_keys": [
+  "format_version",
+  "view_rotation",
+  "dark_id",
+  "dark_subtracted",
+  "pixel_rule",
+  "camera_serial"
+ ],
+ "pixel_rules": {
+  "Mono12p": "mono12p",
+  "BayerRG8": "bayer_rggb_superpixel_sum"
+ },
+ "view_rotations": [
+  "none",
+  "cw90",
+  "ccw90",
+  "180"
+ ],
+ "samples": [
+  "calibration_cx25.tif.json",
+  "export_jai.image_note.json"
+ ]
+}

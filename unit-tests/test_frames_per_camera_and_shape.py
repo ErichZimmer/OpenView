@@ -6,7 +6,7 @@ Pins three Batch-1 fixes from the image-reading audit (2026-08-24):
   exactly 1 or 2, never any other divisor, and ``set_camera_streams`` rejects
   a 10-stream .set with ``camera_count: 2`` (it used to yield stride 5 and
   silently read another camera's pixels).
-* ``Config.image_shape`` has no config override: the old ``images["shape"]``
+* ``Config.image_shape_for`` has no config override: the old ``images["shape"]``
   branch read a key nothing wrote, and honoring a stale stored shape would
   silently break the window grids.
 * ``Config._detect_image_shape`` takes a .set camera's shape from container
@@ -98,7 +98,7 @@ def test_im7_fpc_accepts_the_two_real_layouts(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Config.image_shape: metadata-based .set detection, no config override
+# Config.image_shape_for: metadata-based .set detection, no config override
 # ---------------------------------------------------------------------------
 
 
@@ -107,7 +107,7 @@ def test_set_shape_detection_uses_the_cameras_own_stream(tmp_path, _clean_set_ca
     2's shape. The old pair-reader route read streams 0+1 regardless."""
     set_file = build_raw16_set(tmp_path, [(4, 6), (8, 10), (12, 14)])
     cfg = make_set_config(tmp_path, set_file, camera_count=3, camera_numbers=[2])
-    assert cfg.image_shape == (8, 10)
+    assert cfg.image_shape_for(2) == (8, 10)
 
 
 def test_set_shape_detection_survives_single_stream_time_resolved(
@@ -117,7 +117,7 @@ def test_set_shape_detection_survives_single_stream_time_resolved(
     crashed. Metadata has the answer without touching pixels."""
     set_file = build_raw16_set(tmp_path, [(6, 9)], name="single")
     cfg = make_set_config(tmp_path, set_file, camera_count=1, camera_numbers=[1])
-    assert cfg.image_shape == (6, 9)
+    assert cfg.image_shape_for(1) == (6, 9)
 
 
 def test_set_shape_detection_pre_paired_uses_stride_two(tmp_path, _clean_set_cache):
@@ -127,7 +127,7 @@ def test_set_shape_detection_pre_paired_uses_stride_two(tmp_path, _clean_set_cac
     cfg = make_set_config(
         tmp_path, set_file, camera_count=2, camera_numbers=[2], frame_stride=0
     )
-    assert cfg.image_shape == (8, 10)
+    assert cfg.image_shape_for(2) == (8, 10)
 
 
 def _make_im7_config(tmp_path, camera_count, camera_numbers, subfolders=False):
@@ -161,7 +161,7 @@ def test_im7_shape_detection_time_resolved_high_camera(tmp_path):
 
     _write_pack0_im7(tmp_path / "B00001.im7", np.zeros((5, 7, 9), np.uint16))
     cfg = _make_im7_config(tmp_path, camera_count=5, camera_numbers=[4, 5])
-    assert cfg.image_shape == (7, 9)
+    assert cfg.image_shape_for(4) == (7, 9)
 
 
 def test_im7_shape_detection_wrong_camera_count_names_it(tmp_path):
@@ -170,7 +170,7 @@ def test_im7_shape_detection_wrong_camera_count_names_it(tmp_path):
     _write_pack0_im7(tmp_path / "B00001.im7", np.zeros((8, 7, 9), np.uint16))
     cfg = _make_im7_config(tmp_path, camera_count=2, camera_numbers=[1])
     with pytest.raises(ValueError, match="not 1 or 2 frames per camera"):
-        cfg.image_shape
+        cfg.image_shape_for(1)
 
 
 def test_im7_shape_detection_single_camera_subfolder(tmp_path):
@@ -182,7 +182,7 @@ def test_im7_shape_detection_single_camera_subfolder(tmp_path):
     cfg = _make_im7_config(
         tmp_path, camera_count=2, camera_numbers=[2], subfolders=True
     )
-    assert cfg.image_shape == (7, 9)
+    assert cfg.image_shape_for(2) == (7, 9)
 
 
 def test_images_shape_key_is_ignored(tmp_path, _clean_set_cache):
@@ -191,7 +191,7 @@ def test_images_shape_key_is_ignored(tmp_path, _clean_set_cache):
     cfg = make_set_config(tmp_path, set_file, camera_count=1, camera_numbers=[1])
     cfg.data["images"]["shape"] = [999, 999]
     cfg.data["images"]["image_shape"] = [999, 999]
-    assert cfg.image_shape == (6, 9)
+    assert cfg.image_shape_for(1) == (6, 9)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,37 @@
+config:
+  daq:
+    host: 169.254.138.170
+    port: 8765
+    timeout_s: 3.0
+  cameras:
+    model: jai_go
+    slots:
+    - slot: 1
+      serial: SIM1
+      view_rotation: none
+  timing:
+    light: led
+    trigger: daq
+    exposure_us: 800.0
+    dt_us: 200.0
+    led_pulse_us: 50.0
+    rate_hz: 25.0
+  live:
+    resolution: full
+    colormap: gray
+    auto_contrast: true
+    contrast_method: particle
+    crosshair: false
+  record:
+    project_dir: fixture
+    run_name: tr_lost_frame
+    n: 4
+    mode: stream
+pattern:
+  mode: time_resolved
+  rate_hz: 25.0
+started_at: '2026-11-17T19:36:02.681444+00:00'
+stopped_at: '2026-11-17T19:36:02.850240+00:00'
+trigger: daq
+simulated: true
+dark: null

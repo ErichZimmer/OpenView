@@ -26,6 +26,7 @@ from fixtures.lavision import (  # noqa: E402,F401
     PLIF,
     build_raw16_set,
     clean_set_cache,
+    write_manifest,
 )
 
 import pivtools_core.image_handling.source_diagnosis as SD  # noqa: E402
@@ -270,7 +271,10 @@ def test_scan_sentence_companion_verbatim():
         listed_is_companion=True,
         companion_of=Path("D:/run.set"),
     )
-    assert scan_sentence(scan) == "D:/run is the data folder of D:/run.set (5 streams)."
+    assert (
+        scan_sentence(scan)
+        == "D:/run is the data folder of D:/run.set (5 stream files)."
+    )
 
 
 def test_streams_sentence_plif_verbatim():
@@ -1324,7 +1328,8 @@ def test_validate_images_generic_adds_diagnosis_on_every_branch(tmp_path):
             _fake_frame,
             diagnosis=make_ctx(tmp_path, image_format=(fmt,)),
         )
-        assert {"found", "suggestions", "streams"} <= set(result)
+        assert {"found", "suggestions", "streams", "warnings"} <= set(result)
+        assert result["warnings"] == []
         assert not any(k.startswith("suggest") and k != "suggestions" for k in result)
 
 
@@ -1347,6 +1352,21 @@ def test_apply_diagnosis_reports_an_unfinished_diagnosis(tmp_path, monkeypatch):
     assert result["found"].endswith(
         "Could not finish the diagnosis: Permission denied."
     )
+    assert result["warnings"] == []
+
+
+def test_apply_diagnosis_of_a_passing_folder_has_no_warnings(tmp_path):
+    """The early "what loaded" branch returns before any scan, and still has the key."""
+    touch(tmp_path, ["B00001.tif"])
+    result = {
+        "valid": True,
+        "error": None,
+        "found_count": 1,
+        "format_detected": "tif",
+        "detected_start_index": 1,
+    }
+    apply_diagnosis(result, make_ctx(tmp_path), 1, tmp_path, 1)
+    assert result["warnings"] == []
 
 
 def test_single_pattern_role_suggestion_replaces_only_its_index(tmp_path):
@@ -1523,6 +1543,63 @@ def test_validate_files_flat_files_suggest_one_camera(tmp_path, monkeypatch):
     assert {"camera_count": 1, "camera_numbers": [1]} in applies
 
 
+DIAGNOSIS_KEYS = {"found", "suggestions", "streams", "warnings"}
+
+
+def test_validate_files_blank_source_detail_carries_every_diagnosis_key(
+    tmp_path, monkeypatch
+):
+    body = piv_route_response(
+        tmp_path, monkeypatch, paths={"source_paths": [""]}
+    ).get_json()
+    cam = body["details"]["camera_1"]
+    assert DIAGNOSIS_KEYS <= set(cam)
+    assert cam["warnings"] == []
+
+
+def test_validate_files_camera_exception_detail_carries_every_diagnosis_key(
+    tmp_path, monkeypatch
+):
+    import pivtools_gui.app as gui_app
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("reader exploded")
+
+    monkeypatch.setattr(gui_app, "validate_images_generic", boom)
+    touch(tmp_path / "src", ["B00001_A.tif", "B00001_B.tif"])
+    body = piv_route_response(
+        tmp_path, monkeypatch, paths={"source_paths": [str(tmp_path / "src")]}
+    ).get_json()
+    cam = body["details"]["camera_1"]
+    assert cam["error"] == "reader exploded"
+    assert DIAGNOSIS_KEYS <= set(cam)
+    assert cam["warnings"] == []
+
+
+def test_validate_files_full_detail_carries_every_diagnosis_key(tmp_path, monkeypatch):
+    touch(tmp_path / "src", ["B00001_A.tif", "B00001_B.tif"])
+    body = piv_route_response(
+        tmp_path, monkeypatch, paths={"source_paths": [str(tmp_path / "src")]}
+    ).get_json()
+    cam = body["details"]["camera_1"]
+    assert DIAGNOSIS_KEYS <= set(cam)
+    assert cam["warnings"] == []
+
+
+def test_calibration_validate_failure_carries_every_diagnosis_key(
+    tmp_path, monkeypatch
+):
+    """No settings sidecar yet: the route's own short answer, not apply_diagnosis."""
+    out = (
+        calibration_client(tmp_path / "no_settings", monkeypatch)
+        .post("/calibration/validate", json={"camera": 1, "source_path_idx": 0})
+        .get_json()
+    )
+    assert out["valid"] is False
+    assert DIAGNOSIS_KEYS <= set(out)
+    assert out["warnings"] == []
+
+
 @pytest.mark.parametrize("idx", [3, -1, "0"])
 def test_validate_files_rejects_out_of_range_source_idx(tmp_path, monkeypatch, idx):
     r = piv_route_response(tmp_path, monkeypatch, json={"source_path_idx": idx})
@@ -1660,6 +1737,7 @@ def test_validate_files_unreadable_set_index_reports_reason(
     touch(folder / "run", [])
     (folder / "run" / "Frame0-0.ims").write_bytes(b"xx")  # index too small
     (folder / "run" / "Frame0-1.ims").write_bytes(b"yy")
+    write_manifest(folder / "run", frame_readers=[("Frame0", 0)])
     set_file = folder / "run.set"
     set_file.write_bytes(b"stub")
     cam = piv_route_response(
@@ -1673,12 +1751,21 @@ def test_validate_files_unreadable_set_index_reports_reason(
             "frame_stride": 0,
         },
     ).get_json()["details"]["camera_1"]
-    reason = f"Index file too small: {folder / 'run' / 'Frame0-0.ims'}"
+    reason = (
+        f"Frame0-0.ims in {folder / 'run'} is 2 bytes, shorter than the 1024-byte "
+        f".ims index header. The index is truncated."
+    )
     assert cam["status"] == "error"
     assert cam["error"] == f"Could not read the image count of {set_file}: {reason}"
     assert cam["found"] == f"run.set: streams could not be read ({reason})."
     assert cam["suggestions"] == []
     assert cam["streams"] is None
+
+
+# The strides the Setup page writes for a .cine (sourceDiagnosis.ts
+# imageTypeDefaults): a .cine holds single frames, so the config refuses the
+# pre-paired frame_stride 0 that an unset key defaults to.
+CINE_STRIDES = {"start_index": 1, "frame_stride": 1, "pair_stride": 1}
 
 
 def test_validate_files_multi_camera_cine_never_suggests_a_literal(
@@ -1690,7 +1777,12 @@ def test_validate_files_multi_camera_cine_never_suggests_a_literal(
         tmp_path,
         monkeypatch,
         paths={"source_paths": [str(src)], "camera_count": 2, "camera_numbers": [1, 2]},
-        images={"image_type": "cine", "image_format": ["run.cine"], "num_images": 1},
+        images={
+            "image_type": "cine",
+            "image_format": ["run.cine"],
+            "num_images": 1,
+            **CINE_STRIDES,
+        },
     ).get_json()
     for key in ("camera_1", "camera_2"):
         formats = [
@@ -1710,7 +1802,12 @@ def test_validate_files_single_cine_at_two_cameras_suggests_nothing(
         tmp_path,
         monkeypatch,
         paths={"source_paths": [str(src)], "camera_count": 2, "camera_numbers": [1, 2]},
-        images={"image_type": "cine", "image_format": ["run.cine"], "num_images": 1},
+        images={
+            "image_type": "cine",
+            "image_format": ["run.cine"],
+            "num_images": 1,
+            **CINE_STRIDES,
+        },
     ).get_json()
     for key in ("camera_1", "camera_2"):
         assert not any(

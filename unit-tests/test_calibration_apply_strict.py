@@ -27,6 +27,7 @@ import pytest
 import scipy.io
 from fixtures.vector_sets import (
     ENSEMBLE_FILE,
+    plain_piv_source_fields,
     write_stereo_vector_sets,
     write_vector_set,
 )
@@ -209,6 +210,7 @@ class _FakeCfg:
         self.base_paths = base_paths
         self.camera_numbers = camera_numbers
         self.num_frame_pairs = num_frame_pairs
+        self.__dict__.update(plain_piv_source_fields(camera_numbers, base_paths))
 
 
 def test_planner_names_the_unmodelled_camera(tmp_path):
@@ -300,6 +302,7 @@ def _stub_units(monkeypatch, tmp_path, cams=(1,)):
                 "uncal": tmp_path / "uncal",
                 "out": tmp_path / f"out{cam}",
                 "cameras": (cam,),
+                "frame_warnings": (),
             }
             for cam in cams
         ]
