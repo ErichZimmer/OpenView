@@ -114,9 +114,15 @@ select = [
     "A",     # no shadowing of Python builtins
     "PIE",   # small redundancies
     "PLE",   # pylint error checks
+    "B",     # bugbear: zip() without strict=, lost re-raise cause, loop closures
+    "S110",  # no silent try/except/pass
+    "NPY",   # numpy: legacy np.random and deprecated aliases
+    "ERA",   # no commented-out code
 ]
 
 [tool.ruff.lint.per-file-ignores]
 # OMP_NUM_THREADS must be set before numpy/scipy load their thread pools.
 "pivtools_core/ensemble.py" = ["E402"]
 "pivtools_core/instantaneous.py" = ["E402"]
+# Tests evaluate attributes inside pytest.raises to trigger the error under test.
+"unit-tests/**" = ["B018"]
