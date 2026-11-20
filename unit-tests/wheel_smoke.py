@@ -71,7 +71,7 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
             raise SystemExit("FAIL: Config() should raise without config.yaml")
         except FileNotFoundError as e:
             if "pivtools-cli init" not in str(e):
-                raise SystemExit(f"FAIL: unexpected error message: {e}")
+                raise SystemExit(f"FAIL: unexpected error message: {e}") from e
         print("fail-loud Config OK")
 
         subprocess.run([sys.executable, "-m", "pivtools_cli.cli", "init"], check=True)

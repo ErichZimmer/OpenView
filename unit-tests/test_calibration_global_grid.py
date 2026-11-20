@@ -343,7 +343,7 @@ def test_charuco_shortcircuit():
     rng = np.random.default_rng(0)
     detections = {1: [], 2: []}
     for cam in (1, 2):
-        for v in range(2):
+        for _v in range(2):
             ids = np.arange(20)
             grid = np.column_stack([ids % 5, ids // 5]).astype(np.int64)
             px = rng.uniform(0, 1000, size=(20, 2))

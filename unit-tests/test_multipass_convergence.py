@@ -63,7 +63,7 @@ def _robust_rmtree(path):
         os.chmod(fpath, stat.S_IWRITE)
         func(fpath)
 
-    for attempt in range(3):
+    for _attempt in range(3):
         try:
             shutil.rmtree(path, onerror=_onerror)
             return
@@ -689,7 +689,7 @@ class TestDiagnosticFigures:
                 pred_errors.append((pidx + 1, err))
 
         if pred_errors:
-            passes, errs = zip(*pred_errors)
+            passes, errs = zip(*pred_errors, strict=True)
             ax.bar(passes, errs, color=["#4c72b0", "#dd8452"][: len(passes)])
             ax.set_xlabel("Pass number")
             ax.set_ylabel("median |pred_x - ux| (px)")
@@ -992,6 +992,7 @@ class TestMaskedPredictorFill:
                 ("instantaneous (3 pairs)", masked_instantaneous),
                 ("ensemble (10 pairs)", masked_ensemble),
             ),
+            strict=True,
         ):
             for fill, r in res.items():
                 prof = r["profile"].copy()

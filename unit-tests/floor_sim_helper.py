@@ -28,7 +28,7 @@ def frac_shift(
     offsets, weights_fun = KERNEL_TAPS[kernel]
     w = weights_fun(f)
     out = np.zeros_like(img)
-    for wt, d in zip(w, offsets):
+    for wt, d in zip(w, offsets, strict=True):
         if wt != 0.0:
             out += wt * np.roll(img, -int(d), axis=axis)
     return out

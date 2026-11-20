@@ -98,7 +98,7 @@ def _render(shape, rows, cols):
     """uint16 image of Gaussian particles centred at (rows, cols)."""
     yy, xx = np.mgrid[0 : shape[0], 0 : shape[1]]
     img = np.zeros(shape, np.float64)
-    for r, c in zip(rows, cols):
+    for r, c in zip(rows, cols, strict=True):
         img += np.exp(-((yy - r) ** 2 + (xx - c) ** 2) / (2 * PARTICLE_SIGMA_PX**2))
     return np.clip(PARTICLE_PEAK * img, 0, 65535).astype("<u2")
 

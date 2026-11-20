@@ -70,7 +70,7 @@ def _synthetic_frame(rng: np.random.Generator, glare: bool = True) -> np.ndarray
     kernel = (_PEAK - _BG) * np.exp(
         -(r[:, None] ** 2 + r[None, :] ** 2) / (2 * _PARTICLE_SIGMA**2)
     )
-    for y, x in zip(ys, xs):
+    for y, x in zip(ys, xs, strict=True):
         # max, not add: overlapping particles must not create brighter peaks.
         win = frame[y - 3 : y + 4, x - 3 : x + 4]
         np.maximum(win, _BG + kernel, out=win)

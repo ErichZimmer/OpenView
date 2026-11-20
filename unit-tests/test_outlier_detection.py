@@ -440,7 +440,9 @@ def test_masked_exclusion_figure(make_figures, output_dir):
         handles=[
             Patch(color=c, label=lab)
             for c, lab in zip(
-                colours, ["valid", "masked (stored 0)", "flagged outlier"]
+                colours,
+                ["valid", "masked (stored 0)", "flagged outlier"],
+                strict=True,
             )
         ],
         loc="outside lower center",

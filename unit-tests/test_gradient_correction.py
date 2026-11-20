@@ -66,7 +66,7 @@ class TestUnwarpedBehaviourUnchanged:
         U, V = _shear_fields()
         ref = _window_corr(U, V)
         zer = _window_corr(U, V, pred_U=np.zeros_like(U), pred_V=np.zeros_like(V))
-        for a, b in zip(ref, zer):
+        for a, b in zip(ref, zer, strict=True):
             assert np.allclose(a, b, equal_nan=True)
 
 

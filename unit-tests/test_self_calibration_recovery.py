@@ -73,7 +73,9 @@ def create_stereo_cameras(
     cam1_pos = np.array([baseline_mm / 2.0, 0.0, z_cam])
     cam2_pos = np.array([-baseline_mm / 2.0, 0.0, z_cam])
 
-    def look_at_rotation(cam_pos, target=np.array([0, 0, 0])):
+    def look_at_rotation(cam_pos, target=None):
+        if target is None:
+            target = np.array([0, 0, 0])
         z_axis = target - cam_pos
         z_axis = z_axis / np.linalg.norm(z_axis)
         up = np.array([0.0, -1.0, 0.0])
@@ -102,16 +104,20 @@ def create_stereo_cameras(
     return cam1, cam2
 
 
-def generate_particles(n_particles, x_range, y_range, z_offset, tilt_x, tilt_y):
+def generate_particles(n_particles, x_range, y_range, z_offset, tilt_x, tilt_y, rng):
     """Generate random particles on a tilted laser sheet."""
-    x = np.random.uniform(x_range[0], x_range[1], n_particles)
-    y = np.random.uniform(y_range[0], y_range[1], n_particles)
+    x = rng.uniform(x_range[0], x_range[1], n_particles)
+    y = rng.uniform(y_range[0], y_range[1], n_particles)
     z = z_offset + x * np.tan(tilt_y) + y * np.tan(tilt_x)
     return np.column_stack([x, y, z])
 
 
 def render_particles(
-    particles, camera, particle_sigma=PARTICLE_SIGMA, intensity=PARTICLE_INTENSITY
+    particles,
+    camera,
+    rng,
+    particle_sigma=PARTICLE_SIGMA,
+    intensity=PARTICLE_INTENSITY,
 ):
     """Render particles as Gaussian spots on an image."""
     w, h = camera.image_size
@@ -141,7 +147,7 @@ def render_particles(
             iy - half_size : iy + half_size + 1, ix - half_size : ix + half_size + 1
         ] += kernel
 
-    noise = np.random.normal(0, 5, image.shape).astype(np.float32)
+    noise = rng.normal(0, 5, image.shape).astype(np.float32)
     image = np.clip(image + noise, 0, 255)
     return image.astype(np.uint8)
 
@@ -160,7 +166,7 @@ def stereo_cameras():
 @pytest.fixture(scope="module")
 def synthetic_images(stereo_cameras):
     """Generate synthetic particle images with known misalignment."""
-    np.random.seed(42)
+    rng = np.random.default_rng(42)
     cam1, cam2 = stereo_cameras
     images_cam1 = []
     images_cam2 = []
@@ -173,9 +179,10 @@ def synthetic_images(stereo_cameras):
             z_offset=TRUE_Z_OFFSET,
             tilt_x=TRUE_TILT_X,
             tilt_y=TRUE_TILT_Y,
+            rng=rng,
         )
-        images_cam1.append(render_particles(particles, cam1))
-        images_cam2.append(render_particles(particles, cam2))
+        images_cam1.append(render_particles(particles, cam1, rng))
+        images_cam2.append(render_particles(particles, cam2, rng))
 
     return images_cam1, images_cam2
 

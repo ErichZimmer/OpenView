@@ -342,7 +342,7 @@ class TestPODFilterStandalone:
     def test_find_auto_mode_all_noise(self):
         """If all eigenvalues are ~equal (pure noise), return 0 (nothing to remove)."""
         n = 20
-        PSI = np.random.randn(n, n)
+        PSI = np.random.default_rng(0).standard_normal((n, n))
         # Orthogonalize to get realistic eigenvectors
         PSI, _ = np.linalg.qr(PSI)
         eigvals = np.ones(n)  # flat spectrum = noise
@@ -376,7 +376,7 @@ class TestPODFilterStandalone:
 
     def test_pod_filter_preserves_shape(self):
         """Output shape and dtype match input."""
-        images = np.random.rand(10, 32, 32).astype(np.float32)
+        images = np.random.default_rng(0).random((10, 32, 32)).astype(np.float32)
         filtered = pod_filter_single_channel(images.copy(), verbose=False)
         assert filtered.shape == images.shape
         assert filtered.dtype == images.dtype
@@ -402,7 +402,9 @@ class TestPODFilterStandalone:
 
     def test_time_filter_batch_shape(self):
         """time_filter_batch preserves shape and dtype."""
-        batch = np.random.rand(10, 2, 32, 32).astype(np.float32) + 10.0
+        batch = (
+            np.random.default_rng(0).random((10, 2, 32, 32)).astype(np.float32) + 10.0
+        )
         result = time_filter_batch(batch.copy(), verbose=False)
         assert result.shape == batch.shape
         assert result.dtype == batch.dtype
@@ -432,7 +434,7 @@ class TestPODFilterStandalone:
         ]
         images = np.zeros((n, h, w), dtype=np.float32)
         for i in range(n):
-            for amp_scale, m in zip((0.2, 0.5, 0.8), modes):
+            for amp_scale, m in zip((0.2, 0.5, 0.8), modes, strict=True):
                 coeff = np.float32(1.0 + amp_scale * rng.randn())
                 images[i] += coeff * m.astype(np.float32)
             images[i] += rng.rand(h, w).astype(np.float32)  # small noise
