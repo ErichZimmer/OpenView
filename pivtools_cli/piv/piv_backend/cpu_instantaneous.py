@@ -9,7 +9,6 @@ from contextlib import contextmanager
 from typing import List, Optional
 
 import cv2
-import matplotlib
 import numpy as np
 from scipy.ndimage import gaussian_filter
 
@@ -33,8 +32,6 @@ from pivtools_cli.piv.piv_backend.outlier_detection import apply_outlier_detecti
 from pivtools_cli.piv.piv_result import PIVPassResult, PIVResult
 from pivtools_core.config import Config
 from pivtools_core.window_utils import compute_window_centers
-
-matplotlib.use("Agg")
 
 
 class InstantaneousCorrelatorCPU(CrossCorrelator):

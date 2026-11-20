@@ -9,7 +9,7 @@ from loguru import logger
 from pivtools_core.config import PairingStrideError, get_config
 from pivtools_core.image_handling.readers.pivraw_reader import PivrawError
 from pivtools_core.paths import count_vector_files, get_data_paths, list_vector_files
-from pivtools_core.vector_loading import get_plottable_vars
+from pivtools_core.vector_loading import ResultFileError, get_plottable_vars
 from pivtools_gui.services.job_manager import job_manager
 from pivtools_gui.video_maker.video_maker import (
     VideoMaker,
@@ -646,6 +646,10 @@ def available_variables():
             }
         )
 
+    except ResultFileError as e:
+        # A result file exists but cannot be listed; the message names it.
+        logger.warning(f"[VIDEO] available_variables: {e}")
+        return jsonify({"success": False, "error": str(e)}), 400
     except Exception as e:
         logger.exception(f"[VIDEO] Failed to get available variables: {e}")
         return jsonify({"success": False, "error": str(e)}), 500

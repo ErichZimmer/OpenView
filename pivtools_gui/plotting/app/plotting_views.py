@@ -20,7 +20,11 @@ from scipy.io import loadmat
 from pivtools_core.config import get_config
 from pivtools_core.coordinate_utils import extract_coordinates
 from pivtools_core.paths import get_data_paths, list_vector_files
-from pivtools_core.vector_loading import find_non_empty_run, get_plottable_vars
+from pivtools_core.vector_loading import (
+    find_non_empty_run,
+    get_plottable_vars,
+    load_result_mat,
+)
 from pivtools_gui.vector_statistics.correlation_quality import (
     load_timeseries_mat,
     plot_nan_reasons,
@@ -31,6 +35,7 @@ from ...utils import camera_number
 from ..plot_maker import make_scalar_settings
 from .shared_utils import (
     apply_wall_units,
+    b_mask_for,
     build_response_meta,
     create_and_return_plot,
     length_units_for,
@@ -331,10 +336,7 @@ def plot_ensemble():
             )
 
         var_arr = np.asarray(getattr(pr, raw_var))
-        try:
-            mask_arr = np.asarray(pr.b_mask).astype(bool)
-        except Exception:
-            mask_arr = np.zeros_like(var_arr, dtype=bool)
+        mask_arr = b_mask_for(pr, var_arr, ensemble_file)
 
         cx = cy = None
         if coords_path and coords_path.exists():
@@ -544,16 +546,7 @@ def _sampled_var_values(mat_path: Path, var: str) -> List[np.ndarray]:
     ``ValueError`` naming the file: colour limits silently drawn from fewer files
     than sampled are a wrong answer.
     """
-    try:
-        mat = loadmat(str(mat_path), struct_as_record=False, squeeze_me=True)
-    # scipy has no single error type for a bad file: MatReadError, IndexError,
-    # ValueError, TypeError and NotImplementedError (v7.3/HDF5) are all seen. Any
-    # of them is re-raised naming the file, never swallowed.
-    except Exception as err:
-        raise ValueError(f"{mat_path}: cannot be read ({err})") from err
-    if "piv_result" not in mat:
-        raise ValueError(f"{mat_path}: no 'piv_result' struct in the file")
-    piv_result = mat["piv_result"]
+    piv_result = load_result_mat(mat_path, "piv_result")
     elements = (
         list(piv_result.flat) if isinstance(piv_result, np.ndarray) else [piv_result]
     )

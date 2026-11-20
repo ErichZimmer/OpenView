@@ -19,7 +19,6 @@ from contextlib import contextmanager
 from typing import List, Optional
 
 import cv2
-import matplotlib
 import numpy as np
 from scipy.ndimage import gaussian_filter
 
@@ -30,8 +29,6 @@ from pivtools_core.window_utils import (
     compute_window_centers,
     compute_window_centers_single_mode,
 )
-
-matplotlib.use("Agg")
 
 
 class EnsembleCorrelatorCPU(CrossCorrelator):

@@ -566,8 +566,35 @@ PEAK_STACK_VAR = "peak_mag"
 PEAK_STACK_INDEX_VAR = "peak_choice"
 
 
-class PlottableVarsError(ValueError):
-    """A result file exists but its variable list cannot be read."""
+class ResultFileError(ValueError):
+    """A result ``.mat`` file exists but cannot be read as a result."""
+
+
+def load_result_mat(file_path: Union[str, Path], var_name: str = "piv_result") -> Any:
+    """
+    Load one result ``.mat`` file and return its ``var_name`` entry.
+
+    Args:
+        file_path: Path to an existing .mat file
+        var_name: Struct name in the file ("piv_result" or "ensemble_result")
+
+    Returns:
+        ``mat[var_name]`` as loaded with ``struct_as_record=False, squeeze_me=True``
+
+    Raises:
+        ResultFileError: The file cannot be loaded or lacks ``var_name``. The
+            message names the file.
+    """
+    try:
+        mat = scipy.io.loadmat(str(file_path), struct_as_record=False, squeeze_me=True)
+    # scipy has no single error type for a bad file: MatReadError, IndexError,
+    # ValueError, TypeError and NotImplementedError (v7.3/HDF5) are all seen. Any
+    # of them is re-raised naming the file, never swallowed.
+    except Exception as err:
+        raise ResultFileError(f"{file_path}: cannot be read ({err})") from err
+    if var_name not in mat:
+        raise ResultFileError(f"{file_path}: no '{var_name}' struct in the file")
+    return mat[var_name]
 
 
 def get_plottable_vars(
@@ -596,24 +623,14 @@ def get_plottable_vars(
         Variable names in alphabetical order
 
     Raises:
-        PlottableVarsError: The file cannot be loaded, lacks ``var_name``, or
+        ResultFileError: The file cannot be loaded, lacks ``var_name``, or
             ``var_name`` is not a struct. The message names the file.
     """
     file_path = Path(file_path)
     if not file_path.exists():
         return []
 
-    try:
-        mat = scipy.io.loadmat(str(file_path), struct_as_record=False, squeeze_me=True)
-    # scipy has no single error type for a bad file: MatReadError, IndexError,
-    # ValueError, TypeError and NotImplementedError (v7.3/HDF5) are all seen. Any
-    # of them is re-raised naming the file, never swallowed.
-    except Exception as err:
-        raise PlottableVarsError(f"{file_path}: cannot be read ({err})") from err
-    if var_name not in mat:
-        raise PlottableVarsError(f"{file_path}: no '{var_name}' struct in the file")
-
-    data = mat[var_name]
+    data = load_result_mat(file_path, var_name)
 
     # One struct element per pass; take the first populated one.
     if isinstance(data, np.ndarray) and data.dtype == object and data.size > 0:
@@ -630,7 +647,7 @@ def get_plottable_vars(
         struct = data
 
     if not hasattr(struct, "_fieldnames"):
-        raise PlottableVarsError(
+        raise ResultFileError(
             f"{file_path}: '{var_name}' is not a struct (got {type(struct).__name__})"
         )
     return get_plottable_vars_from_struct(struct, include_peak_stack)

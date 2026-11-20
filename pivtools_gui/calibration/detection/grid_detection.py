@@ -387,6 +387,11 @@ def detect_dotboard_blobs(
 # Direction histogram for grid axis detection
 # ---------------------------------------------------------------------------
 
+# Half-width of the angular cluster of neighbour vectors taken around a direction
+# peak before the median. A third of the 45 degrees between a grid axis and the board
+# diagonal, so diagonal neighbour pairs never enter an axis's median.
+_AXIS_CLUSTER_HALF_WIDTH_RAD = np.radians(15)
+
 
 def _find_grid_directions(
     centers: np.ndarray,
@@ -467,13 +472,11 @@ def _find_grid_directions(
         return None
 
     # Extract representative vector for each peak: flip to same half-plane, take median
-    def _representative_vector(target_angle, tol=None):
-        if tol is None:
-            tol = np.radians(15)
+    def _representative_vector(target_angle):
         sep = np.minimum(
             np.abs(angles - target_angle), np.pi - np.abs(angles - target_angle)
         )
-        cluster = all_vecs[sep < tol].copy()
+        cluster = all_vecs[sep < _AXIS_CLUSTER_HALF_WIDTH_RAD].copy()
         if len(cluster) == 0:
             return None
         ref_dir = np.array([np.cos(target_angle), np.sin(target_angle)])

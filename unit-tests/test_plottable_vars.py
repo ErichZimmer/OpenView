@@ -14,7 +14,7 @@ import numpy as np
 import pytest
 import scipy.io
 
-from pivtools_core.vector_loading import PlottableVarsError, get_plottable_vars
+from pivtools_core.vector_loading import ResultFileError, get_plottable_vars
 
 GRID = (3, 4)
 N_PEAKS = 2
@@ -71,19 +71,49 @@ def test_absent_file_has_no_variables(tmp_path):
 def test_unreadable_file_raises_naming_it(tmp_path, content):
     path = tmp_path / "B00001.mat"
     path.write_bytes(content)
-    with pytest.raises(PlottableVarsError, match="B00001.mat"):
+    with pytest.raises(ResultFileError, match="B00001.mat"):
         get_plottable_vars(path)
 
 
 def test_file_without_the_struct_raises_naming_it(tmp_path):
     path = tmp_path / "B00001.mat"
     scipy.io.savemat(str(path), {"coordinates": np.zeros(GRID)})
-    with pytest.raises(PlottableVarsError, match=r"B00001\.mat.*piv_result"):
+    with pytest.raises(ResultFileError, match=r"B00001\.mat.*piv_result"):
         get_plottable_vars(path)
 
 
 def test_non_struct_variable_raises_naming_it(tmp_path):
     path = tmp_path / "B00001.mat"
     scipy.io.savemat(str(path), {"piv_result": np.zeros(GRID)})
-    with pytest.raises(PlottableVarsError, match="not a struct"):
+    with pytest.raises(ResultFileError, match="not a struct"):
         get_plottable_vars(path)
+
+
+def test_per_frame_statistics_file_lists_its_stats_with_the_default_fields(tmp_path):
+    """A per-frame statistics file carries the frame file's ``ux``/``uy`` on every pass.
+
+    The deleted video-maker lister searched ``u_prime``/``uu_inst`` for the first
+    populated pass. The real writer (``_process_frame_parallel``) copies every field
+    of the frame file and adds the stats on exactly the passes whose ``ux``/``uy`` are
+    populated (``valid_runs`` comes from ``find_valid_piv_runs``, which checks
+    ``ux``/``uy``), so the default ``("ux", "uy")`` finds the stats pass. Velocity
+    saving is off here to show ``ux``/``uy`` are kept regardless.
+    """
+    from pivtools_gui.vector_statistics.instantaneous_statistics import (
+        _process_frame_parallel,
+    )
+
+    frame = _write_passes(tmp_path / "00001.mat", 2, populated=[1])
+    out = tmp_path / "stats_00001.mat"
+    _process_frame_parallel(
+        str(frame),
+        str(out),
+        means_dict={
+            2: {"mean_ux": np.zeros(GRID), "mean_uy": np.zeros(GRID), "stereo": False}
+        },
+        calc_flags={"calc_inst_stresses": True, "save_inst_velocity": False},
+        coords_dict={},
+    )
+
+    names = get_plottable_vars(out)
+    assert {"ux", "uy", "uu_inst", "vv_inst", "uv_inst"} <= set(names)

@@ -975,13 +975,16 @@ def main():
         _old_stderr = _sys.stderr
         _sys.stderr = _io.StringIO()
 
+        # Shutdown teardown stays non-fatal: the results are written and Tornado
+        # errors here are unpredictable. A failed close is kept and printed once
+        # stderr is restored (a leaked cluster can hold ports and memory), printed
+        # rather than logged because the distributed loggers are silenced above.
+        _teardown_errors = []
         try:
             if _client is not None:
                 _client.close(timeout=5)
-        # Shutdown teardown: Tornado errors here are unpredictable, nothing is
-        # left to protect, and stderr is redirected so a log line would be hidden.
-        except Exception:  # noqa: S110
-            pass
+        except Exception as err:
+            _teardown_errors.append(f"client.close failed: {err!r}")
 
         # Small delay to let workers finish cleanly
         time.sleep(0.5)
@@ -989,16 +992,16 @@ def main():
         try:
             if _cluster is not None:
                 _cluster.close(timeout=5)
-        # Shutdown teardown: Tornado errors here are unpredictable, nothing is
-        # left to protect, and stderr is redirected so a log line would be hidden.
-        except Exception:  # noqa: S110
-            pass
+        except Exception as err:
+            _teardown_errors.append(f"cluster.close failed: {err!r}")
 
         # Wait a bit more for async cleanup to complete
         time.sleep(0.2)
 
         # Restore stderr
         _sys.stderr = _old_stderr
+        for _teardown_error in _teardown_errors:
+            print(f"[WARNING] Dask shutdown: {_teardown_error}", flush=True)
 
         end_time = time.time()
         elapsed = end_time - start_time

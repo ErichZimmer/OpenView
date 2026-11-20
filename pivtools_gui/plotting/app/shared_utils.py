@@ -224,31 +224,72 @@ def load_piv_result(mat_path: Path) -> Any:
     return mat["piv_result"]
 
 
-def extract_var_and_mask(pr: Any, var: str) -> Tuple[np.ndarray, np.ndarray]:
+# dtype kinds a stored b_mask may have: bool, or 0/1 as int, uint or float
+# (merging writes uint8, the PIV writer bool). NumPy casts strings and objects to
+# bool without complaint, so the kind is checked rather than relying on astype.
+B_MASK_DTYPE_KINDS = "biuf"
+
+
+def b_mask_for(pr: Any, var_arr: np.ndarray, mat_path: Path) -> np.ndarray:
+    """
+    The boolean ``b_mask`` of one result pass element, checked against its data.
+
+    Every writer of a plotted result emits ``b_mask`` on every pass element (PIV
+    ``save_results`` instantaneous and ensemble, calibration apply and stereo
+    reconstruction in ``calibration/runio.py``, ``vector_merger``, mean and
+    per-frame statistics). One that is missing, not numeric/boolean, or not the
+    shape of the plotted field is a stale or broken file.
+
+    Args:
+        pr: A ``piv_result`` or ``ensemble_result`` element (``loadmat`` with
+            ``struct_as_record=False``)
+        var_arr: The field being plotted from the same element
+        mat_path: The file the element came from, for the error message
+
+    Returns:
+        ``b_mask`` as a bool array of ``var_arr``'s shape
+
+    Raises:
+        ValueError: ``b_mask`` is missing, of a non-mask dtype, or of another
+            shape. The message names the file.
+    """
+    if not hasattr(pr, "b_mask"):
+        raise ValueError(f"{mat_path}: result element has no b_mask field")
+    stored = np.asarray(pr.b_mask)
+    if stored.dtype.kind not in B_MASK_DTYPE_KINDS:
+        raise ValueError(
+            f"{mat_path}: b_mask has dtype {stored.dtype}, not a boolean mask"
+        )
+    if stored.shape != var_arr.shape:
+        raise ValueError(
+            f"{mat_path}: b_mask shape {stored.shape} does not match the "
+            f"field's shape {var_arr.shape}"
+        )
+    return stored.astype(bool)
+
+
+def extract_var_and_mask(
+    pr: Any, var: str, mat_path: Path
+) -> Tuple[np.ndarray, np.ndarray]:
     """
     Extract variable and mask arrays from a piv_result element.
 
     Args:
         pr: piv_result struct with attributes
         var: Variable name to extract
+        mat_path: The file ``pr`` came from, for error messages
 
     Returns:
         Tuple of (variable_array, mask_array)
 
     Raises:
-        ValueError: If variable not found
+        ValueError: If the variable is not found, or ``b_mask`` is unusable
+            (see :func:`b_mask_for`)
     """
-    try:
-        var_arr = np.asarray(getattr(pr, var))
-    except Exception as err:
-        raise ValueError(f"'{var}' not found in piv_result element") from err
-
-    try:
-        mask_arr = np.asarray(pr.b_mask).astype(bool)
-    except Exception:
-        mask_arr = np.zeros_like(var_arr, dtype=bool)
-
-    return var_arr, mask_arr
+    if not hasattr(pr, var):
+        raise ValueError(f"{mat_path}: '{var}' not found in piv_result element")
+    var_arr = np.asarray(getattr(pr, var))
+    return var_arr, b_mask_for(pr, var_arr, mat_path)
 
 
 def create_and_return_plot(
@@ -603,7 +644,7 @@ def load_and_plot_data(
             var_arr = peak_mag
         mask_arr = np.zeros_like(var_arr, dtype=bool)
     else:
-        var_arr, mask_arr = extract_var_and_mask(pr, var)
+        var_arr, mask_arr = extract_var_and_mask(pr, var, mat_path)
 
     cx = cy = None
     if coords_path and coords_path.exists():

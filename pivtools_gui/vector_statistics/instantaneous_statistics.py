@@ -1263,17 +1263,31 @@ class VectorStatisticsProcessor:
         config = PlotConfig()
 
         def _save_run_field(
-            field_data,
-            var_name,
-            units,
+            field_data: Optional[np.ndarray],
+            var_name: str,
+            units: str,
             *,
-            run_num,
-            cx,
-            cy,
-            mask,
-            cmap=None,
-            symmetric=True,
-        ):
+            run_num: int,
+            cx: Optional[np.ndarray],
+            cy: Optional[np.ndarray],
+            mask: np.ndarray,
+            cmap: Optional[str] = None,
+            symmetric: bool = True,
+        ) -> None:
+            """
+            Save one statistics field of one run as ``Run_<run>_<var_name>.png``.
+
+            Args:
+                field_data: The 2D field; ``None`` (not computed) saves nothing
+                var_name: Figure name and plot label, e.g. ``"Mean_Ux"``
+                units: Colour-bar units
+                run_num: 1-based run (pass) number, in the file name and title
+                cx: x coordinates of the run's grid, or ``None`` for indices
+                cy: y coordinates of the run's grid, or ``None`` for indices
+                mask: Boolean ``b_mask`` of the run; masked vectors are not drawn
+                cmap: Colormap name, or ``None`` for the plot default
+                symmetric: Centre the colour range on zero
+            """
             if field_data is None:
                 return
 
