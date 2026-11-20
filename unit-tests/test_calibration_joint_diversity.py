@@ -219,6 +219,15 @@ def test_meta_missing_field_raises_not_defaults():
         pose_diversity_from_meta(meta)
 
 
+def test_meta_short_view_field_raises_not_truncates():
+    """A per-view array shorter than the others is a stale record, never a shorter view list."""
+    rig = {1: [(20.0, 0.0, 700.0), (20.0, 90.0, 760.0), (20.0, 180.0, 740.0)]}
+    meta = pose_diversity_to_meta(pose_diversity(_BOARD, *_rig(rig)))
+    meta["view_rms_px"] = meta["view_rms_px"][:, :-1]
+    with pytest.raises(ValueError, match="per-view fields disagree"):
+        pose_diversity_from_meta(meta)
+
+
 def test_fronto_parallel_solve_has_low_rms_and_is_degenerate():
     """The headline: a fit the rms would call healthy, flagged in the same assertion."""
     detections = _dataset(seed=3, fronto=True, noise_px=0.3)

@@ -423,7 +423,7 @@ def _real_config(bg_method):
 
 class TestCombinedModeConfig:
     def test_enum_and_derived_properties(self):
-        # (method, base, window_mean_in_correlator, dc_zero)
+        # Columns: method, base, window-mean-in-correlator, dc_zero.
         table = [
             ("correlation", "correlation", False, False),
             ("image", "image", False, False),

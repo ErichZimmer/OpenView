@@ -552,7 +552,7 @@ def write_boards_planes_3d(
         from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
         planes = []
-        for rv, tv, pl in zip(rvecs, tvecs, board_local_points):
+        for rv, tv, pl in zip(rvecs, tvecs, board_local_points, strict=True):
             R, _ = cv2.Rodrigues(np.asarray(rv, np.float64).reshape(3))
             planes.append(_board_corners_cam(R, tv, pl))
         if not planes:

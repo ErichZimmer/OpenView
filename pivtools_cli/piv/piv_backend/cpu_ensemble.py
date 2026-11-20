@@ -1418,8 +1418,10 @@ class EnsembleCorrelatorCPU(CrossCorrelator):
         correl_plane_out = np.ascontiguousarray(
             np.zeros(N * total_windows * corr_size[0] * corr_size[1], dtype=np.float32)
         )
-        (N, n_peaks, n_win_y, n_win_x)
 
+        # The six peak outputs share one 1-element buffer. The C library writes
+        # fPkLocX..fSxy only under ``if (!bEnsemble)``, and this call passes
+        # b_ensemble = True, so they are never written in ensemble mode.
         pk_loc_x = pk_loc_y = pk_height = sx = sy = sxy = np.ascontiguousarray(
             np.zeros((1,), dtype=np.float32)
         )

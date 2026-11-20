@@ -398,7 +398,7 @@ def _view_residuals(
 ) -> list:
     """Per-point reprojection residual (px) for every view, position-aligned."""
     out = []
-    for obj, img, rv, tv in zip(obj_views, img_views, rvecs, tvecs):
+    for obj, img, rv, tv in zip(obj_views, img_views, rvecs, tvecs, strict=True):
         proj, _ = cv2.projectPoints(np.asarray(obj, np.float64), rv, tv, K, dist)
         out.append(
             np.linalg.norm(proj.reshape(-1, 2) - np.asarray(img, np.float64), axis=1)
@@ -450,7 +450,7 @@ def fit_pinhole(
 
     init_objs = []
     init_imgs = []
-    for obj, img in zip(obj_views, img_views):
+    for obj, img in zip(obj_views, img_views, strict=True):
         mask = np.abs(obj[:, 2] - z_for_init) < 0.5
         if mask.sum() < 4:
             continue

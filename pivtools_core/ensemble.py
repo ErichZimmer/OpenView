@@ -406,10 +406,12 @@ def signal_handler(signum, frame):
         if _client is not None:
             logger.info("Cancelling pending futures...")
             # Cancel all pending futures to stop work immediately
+            # Shutdown must continue even if the cancel fails (no futures, already
+            # cancelled, scheduler gone), so the failure is only logged.
             try:
                 _client.cancel(_client.futures, force=True)
             except Exception:
-                pass  # May fail if no futures or already cancelled
+                logger.debug("Cancelling pending futures failed", exc_info=True)
 
             logger.info("Closing Dask client...")
             _client.close(timeout=5)
@@ -970,8 +972,10 @@ def main():
         try:
             if _client is not None:
                 _client.close(timeout=5)
-        except Exception:
-            pass  # Suppress errors during shutdown
+        # Shutdown teardown: Tornado errors here are unpredictable, nothing is
+        # left to protect, and stderr is redirected so a log line would be hidden.
+        except Exception:  # noqa: S110
+            pass
 
         # Small delay to let workers finish cleanly
         time.sleep(0.5)
@@ -979,8 +983,10 @@ def main():
         try:
             if _cluster is not None:
                 _cluster.close(timeout=5)
-        except Exception:
-            pass  # Suppress errors during shutdown
+        # Shutdown teardown: Tornado errors here are unpredictable, nothing is
+        # left to protect, and stderr is redirected so a log line would be hidden.
+        except Exception:  # noqa: S110
+            pass
 
         # Wait a bit more for async cleanup to complete
         time.sleep(0.2)

@@ -167,7 +167,7 @@ def validate_config(config: Config) -> Tuple[bool, str, List[str]]:
 
     # The dataset selection must name real datasets (an empty one is refused too)
     try:
-        config.active_paths
+        config.active_paths  # noqa: B018 evaluated for its ActivePathsError
     except ActivePathsError as e:
         errors.append(str(e))
 
@@ -240,12 +240,9 @@ def validate_config(config: Config) -> Tuple[bool, str, List[str]]:
             if matching_files:
                 indices = []
                 for f in matching_files:
-                    try:
-                        m = re.search(r"(\d+)", f.name)
-                        if m:
-                            indices.append(int(m.group(1)))
-                    except Exception:
-                        pass
+                    m = re.search(r"(\d+)", f.name)
+                    if m:
+                        indices.append(int(m.group(1)))
                 if indices:
                     min_idx = min(indices)
                     expected_min = config.start_index
@@ -490,14 +487,14 @@ def validate_ensemble_config(config: Config) -> Tuple[bool, List[str], List[str]
     # 5. Validate sum_window when single mode is used
     if "single" in ensemble_types:
         try:
-            config.ensemble_sum_window
+            config.ensemble_sum_window  # noqa: B018 evaluated for its ValueError
         except ValueError as e:
             errors.append(f"Ensemble sum window: {e}")
 
     # 6. Validate sum_fitting_window when enabled
     if config.ensemble_sum_fitting_window_enabled:
         try:
-            config.ensemble_sum_fitting_window
+            config.ensemble_sum_fitting_window  # noqa: B018 evaluated for its ValueError
         except ValueError as e:
             errors.append(f"Ensemble sum fitting window: {e}")
 

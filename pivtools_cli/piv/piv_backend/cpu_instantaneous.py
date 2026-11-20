@@ -234,8 +234,10 @@ class InstantaneousCorrelatorCPU(CrossCorrelator):
                 if lib is not None:
                     try:
                         lib.fftw_library_cleanup()
-                    except Exception:
-                        pass  # Ignore errors during cleanup
+                    # atexit handler: nothing can act on a failure here, and
+                    # raising would only print a traceback during shutdown.
+                    except Exception:  # noqa: S110
+                        pass
 
     def _bind_kernel_timers(self) -> None:
         """Detect + bind the flag-gated FFT-vs-peak-fit sub-kernel timers on this

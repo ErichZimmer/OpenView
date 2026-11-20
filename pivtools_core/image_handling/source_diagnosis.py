@@ -11,6 +11,7 @@ Import direction is one-way at module level: this module imports ``path_utils``;
 """
 
 import fnmatch
+import itertools
 import json
 import logging
 import os
@@ -1272,7 +1273,7 @@ def rule_path_case(inp: RuleInput) -> List[Suggestion]:
         with os.scandir(scan.ancestor) as it:
             children = [
                 e.name
-                for _, e in zip(range(_CASE_SCAN_MAX), it)
+                for e in itertools.islice(it, _CASE_SCAN_MAX)
                 if not e.name.startswith(".")
             ]
     except OSError:  # unreadable ancestor: ``found`` already reports it

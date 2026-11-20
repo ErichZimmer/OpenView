@@ -1042,7 +1042,17 @@ def pose_diversity_from_meta(meta: Dict[str, object]) -> PoseDiversity:
         per_cam[name] = {c: cast(x) for c, x in zip(cams, v, strict=True)}
     vc, vi = arr("view_cam", np.int64), arr("view_index", np.int64)
     vr, vf = arr("view_rms_px"), arr("view_flagged", np.int64)
-    keys = [(int(c), int(v)) for c, v in zip(vc, vi)]
+    view_sizes = {
+        "view_cam": vc.size,
+        "view_index": vi.size,
+        "view_rms_px": vr.size,
+        "view_flagged": vf.size,
+    }
+    if len(set(view_sizes.values())) != 1:
+        raise ValueError(
+            f"pose_diversity: per-view fields disagree in length {view_sizes}"
+        )
+    keys = [(int(c), int(v)) for c, v in zip(vc, vi, strict=True)]
     return PoseDiversity(
         cameras=cams,
         tilt_floor_deg=float(np.asarray(meta["tilt_floor_deg"]).reshape(-1)[0]),
@@ -1050,8 +1060,8 @@ def pose_diversity_from_meta(meta: Dict[str, object]) -> PoseDiversity:
             np.asarray(meta["board_planarity_rms_mm"]).reshape(-1)[0]
         ),
         degenerate=bool(int(np.asarray(meta["degenerate"]).reshape(-1)[0])),
-        view_rms_px={k: float(r) for k, r in zip(keys, vr)},
-        flagged_views=[k for k, f in zip(keys, vf) if f],
+        view_rms_px={k: float(r) for k, r in zip(keys, vr, strict=True)},
+        flagged_views=[k for k, f in zip(keys, vf, strict=True) if f],
         **per_cam,
     )
 

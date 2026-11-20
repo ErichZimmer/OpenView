@@ -276,14 +276,14 @@ if __name__ == "__main__":
     height, width = 100, 100
 
     # Generate synthetic images with common background + noise
-    np.random.seed(42)
-    background = np.random.rand(height, width).astype(np.float32) * 100
+    rng = np.random.default_rng(42)
+    background = rng.random((height, width)).astype(np.float32) * 100
 
     # Create batch with A and B channels
     batch = np.zeros((n_images, 2, height, width), dtype=np.float32)
     for i in range(n_images):
-        batch[i, 0] = background + np.random.rand(height, width).astype(np.float32) * 10
-        batch[i, 1] = background + np.random.rand(height, width).astype(np.float32) * 10
+        batch[i, 0] = background + rng.random((height, width)).astype(np.float32) * 10
+        batch[i, 1] = background + rng.random((height, width)).astype(np.float32) * 10
 
     print(f"Input batch shape: {batch.shape}")
     print(f"Input batch dtype: {batch.dtype}")

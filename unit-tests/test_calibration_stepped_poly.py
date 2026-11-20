@@ -119,8 +119,11 @@ def test_back_projection_round_trip_flat_sheet(model, world, z_sheet):
 
 
 def test_back_projection_round_trip_tilted_sheet(model, world):
-    # Sheet contract (shared with the pinhole path):
-    #   Z = z_world + X*tan(tilt_y) + Y*tan(tilt_x)
+    """Round-trip through a tilted sheet.
+
+    Sheet contract, shared with the pinhole path:
+    Z = z_world + X*tan(tilt_y) + Y*tan(tilt_x).
+    """
     tilt_x, tilt_y = np.deg2rad(2.5), np.deg2rad(-1.2)
     xy = world[::17, :2]
     z_true = np.tan(tilt_y) * xy[:, 0] + np.tan(tilt_x) * xy[:, 1]
