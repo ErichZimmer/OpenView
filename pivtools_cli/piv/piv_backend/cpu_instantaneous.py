@@ -677,7 +677,7 @@ class InstantaneousCorrelatorCPU(CrossCorrelator):
 
                 with self._profile_section(pass_idx, "secondary_peaks"):
                     if config.secondary_peak:
-                        for pk in range(1, n_peaks):
+                        for _pk in range(1, n_peaks):
                             active = nan_mask & (peak_choice < n_peaks)
                             if not active.any():
                                 break
@@ -786,32 +786,35 @@ class InstantaneousCorrelatorCPU(CrossCorrelator):
                             float(self.win_spacing_x[pass_idx]),
                         )
 
-                        def _infill_one(im_idx):
-                            if (
-                                np.isnan(ux_mat[im_idx]).any()
-                                or np.isnan(uy_mat[im_idx]).any()
-                            ):
-                                infill_mask = np.isnan(ux_mat[im_idx]) | np.isnan(
-                                    uy_mat[im_idx]
+                        # The pass's arrays are passed in rather than closed over
+                        # (they are rebound on every pass-loop iteration).
+                        def _infill_one(im_idx, ux, uy, mask, infill_cfg, spacing):
+                            if np.isnan(ux[im_idx]).any() or np.isnan(uy[im_idx]).any():
+                                infill_mask = np.isnan(ux[im_idx]) | np.isnan(
+                                    uy[im_idx]
                                 )
-                                if (infill_mask | win_mask).all():
+                                if (infill_mask | mask).all():
                                     logging.error(
                                         f"CRITICAL: 100% of vectors invalid for image {im_idx}; "
                                         f"infilling has no donor points and will abort this batch."
                                     )
                                 # Masked windows hold 0 (not data): never donors.
                                 return im_idx, apply_infilling(
-                                    ux_mat[im_idx],
-                                    uy_mat[im_idx],
+                                    ux[im_idx],
+                                    uy[im_idx],
                                     infill_mask,
-                                    cfg,
-                                    spacing=infill_spacing,
-                                    exclude=win_mask,
+                                    infill_cfg,
+                                    spacing=spacing,
+                                    exclude=mask,
                                 )
                             return im_idx, None
 
                         results = self._run_parallel(
-                            _infill_one, [(i,) for i in range(N)]
+                            _infill_one,
+                            [
+                                (i, ux_mat, uy_mat, win_mask, cfg, infill_spacing)
+                                for i in range(N)
+                            ],
                         )
                         for im_idx, result in results:
                             if result is not None:
@@ -1212,7 +1215,6 @@ class InstantaneousCorrelatorCPU(CrossCorrelator):
         b_ensemble = False  # Instantaneous PIV, not ensemble
 
         # Output arrays shape: (n_peaks, n_win_y, n_win_x) in C-contiguous format
-        # out_shape = (n_peaks, n_win_y, n_win_x)
         out_shape = (N, n_peaks, n_win_y, n_win_x)
         pk_loc_x = np.zeros(out_shape, dtype=np.float32)
         pk_loc_y = np.zeros(out_shape, dtype=np.float32)

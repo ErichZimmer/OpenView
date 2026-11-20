@@ -82,7 +82,7 @@ def generate_charuco_images(
         raise RuntimeError("Failed to detect corners in hi-res frontal image")
 
     id_to_frontal_px = {}
-    for corner, cid in zip(charuco_corners, charuco_ids.flatten()):
+    for corner, cid in zip(charuco_corners, charuco_ids.flatten(), strict=True):
         id_to_frontal_px[int(cid)] = corner.flatten()
 
     obj_pts_all = board.getChessboardCorners()

@@ -49,9 +49,9 @@ def make_correlator_backend(
             raise RuntimeError(
                 f"Ensemble PIV requires the compiled C libraries (libbulkxcorr2d, "
                 f"libfusedwarp). Rebuild with 'pip install -e .'. Error: {e}"
-            )
+            ) from e
         except ImportError as e:
-            raise RuntimeError(f"Failed to import ensemble correlator: {e}")
+            raise RuntimeError(f"Failed to import ensemble correlator: {e}") from e
 
     if backend == "cpu":
         return InstantaneousCorrelatorCPU(

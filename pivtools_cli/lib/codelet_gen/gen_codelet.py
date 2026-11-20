@@ -289,7 +289,7 @@ def validate(sizes):
         r = interpret(ops, outs, env)
         y = np.array([r[("re", k)] + 1j * r[("im", k)] for k in range(n // 2 + 1)])
         e3 = np.max(np.abs(y - np.fft.rfft(xr)))
-        # irfft (c2r): irfft(rfft(x)) == N*x
+        # irfft, complex to real: irfft(rfft(x)) == N*x
         X = np.fft.rfft(xr)
         ops, _, outs = build_irfft(n)
         env = {}
@@ -470,7 +470,7 @@ def render_header(sizes, isas, transforms=ALL_TRANSFORMS) -> str:
                 out.append(
                     _emit(isa, sig, ops, outs, {f"xr{i}": f"xr[{i}]" for i in range(n)})
                 )
-            # cfft (forward) and icfft (inverse)
+            # cfft forward and icfft inverse
             for inv, fn in ((False, "cfft"), (True, "icfft")):
                 if fn not in transforms:
                     continue
@@ -484,7 +484,7 @@ def render_header(sizes, isas, transforms=ALL_TRANSFORMS) -> str:
                     **{f"xi{i}": f"Xi[{i}]" for i in range(n)},
                 }
                 out.append(_emit(isa, sig, ops, outs, binds))
-            # irfft (c2r)
+            # irfft, complex to real
             if "irfft" in transforms:
                 ops, _, outs = build_irfft(n)
                 sig = (
