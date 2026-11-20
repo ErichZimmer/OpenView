@@ -148,7 +148,7 @@ def lanczos3_dtft(k, f):
     offsets = (-2, -1, 0, 1, 2, 3)
     twopik = 2.0 * np.pi * k
     H = np.zeros_like(k, dtype=complex)
-    for w, d in zip(weights, offsets):
+    for w, d in zip(weights, offsets, strict=True):
         H += w * np.exp(-1j * d * twopik)
     return H
 

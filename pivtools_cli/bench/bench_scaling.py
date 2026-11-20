@@ -62,7 +62,7 @@ CSV_FIELDS = [
     "n_pairs",
     "batch_size",
     "n_saved",
-    # timings (seconds)
+    # timings, in seconds
     "cluster_startup_s",
     "load_s",
     "scatter_s",

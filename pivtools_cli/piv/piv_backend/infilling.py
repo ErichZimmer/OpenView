@@ -166,7 +166,7 @@ def _difference_rows(
             cs.append(idx[tuple(sl)].ravel())
         m = cs[0].size
         rr = r + np.arange(m)
-        for c, coef in zip(cs, stencil):
+        for c, coef in zip(cs, stencil, strict=True):
             rows.append(rr)
             cols.append(c)
             vals.append(np.full(m, w * coef))
@@ -249,7 +249,9 @@ def _fill_least_squares(
         sizes = np.bincount(group, minlength=n_groups)[~anchored]
         fill_rows, fill_cols = np.nonzero(fill)
         stuck = ~anchored[group]
-        nodes = list(zip(fill_rows[stuck].tolist(), fill_cols[stuck].tolist()))
+        nodes = list(
+            zip(fill_rows[stuck].tolist(), fill_cols[stuck].tolist(), strict=True)
+        )
         raise ValueError(
             f"Infilling method '{method}': {int((~anchored).sum())} group(s) of "
             f"fill nodes (sizes {sizes.tolist()}) are not linked to any valid "
