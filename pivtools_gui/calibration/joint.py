@@ -139,7 +139,7 @@ def _triangulate(origins: np.ndarray, dirs: np.ndarray) -> Tuple[np.ndarray, boo
     """
     A = np.zeros((3, 3))
     b = np.zeros(3)
-    for o, d in zip(origins, dirs):
+    for o, d in zip(origins, dirs, strict=True):
         P = np.eye(3) - np.outer(d, d)
         A += P
         b += P @ o
@@ -499,7 +499,7 @@ class _JointBA:
             R = cv2.Rodrigues(rvec)[0]
             rr = r0 + np.arange(2 * M)
 
-            def add(col, vals):
+            def add(col, vals, rr=rr, M=M):
                 data.append(np.asarray(vals).ravel())
                 ridx.append(rr)
                 cidx.append(np.full(2 * M, col))
@@ -919,7 +919,7 @@ def pose_diversity(
             bool(single_az),
             bool(const_standoff),
         )
-        for name, v in zip(names, vals):
+        for name, v in zip(names, vals, strict=True):
             out[name][c] = v
 
     rms_med = {
@@ -1039,7 +1039,7 @@ def pose_diversity_from_meta(meta: Dict[str, object]) -> PoseDiversity:
             raise ValueError(
                 f"pose_diversity: field {name!r} has {v.size} entries for {len(cams)} cameras"
             )
-        per_cam[name] = {c: cast(x) for c, x in zip(cams, v)}
+        per_cam[name] = {c: cast(x) for c, x in zip(cams, v, strict=True)}
     vc, vi = arr("view_cam", np.int64), arr("view_index", np.int64)
     vr, vf = arr("view_rms_px"), arr("view_flagged", np.int64)
     keys = [(int(c), int(v)) for c, v in zip(vc, vi)]
@@ -1173,7 +1173,7 @@ def run_joint(
         k: np.asarray(v, dtype=np.int64).reshape(-1, 2) for k, v in global_index.items()
     }
 
-    # observations: (cam, view, row, u, v)
+    # Each observation is a tuple of camera, view, row, u and v.
     observations = []
     for k, gi in global_of.items():
         det = det_of[k]
@@ -1288,7 +1288,7 @@ def run_joint(
                 obs_by_row[r].append((cam, view, u, v))
 
         prev_rms = _overall_rms(K_by_cam, dist_by_cam, pose_by_view, board)
-        for it in range(max_iters):
+        for _it in range(max_iters):
             new_board = board.copy()
             for r in released_rows:
                 origins, dirs = [], []

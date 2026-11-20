@@ -146,7 +146,7 @@ def _stereo_correspondence(
     obj_out: list = []
     img1_out: list = []
     img2_out: list = []
-    for d1, d2 in zip(det1, det2):
+    for d1, d2 in zip(det1, det2, strict=True):
         if not (d1.success and d2.success):
             continue
         w1 = apply_world_frame(d1.grid_indices, spacing, wf1)
@@ -703,7 +703,7 @@ def regular_world_grid(
     # Pooled world-space vector pitch over both cameras' in-overlap points and both axes.
     pooled = []
     for k, (c, (w, finite), (step_x, step_y)) in enumerate(
-        zip(grids, worlds, steps), start=1
+        zip(grids, worlds, steps, strict=True), start=1
     ):
         model = model1 if k == 1 else model2
         J = local_jacobians(model, c.reshape(-1, 2), z_world, tilt_x, tilt_y)  # (N,2,2)

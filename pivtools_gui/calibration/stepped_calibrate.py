@@ -1035,11 +1035,13 @@ def calibrate_stepped_mono(
                 )
         dropped = [
             f"pose {used_pose_indices[vi]} ({x:.1f}, {y:.1f}) {r:.1f} px"
-            for vi, (img, k, res) in enumerate(zip(pose_img_views, keep, resid))
-            for (x, y), r in zip(img[~k], res[~k])
+            for vi, (img, k, res) in enumerate(
+                zip(pose_img_views, keep, resid, strict=True)
+            )
+            for (x, y), r in zip(img[~k], res[~k], strict=True)
         ]
-        pose_obj_views = [o[k] for o, k in zip(pose_obj_views, keep)]
-        pose_img_views = [i[k] for i, k in zip(pose_img_views, keep)]
+        pose_obj_views = [o[k] for o, k in zip(pose_obj_views, keep, strict=True)]
+        pose_img_views = [i[k] for i, k in zip(pose_img_views, keep, strict=True)]
         n_gated += n_bad
         logger.warning(
             f"cam{camera}: reprojection gate removed {n_bad} dot(s) above "

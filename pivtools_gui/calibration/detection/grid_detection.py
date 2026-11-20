@@ -278,7 +278,7 @@ def _extract_blob_centers(thresh: np.ndarray) -> Tuple[np.ndarray, int]:
     median_area = np.median(areas)
 
     valid_centers = []
-    for cnt, area in zip(circular_contours, areas):
+    for cnt, area in zip(circular_contours, areas, strict=True):
         if 0.15 * median_area < area < 3.0 * median_area:
             ellipse = cv2.fitEllipse(cnt)
             valid_centers.append([ellipse[0][0], ellipse[0][1]])
@@ -467,7 +467,9 @@ def _find_grid_directions(
         return None
 
     # Extract representative vector for each peak: flip to same half-plane, take median
-    def _representative_vector(target_angle, tol=np.radians(15)):
+    def _representative_vector(target_angle, tol=None):
+        if tol is None:
+            tol = np.radians(15)
         sep = np.minimum(
             np.abs(angles - target_angle), np.pi - np.abs(angles - target_angle)
         )
@@ -549,7 +551,8 @@ def _bfs_grid_walk_dict(
     visited = {seed_idx}
     queue = deque([(seed_idx, 0, 0, v1, v2)])
 
-    # (dc, dr, uses_v1, sign)
+    # Neighbour steps, one tuple per direction: column step, row step, which
+    # lattice vector it follows, and the sign.
     directions = [
         (1, 0, True, 1),
         (-1, 0, True, -1),
@@ -1072,7 +1075,9 @@ def _finish_grid(
         return result
     inlier_mask = inlier_mask.flatten().astype(bool)
     validated_grid = {
-        k: grid_dict[k] for k, inlier in zip(grid_keys, inlier_mask) if inlier
+        k: grid_dict[k]
+        for k, inlier in zip(grid_keys, inlier_mask, strict=True)
+        if inlier
     }
     n_rejected = int(np.sum(~inlier_mask))
     if n_rejected > 0:
