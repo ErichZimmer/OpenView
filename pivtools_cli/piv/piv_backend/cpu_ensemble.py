@@ -20,7 +20,6 @@ from typing import List, Optional
 
 import cv2
 import matplotlib
-import matplotlib.pyplot as plt
 import numpy as np
 from scipy.ndimage import gaussian_filter
 
@@ -1681,44 +1680,3 @@ class EnsembleCorrelatorCPU(CrossCorrelator):
         self._fused_interp_mode = 0 if image_interp == "cubic" else 1
 
         return delta_ab_pred
-
-
-def plot_corr_planes(corr_avg_flat, n_win_y, n_win_x, win_h, win_w, pass_idx):
-    """
-    Visualize ensemble-averaged correlation planes for PIV in a grid
-    matching the window structure.
-
-    Parameters
-    ----------
-    corr_avg_flat : np.ndarray
-        Flattened correlation planes,
-        shape (n_win_y * n_win_x * win_h * win_w,)
-    n_win_y : int
-        Number of interrogation windows in y direction
-    n_win_x : int
-        Number of interrogation windows in x direction
-    win_h : int
-        Height of each correlation plane (pixels)
-    win_w : int
-        Width of each correlation plane (pixels)
-    pass_idx : int
-        Pass index for naming the output file
-    """
-    # Reshape into (n_win_y, n_win_x, win_h, win_w) using C order
-    corr_planes = corr_avg_flat.reshape((n_win_y, n_win_x, win_h, win_w), order="C")
-
-    fig, axes = plt.subplots(n_win_y, n_win_x, figsize=(3 * n_win_x, 3 * n_win_y))
-
-    for i in range(n_win_y):
-        for j in range(n_win_x):
-            ax = axes[i, j]
-            plane = corr_planes[i, j]
-            im = ax.imshow(plane, origin="lower", cmap="viridis")
-            ax.set_title(f"W{i},{j}")
-            ax.axis("off")
-            fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-
-    plt.tight_layout()
-    plt.savefig(f"corr{pass_idx}.png", dpi=150, bbox_inches="tight")
-    print(f"Saved: corr{pass_idx}.png")
-    plt.close()

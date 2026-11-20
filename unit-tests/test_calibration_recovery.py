@@ -645,7 +645,7 @@ def test_apply_mono_worker_failure_raises(tmp_path, monkeypatch):
         )
     (ud / "B00004.mat").write_bytes(b"this is not a mat file")
 
-    with pytest.raises(Exception):
+    with pytest.raises(runio.ApplyFailed, match="apply failed after"):
         runio.calibrate_mono_run(rec, ud, od, dt=0.001)
 
 

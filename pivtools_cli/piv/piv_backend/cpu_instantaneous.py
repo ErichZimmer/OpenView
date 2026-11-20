@@ -35,7 +35,6 @@ from pivtools_core.config import Config
 from pivtools_core.window_utils import compute_window_centers
 
 matplotlib.use("Agg")
-from matplotlib import pyplot as plt
 
 
 class InstantaneousCorrelatorCPU(CrossCorrelator):
@@ -1323,50 +1322,3 @@ class InstantaneousCorrelatorCPU(CrossCorrelator):
             assert self.cached_predictor_maps[pass_idx] is not None, (
                 f"Predictor map for pass {pass_idx} is None"
             )
-
-
-def plot_corr_planes(corr_avg_flat, n_win_y, n_win_x, win_h, win_w, pass_idx):
-    """
-    Visualize ensemble-averaged correlation planes for PIV in a grid
-    matching the window structure.
-
-    Parameters
-    ----------
-    corr_avg_flat : np.ndarray
-        Flattened correlation planes,
-        shape (n_win_y * n_win_x * win_h * win_w,)
-    n_win_y : int
-        Number of interrogation windows in y direction
-    n_win_x : int
-        Number of interrogation windows in x direction
-    win_h : int
-        Height of each correlation plane (pixels)
-    win_w : int
-        Width of each correlation plane (pixels)
-    pass_idx : int
-        Pass index for naming the output file
-    """
-    # Reshape into (n_win_y, n_win_x, win_h, win_w) using C order
-    corr_planes = corr_avg_flat.reshape((n_win_y, n_win_x, win_h, win_w), order="C")
-    logging.info(f"{corr_planes.shape}")
-    try:
-        fig, axes = plt.subplots(n_win_y, n_win_x, figsize=(3 * n_win_x, 3 * n_win_y))
-        logging.info(
-            f"Created figure with {n_win_y} rows and {n_win_x} columns of subplots"
-        )
-        for i in range(n_win_y):
-            for j in range(n_win_x):
-                ax = axes[i, j]
-                plane = corr_planes[i, j]
-                im = ax.imshow(plane, origin="lower", cmap="viridis")
-                ax.set_title(f"W{i},{j}")
-                ax.axis("off")
-                fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-        logging.info(f"Plotted correlation planes for pass {pass_idx}")
-        plt.tight_layout()
-        plt.savefig(f"corr{pass_idx}.png", dpi=150, bbox_inches="tight")
-        logging.info(f"Saved: corr{pass_idx}.png")
-    except Exception as e:
-        logging.error(f"Error occurred while plotting correlation planes: {e}")
-    finally:
-        plt.close()
