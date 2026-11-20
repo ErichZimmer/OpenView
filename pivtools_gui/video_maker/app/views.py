@@ -858,7 +858,8 @@ def start_video():
         )
 
     # Get base path from request or config
-    # Priority: base_path (direct) > base_path_idx > source_path_idx > config.video_base_path_idx
+    # Priority, highest first: base_path, base_path_idx, source_path_idx,
+    # then config.video_base_path_idx.
     base_path_str = data.get("base_path")
     if base_path_str:
         base = Path(base_path_str).expanduser()
