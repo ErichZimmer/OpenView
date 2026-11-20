@@ -1947,10 +1947,13 @@ def get_ensemble_progress_from_logs(job_id: str, cfg) -> dict:
     log_file = Path(status.get("log_file", ""))
     log_text = ""
     if log_file.exists():
+        # Realistic cause: the log was removed between exists() and open(). Python
+        # opens with read sharing on Windows, so a running job's log stays readable.
+        # Progress then reads as not started, the same as before the log exists.
         try:
             with open(log_file, "r", encoding="utf-8", errors="replace") as f:
                 log_text = f.read()
-        except Exception:
+        except OSError:
             pass
 
     # Parse pass progress: "======== PASS 2/4 ========"

@@ -257,14 +257,16 @@ def _quiet_shutdown(client, cluster) -> None:
         "tornado.general",
     ):
         _logging.getLogger(name).setLevel(_logging.CRITICAL)
+    # A leaked cluster can skew the next benchmark, so a failed close is printed.
+    # Printed, not logged: the distributed loggers are silenced just above.
     try:
         client.close(timeout=10)
-    except Exception:
-        pass
+    except Exception as err:
+        print(f"[bench] client.close failed: {err!r}", flush=True)
     try:
         cluster.close(timeout=10)
-    except Exception:
-        pass
+    except Exception as err:
+        print(f"[bench] cluster.close failed: {err!r}", flush=True)
 
 
 def _run_sliding_window(

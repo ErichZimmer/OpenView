@@ -10,6 +10,7 @@ Contains endpoints for:
 
 import random
 from pathlib import Path
+from typing import List
 
 import numpy as np
 from flask import Blueprint, jsonify, request
@@ -420,79 +421,7 @@ def check_vars():
                 404,
             )
 
-        data_mat = loadmat(str(mat_path), struct_as_record=False, squeeze_me=True)
-        if "piv_result" not in data_mat:
-            return (
-                jsonify({"success": False, "error": "Variable 'piv_result' not found"}),
-                400,
-            )
-
-        piv_result = data_mat["piv_result"]
-        pr = None
-
-        if isinstance(piv_result, np.ndarray) and piv_result.dtype == object:
-            for el in piv_result:
-                try:
-                    for candidate in ("ux", "uy", "b_mask", "uu"):
-                        val = getattr(el, candidate, None)
-                        if val is not None and np.asarray(val).size > 0:
-                            pr = el
-                            break
-                    if pr:
-                        break
-                except Exception:
-                    continue
-            if not pr and piv_result.size > 0:
-                pr = piv_result.flat[0]
-        else:
-            pr = piv_result
-
-        # Get all available field names
-        all_vars = []
-        dt = getattr(pr, "dtype", None)
-        if dt and getattr(dt, "names", None):
-            all_vars = list(dt.names)
-        else:
-            try:
-                if hasattr(pr, "dtype") and getattr(pr.dtype, "names", None):
-                    all_vars = list(pr.dtype.names)
-                elif hasattr(pr, "dtype") and getattr(pr.dtype, "fields", None):
-                    f = pr.dtype.fields
-                    if isinstance(f, dict):
-                        all_vars = list(f.keys())
-            except Exception:
-                pass
-            if not all_vars:
-                try:
-                    attrs = [
-                        n
-                        for n in dir(pr)
-                        if not n.startswith("_") and not callable(getattr(pr, n, None))
-                    ]
-                    all_vars = attrs
-                except Exception:
-                    all_vars = []
-
-        # Filter to plottable 2D arrays
-        EXCLUDED_VARS = {"x", "y"}
-        plottable_vars = []
-        has_peak_choice = hasattr(pr, "peak_choice")
-
-        for var_name in all_vars:
-            if var_name in EXCLUDED_VARS:
-                continue
-            try:
-                val = getattr(pr, var_name, None)
-                if val is None:
-                    continue
-                arr = np.asarray(val)
-                if arr.ndim == 2:
-                    plottable_vars.append(var_name)
-                elif var_name == "peak_mag" and arr.ndim == 3 and has_peak_choice:
-                    plottable_vars.append(var_name)
-            except Exception:
-                continue
-
+        plottable_vars = get_plottable_vars(mat_path, include_peak_stack=True)
         return jsonify({"success": True, "vars": plottable_vars})
 
     except ValueError as e:
@@ -501,88 +430,6 @@ def check_vars():
     except Exception:
         logger.exception("check_vars: unexpected error")
         return jsonify({"success": False, "error": "Internal server error"}), 500
-
-
-def _extract_plottable_vars(mat_path: Path) -> list:
-    """Extract plottable 2D variable names from a .mat file."""
-    if not mat_path.exists():
-        return []
-
-    try:
-        data_mat = loadmat(str(mat_path), struct_as_record=False, squeeze_me=True)
-        if "piv_result" not in data_mat:
-            return []
-
-        piv_result = data_mat["piv_result"]
-        pr = None
-
-        # Handle multiple runs (array of structs)
-        if isinstance(piv_result, np.ndarray) and piv_result.dtype == object:
-            for el in piv_result:
-                try:
-                    for candidate in ("ux", "uy", "b_mask", "uu", "u_prime"):
-                        val = getattr(el, candidate, None)
-                        if val is not None and np.asarray(val).size > 0:
-                            pr = el
-                            break
-                    if pr:
-                        break
-                except Exception:
-                    continue
-            if not pr and piv_result.size > 0:
-                pr = piv_result.flat[0]
-        else:
-            pr = piv_result
-
-        if pr is None:
-            return []
-
-        # Get all field names
-        all_vars = []
-        dt = getattr(pr, "dtype", None)
-        if dt and getattr(dt, "names", None):
-            all_vars = list(dt.names)
-        else:
-            try:
-                if hasattr(pr, "dtype") and getattr(pr.dtype, "names", None):
-                    all_vars = list(pr.dtype.names)
-                elif hasattr(pr, "dtype") and getattr(pr.dtype, "fields", None):
-                    f = pr.dtype.fields
-                    if isinstance(f, dict):
-                        all_vars = list(f.keys())
-            except Exception:
-                pass
-            if not all_vars:
-                try:
-                    attrs = [
-                        n
-                        for n in dir(pr)
-                        if not n.startswith("_") and not callable(getattr(pr, n, None))
-                    ]
-                    all_vars = attrs
-                except Exception:
-                    all_vars = []
-
-        # Filter to plottable 2D arrays
-        EXCLUDED_VARS = {"x", "y"}
-        plottable_vars = []
-
-        for var_name in all_vars:
-            if var_name in EXCLUDED_VARS:
-                continue
-            try:
-                val = getattr(pr, var_name, None)
-                if val is None:
-                    continue
-                arr = np.asarray(val)
-                if arr.ndim == 2:
-                    plottable_vars.append(var_name)
-            except Exception:
-                continue
-
-        return plottable_vars
-    except Exception:
-        return []
 
 
 @vector_plot_bp.route("/check_all_vars", methods=["GET"])
@@ -661,24 +508,22 @@ def check_all_vars():
         if (mean_stats_dir / "corr_quality_timeseries.mat").exists():
             result["corr_quality"] = ["timeseries", "nan_reasons"]
 
-        # 4. Check ensemble_result.mat
-        try:
-            ens_paths = get_data_paths(
-                base_dir=params["base_path"],
-                num_frame_pairs=get_config().num_frame_pairs,
-                cam=params["camera"],
-                type_name="ensemble",
-                use_uncalibrated=params["use_uncalibrated"],
-                use_merged=params["use_merged"],
-                use_stereo=params.get("use_stereo", False),
-                stereo_camera_pair=params.get("stereo_camera_pair"),
-            )
-            ensemble_file = Path(ens_paths["data_dir"]) / "ensemble_result.mat"
-            result["ensemble"] = get_plottable_vars(
-                ensemble_file, var_name="ensemble_result"
-            )
-        except Exception as e:
-            logger.debug(f"check_all_vars: could not check ensemble vars: {e}")
+        # 4. Check ensemble_result.mat. Path resolution already passed for the same
+        # parameters above, and a file that exists but cannot be read is an error.
+        ens_paths = get_data_paths(
+            base_dir=params["base_path"],
+            num_frame_pairs=get_config().num_frame_pairs,
+            cam=params["camera"],
+            type_name="ensemble",
+            use_uncalibrated=params["use_uncalibrated"],
+            use_merged=params["use_merged"],
+            use_stereo=params.get("use_stereo", False),
+            stereo_camera_pair=params.get("stereo_camera_pair"),
+        )
+        ensemble_file = Path(ens_paths["data_dir"]) / "ensemble_result.mat"
+        result["ensemble"] = get_plottable_vars(
+            ensemble_file, var_name="ensemble_result"
+        )
 
         return jsonify({"success": True, **result})
 
@@ -688,6 +533,42 @@ def check_all_vars():
     except Exception:
         logger.exception("check_all_vars: unexpected error")
         return jsonify({"success": False, "error": "Internal server error"}), 500
+
+
+def _sampled_var_values(mat_path: Path, var: str) -> List[np.ndarray]:
+    """Finite values of ``var`` in every pass element of one sampled result file.
+
+    Every pass element of a ``piv_result`` shares one set of fields, so an element
+    without ``var`` means the file does not carry it. That, a file that cannot be
+    loaded, a file without ``piv_result`` and a non-numeric ``var`` raise
+    ``ValueError`` naming the file: colour limits silently drawn from fewer files
+    than sampled are a wrong answer.
+    """
+    try:
+        mat = loadmat(str(mat_path), struct_as_record=False, squeeze_me=True)
+    # scipy has no single error type for a bad file: MatReadError, IndexError,
+    # ValueError, TypeError and NotImplementedError (v7.3/HDF5) are all seen. Any
+    # of them is re-raised naming the file, never swallowed.
+    except Exception as err:
+        raise ValueError(f"{mat_path}: cannot be read ({err})") from err
+    if "piv_result" not in mat:
+        raise ValueError(f"{mat_path}: no 'piv_result' struct in the file")
+    piv_result = mat["piv_result"]
+    elements = (
+        list(piv_result.flat) if isinstance(piv_result, np.ndarray) else [piv_result]
+    )
+    arrays = []
+    for el in elements:
+        if var not in getattr(el, "_fieldnames", ()):
+            raise ValueError(f"{mat_path}: piv_result has no variable '{var}'")
+        arr = np.asarray(getattr(el, var)).ravel()
+        try:
+            arrays.append(arr[np.isfinite(arr)])
+        except TypeError as err:
+            raise ValueError(
+                f"{mat_path}: '{var}' is not numeric ({arr.dtype})"
+            ) from err
+    return arrays
 
 
 @vector_plot_bp.route("/check_limits", methods=["GET"])
@@ -721,44 +602,22 @@ def check_limits():
         all_values = []
         files_checked = 0
 
+        var = params["var"]
         for mat_path in sampled:
-            try:
-                mat = loadmat(str(mat_path), struct_as_record=False, squeeze_me=True)
-                if "piv_result" not in mat:
-                    continue
-                piv_result = mat["piv_result"]
-                vals = []
-                if isinstance(piv_result, np.ndarray):
-                    for el in piv_result:
-                        try:
-                            arr = np.asarray(getattr(el, params["var"])).ravel()
-                            arr = arr[np.isfinite(arr)]
-                            if arr.size > 0:
-                                vals.append(arr)
-                        except Exception:
-                            continue
-                else:
-                    try:
-                        arr = np.asarray(
-                            getattr(piv_result, params["var"], None)
-                        ).ravel()
-                        arr = arr[np.isfinite(arr)]
-                        if arr.size > 0:
-                            vals.append(arr)
-                    except Exception:
-                        pass
-                if vals:
-                    files_checked += 1
-                    all_values.extend(np.concatenate(vals))
-            except Exception:
-                continue
+            vals = _sampled_var_values(mat_path, var)
+            # A pass outside runs_to_save holds an empty array, the normal layout
+            # written by save_results; it contributes no values and is skipped.
+            vals = [v for v in vals if v.size > 0]
+            if vals:
+                files_checked += 1
+                all_values.extend(np.concatenate(vals))
 
         if files_checked == 0 or not all_values:
             return (
                 jsonify(
                     {
                         "success": False,
-                        "error": f"No valid values found for var '{params['var']}'",
+                        "error": f"No valid values found for var '{var}'",
                     }
                 ),
                 404,

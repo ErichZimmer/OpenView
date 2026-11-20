@@ -75,6 +75,21 @@ def _save_intermediate_frame(
 
 TEMPORAL_FILTERS = {"time", "pod"}
 
+# Progress reporting is cosmetic: a failure is warned about once per process (each
+# Dask worker process is fresh for a run), never per batch, and never aborts the run.
+_progress_warned = {"create": False, "update": False}
+
+
+def _warn_progress_once(stage: str, err: BaseException) -> None:
+    """Warn the first time progress reporting fails at ``stage`` in this process."""
+    if _progress_warned[stage]:
+        return
+    _progress_warned[stage] = True
+    if stage == "create":
+        logger.warning(f"Progress reporting is off for this run: {err!r}")
+    else:
+        logger.warning(f"Progress bar stopped updating: {err!r}")
+
 
 def get_filter_specs(config: Config) -> List[dict]:
     """
@@ -928,8 +943,10 @@ def correlate_worker_batches(
             from distributed import Variable, get_client
 
             progress_var = Variable(progress_var_name, get_client())
-        except Exception:
-            pass
+        # Realistic cause: no Dask client reachable from this worker (get_client
+        # raises), e.g. the scheduler connection was lost. Progress is cosmetic.
+        except Exception as err:
+            _warn_progress_once("create", err)
 
     warp_A_total = None
     warp_B_total = None
@@ -1023,10 +1040,12 @@ def correlate_worker_batches(
         del batch_data, lightweight
 
         if progress_var is not None:
+            # A failed update means the worker cannot reach the scheduler, so the run
+            # is failing too; progress must never be what aborts a correlation.
             try:
                 progress_var.set(i + 1)
-            except Exception:
-                pass
+            except Exception as err:
+                _warn_progress_once("update", err)
 
     if warp_sums_only:
         return {
