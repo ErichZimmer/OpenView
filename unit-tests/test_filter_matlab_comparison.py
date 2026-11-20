@@ -63,9 +63,9 @@ class TestFindAutoMode:
         expected = int(pod_ref["N_auto1"])
 
         result = find_auto_mode(PSI1, eigVal1, n_images)
-        assert (
-            result == expected
-        ), f"Channel 1: Python find_auto_mode={result}, MATLAB N_auto1={expected}"
+        assert result == expected, (
+            f"Channel 1: Python find_auto_mode={result}, MATLAB N_auto1={expected}"
+        )
 
     def test_channel2_mode_count(self, pod_ref):
         """Python find_auto_mode on channel 2 matches MATLAB N_auto2."""
@@ -75,9 +75,9 @@ class TestFindAutoMode:
         expected = int(pod_ref["N_auto2"])
 
         result = find_auto_mode(PSI2, eigVal2, n_images)
-        assert (
-            result == expected
-        ), f"Channel 2: Python find_auto_mode={result}, MATLAB N_auto2={expected}"
+        assert result == expected, (
+            f"Channel 2: Python find_auto_mode={result}, MATLAB N_auto2={expected}"
+        )
 
 
 class TestPODEigenvalues:
@@ -305,9 +305,9 @@ class TestTimeFilter:
 
         filtered = time_filter_batch(batch, verbose=False)
 
-        assert (
-            filtered.min() >= -1e-6
-        ), f"Time-filtered output has negative values: min = {filtered.min()}"
+        assert filtered.min() >= -1e-6, (
+            f"Time-filtered output has negative values: min = {filtered.min()}"
+        )
 
     def test_minimum_frame_near_zero(self, time_ref):
         """After time filtering, the frame that was the per-pixel minimum
@@ -424,9 +424,7 @@ class TestPODFilterStandalone:
         """
         rng = np.random.RandomState(7)
         n, h, w = 16, 64, 64
-        yy, xx = np.meshgrid(
-            np.linspace(0, 1, h), np.linspace(0, 1, w), indexing="ij"
-        )
+        yy, xx = np.meshgrid(np.linspace(0, 1, h), np.linspace(0, 1, w), indexing="ij")
         modes = [
             500.0 * np.exp(-((yy - 0.5) ** 2 + (xx - 0.5) ** 2) / 0.1),
             50.0 * (xx * yy),
@@ -450,9 +448,7 @@ class TestPODFilterStandalone:
 
         # The comparison is only meaningful if both precisions select the
         # same modes (guaranteed here by the separated spectrum).
-        C32 = (images.reshape(n, h * w) @ images.reshape(n, h * w).T).astype(
-            np.float64
-        )
+        C32 = (images.reshape(n, h * w) @ images.reshape(n, h * w).T).astype(np.float64)
         PSI32, S32, _ = np.linalg.svd(C32, full_matrices=False)
         assert find_auto_mode(PSI32, S32, n) == n_remove
         for mode_i in range(n_remove):

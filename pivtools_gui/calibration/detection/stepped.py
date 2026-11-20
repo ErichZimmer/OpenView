@@ -158,9 +158,7 @@ class SteppedDetector:
         # the remainder for the second level.
         tree_a = cKDTree(level_a["centers"])
         dist_to_a, _ = tree_a.query(blobs)
-        remaining = blobs[
-            dist_to_a > CONSUMED_RADIUS_FRACTION * level_a["spacing_px"]
-        ]
+        remaining = blobs[dist_to_a > CONSUMED_RADIUS_FRACTION * level_a["spacing_px"]]
         level_b = (
             run_single_level_detection(
                 remaining, gray_uint8, flat_field=flat_field, k=DIRECTION_K

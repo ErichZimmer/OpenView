@@ -282,9 +282,9 @@ class TestOracleAgreement:
         )
         if marginal_total:
             rate = marginal_flips / marginal_total
-            assert (
-                rate < 0.10
-            ), f"type {fit_type}: boundary-band flip rate {rate:.1%} exceeds 10%"
+            assert rate < 0.10, (
+                f"type {fit_type}: boundary-band flip rate {rate:.1%} exceeds 10%"
+            )
         if p99_pool:
             assert float(np.percentile(p99_pool, 99)) < 1e-3
 

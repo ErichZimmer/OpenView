@@ -106,8 +106,9 @@ def test_loop_1_missing_its_last_tif_is_an_error_naming_loop_1(tmp_path, monkeyp
 
     assert not valid
     assert camera["status"] == "error"
-    assert f"Loop 1 (run_1): last pair ({PAIRS_PER_LOOP}) could not be read" in (
-        camera["error"]
+    assert (
+        f"Loop 1 (run_1): last pair ({PAIRS_PER_LOOP}) could not be read"
+        in (camera["error"])
     )
     assert "Loop 0" not in camera["error"]
 
@@ -119,8 +120,9 @@ def test_loop_1_short_of_set_entries_is_an_error_naming_loop_1(tmp_path, monkeyp
     valid, camera = _camera_1(tmp_path, monkeypatch, paths, images)
 
     assert not valid
-    assert f"Loop 1 (loop=1.set): last pair ({PAIRS_PER_LOOP}) could not be read" in (
-        camera["error"]
+    assert (
+        f"Loop 1 (loop=1.set): last pair ({PAIRS_PER_LOOP}) could not be read"
+        in (camera["error"])
     )
     assert "Loop 0" not in camera["error"]
 

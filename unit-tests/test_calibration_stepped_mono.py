@@ -163,25 +163,25 @@ def test_stepped_mono_recovers_intrinsics_and_frame(stepped_mono_scene, request)
     # Intrinsics recovered (noise-free synthetic -> tight).
     fx_true = float(K_true[0, 0])
     fx_fit = float(cam.K[0, 0])
-    assert (
-        abs(fx_fit - fx_true) / fx_true < 0.03
-    ), f"fx {fx_fit:.1f} vs true {fx_true:.1f}"
+    assert abs(fx_fit - fx_true) / fx_true < 0.03, (
+        f"fx {fx_fit:.1f} vs true {fx_true:.1f}"
+    )
     assert abs(cam.K[0, 2] - W / 2.0) < 0.06 * W, f"cx off: {cam.K[0, 2]:.1f}"
     assert abs(cam.K[1, 2] - H / 2.0) < 0.06 * H, f"cy off: {cam.K[1, 2]:.1f}"
 
     # Sub-pixel fit on noise-free renders.
     assert cam.rms < 1.0, f"overall RMS too high: {cam.rms:.3f}px"
-    assert (
-        max(record.per_view_rms) < 1.0
-    ), f"per-view RMS too high: {record.per_view_rms}"
+    assert max(record.per_view_rms) < 1.0, (
+        f"per-view RMS too high: {record.per_view_rms}"
+    )
 
     # World frame anchored to the datum clicks: origin click back-projects to (0,0,0).
     origin_world = cam.back_project_to_plane(
         np.array([fiducials["origin"]]), z_world=0.0
     )[0]
-    assert (
-        np.linalg.norm(origin_world) < SPACING_MM / 8.0
-    ), f"origin world {origin_world}"
+    assert np.linalg.norm(origin_world) < SPACING_MM / 8.0, (
+        f"origin world {origin_world}"
+    )
 
     # +X click lands along +X at one spacing, +Y click along +Y.
     x_world = cam.back_project_to_plane(np.array([fiducials["x_axis"]]), z_world=0.0)[0]
@@ -221,9 +221,9 @@ def test_stepped_mono_single_view_pinhole(stepped_mono_scene, request):
     # Focal recovered from one view (noise-free synthetic). Looser than the multi-view
     # bound — a single view constrains the focal less, but it is well within usable range.
     fx_true = float(K_true[0, 0])
-    assert (
-        abs(float(cam.K[0, 0]) - fx_true) / fx_true < 0.05
-    ), f"single-view fx {cam.K[0, 0]:.1f} vs true {fx_true:.1f}"
+    assert abs(float(cam.K[0, 0]) - fx_true) / fx_true < 0.05, (
+        f"single-view fx {cam.K[0, 0]:.1f} vs true {fx_true:.1f}"
+    )
     # Self-consistent sub-pixel fit on noise-free renders.
     assert cam.rms < 1.0, f"single-view RMS too high: {cam.rms:.3f}px"
 
@@ -231,9 +231,9 @@ def test_stepped_mono_single_view_pinhole(stepped_mono_scene, request):
     origin_world = cam.back_project_to_plane(
         np.array([fiducials["origin"]]), z_world=0.0
     )[0]
-    assert (
-        np.linalg.norm(origin_world) < SPACING_MM / 8.0
-    ), f"origin world {origin_world}"
+    assert np.linalg.norm(origin_world) < SPACING_MM / 8.0, (
+        f"origin world {origin_world}"
+    )
 
     if request.config.getoption("--make-figures", default=False):
         _make_figure(K_true, _images, detections, record, fiducials, slug="single-view")
@@ -350,8 +350,8 @@ def _make_figure(
     ax[1].legend()
 
     txt = (
-        f"fx fit  = {cam.K[0,0]:.1f}\nfx true = {K_true[0,0]:.1f}\n"
-        f"cx,cy   = {cam.K[0,2]:.1f}, {cam.K[1,2]:.1f}\n"
+        f"fx fit  = {cam.K[0, 0]:.1f}\nfx true = {K_true[0, 0]:.1f}\n"
+        f"cx,cy   = {cam.K[0, 2]:.1f}, {cam.K[1, 2]:.1f}\n"
         f"image   = {W}x{H}\nRMS     = {cam.rms:.4f} px\n"
         f"n views = {record.board_meta['n_views']}\n"
         f"clicked = {record.board_meta['clicked_level']}\n"

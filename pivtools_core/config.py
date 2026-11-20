@@ -2853,7 +2853,7 @@ class Config:
         valid = {"full", "minimal"}
         if mode not in valid:
             raise ValueError(
-                f"Invalid instantaneous save_mode '{mode}'. " f"Must be one of {valid}"
+                f"Invalid instantaneous save_mode '{mode}'. Must be one of {valid}"
             )
         return mode
 

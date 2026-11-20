@@ -326,9 +326,7 @@ def test_scan_sentence_other_forms():
             root_ext_counts={".set": 1},
             subdirs=(SubdirInfo("run", None, {".ims": 1}, True, False),),
         )
-    ) == (
-        "In D:/x: 1 .set file; 1 folder (run) with 1 .ims file."
-    )  # singular for 1
+    ) == ("In D:/x: 1 .set file; 1 folder (run) with 1 .ims file.")  # singular for 1
     assert (
         scan_sentence(_scan(path=Path("D:/x"), listed=Path("D:/x")))
         == "In D:/x: no images here and no folders."

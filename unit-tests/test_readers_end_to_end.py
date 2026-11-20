@@ -330,12 +330,12 @@ def _assert_vectors(output_path, pair, grid, expected, label):
     """Pass 1 of ``pair`` is on ``grid`` and its median (ux, uy) is ``expected``."""
     ux, uy, got_grid = _median_displacement(output_path, pair)
     assert got_grid == grid, f"{label} pair {pair}: grid {got_grid}"
-    assert (
-        abs(ux - expected[0]) < SHIFT_TOLERANCE_PX
-    ), f"{label} pair {pair}: ux {ux}, expected {expected[0]}"
-    assert (
-        abs(uy - expected[1]) < SHIFT_TOLERANCE_PX
-    ), f"{label} pair {pair}: uy {uy}, expected {expected[1]}"
+    assert abs(ux - expected[0]) < SHIFT_TOLERANCE_PX, (
+        f"{label} pair {pair}: ux {ux}, expected {expected[0]}"
+    )
+    assert abs(uy - expected[1]) < SHIFT_TOLERANCE_PX, (
+        f"{label} pair {pair}: uy {uy}, expected {expected[1]}"
+    )
 
 
 def _rotated_rig_vector(cam):

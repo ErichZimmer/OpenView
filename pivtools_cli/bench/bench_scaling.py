@@ -616,10 +616,10 @@ def run_sweep(
         if walls:
             avg = sum(walls) / len(walls)
             rem = (total - i) * avg
-            eta = f"  ETA {(datetime.now() + timedelta(seconds=rem)).strftime('%H:%M:%S')} (~{rem/60:.0f}m)"
+            eta = f"  ETA {(datetime.now() + timedelta(seconds=rem)).strftime('%H:%M:%S')} (~{rem / 60:.0f}m)"
         print(
-            f"[{i+1}/{total}] {cfg['label']}: {cfg['workers']}w x {cfg['threads']}t"
-            f" = {cfg['workers']*cfg['threads']} cores{eta}",
+            f"[{i + 1}/{total}] {cfg['label']}: {cfg['workers']}w x {cfg['threads']}t"
+            f" = {cfg['workers'] * cfg['threads']} cores{eta}",
             flush=True,
         )
 
@@ -654,7 +654,7 @@ def run_sweep(
             print(f"  -> INVALID: {result['error']}\n", flush=True)
 
     print(
-        f"Done: {total} runs in {(datetime.now()-started).total_seconds()/60:.1f} min"
+        f"Done: {total} runs in {(datetime.now() - started).total_seconds() / 60:.1f} min"
     )
     return csv_path
 
@@ -679,5 +679,5 @@ def print_dry_run(
     for i, cfg in enumerate(configs, 1):
         w, t = cfg["workers"], cfg["threads"]
         n_pairs, _ = workload_for(w, batch_hint, n_images)
-        print(f"{i:>3} {w:>8} {t:>8} {w*t:>6} {n_pairs:>8} {cfg['label']:<14}")
+        print(f"{i:>3} {w:>8} {t:>8} {w * t:>6} {n_pairs:>8} {cfg['label']:<14}")
     print()

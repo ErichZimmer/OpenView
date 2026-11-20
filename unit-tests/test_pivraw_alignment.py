@@ -548,8 +548,9 @@ def test_config_and_read_pair_follow_the_alignment_per_camera(tmp_path):
     assert cfg.get_frame_pair_indices(2, camera=1) == (3, 4)
     assert cfg.get_frame_pair_indices(2, camera=2) == (3, 4)
 
-    cam1, cam2 = expected_frames("df_2cam_clean", 1), expected_frames(
-        "df_2cam_clean", 2
+    cam1, cam2 = (
+        expected_frames("df_2cam_clean", 1),
+        expected_frames("df_2cam_clean", 2),
     )
     np.testing.assert_array_equal(read_pair(2, run, 1, cfg), cam1[2:4])
     np.testing.assert_array_equal(read_pair(2, run, 2, cfg), cam2[2:4])

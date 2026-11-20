@@ -650,9 +650,7 @@ class TestCombinedModeKernel:
             raw = run_triple(triple_lib, imgs_a, imgs_b, mean_subtract, 0)[0] / n
             if not subtract_bg:
                 return raw
-            bg = run_triple(
-                triple_lib, a_mean[None], b_mean[None], mean_subtract, 0
-            )[0]
+            bg = run_triple(triple_lib, a_mean[None], b_mean[None], mean_subtract, 0)[0]
             return raw - bg
 
         r_window_mean = ab_residual(1, False)  # stationary structure survives

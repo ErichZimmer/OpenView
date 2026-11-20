@@ -452,13 +452,12 @@ class InstantaneousCorrelatorCPU(CrossCorrelator):
             images_b_contig = np.ascontiguousarray(images[:, 1, :, :], dtype=np.float32)
 
             for pass_idx, win_size in enumerate(config.window_sizes):
-
                 pass_start = time.perf_counter()
-                logging.debug(f"\n{'='*60}")
+                logging.debug(f"\n{'=' * 60}")
                 logging.debug(
                     f"PASS {pass_idx + 1} of {len(config.window_sizes)} (window_size={win_size})"
                 )
-                logging.debug(f"{'='*60}")
+                logging.debug(f"{'=' * 60}")
 
                 with self._profile_section(pass_idx, "predictor_corrector"):
                     images_a_prime, images_b_prime, self.delta_ab_pred = (
@@ -707,9 +706,9 @@ class InstantaneousCorrelatorCPU(CrossCorrelator):
                                             & ~sub_nan[im_idx]
                                         )
                                         nan_mask[im_idx] |= re_flag
-                                        nan_reason[im_idx][
-                                            re_flag
-                                        ] = NAN_SECONDARY_OUTLIER
+                                        nan_reason[im_idx][re_flag] = (
+                                            NAN_SECONDARY_OUTLIER
+                                        )
 
                         # Masked windows must stay flagged regardless of what the
                         # substitution loop did (their peaks are all NaN, so this
@@ -817,7 +816,7 @@ class InstantaneousCorrelatorCPU(CrossCorrelator):
                 )
                 if invalid_rate > 0.20:
                     logging.warning(
-                        f"Pass {pass_idx + 1}: {invalid_rate*100:.1f}% invalid vectors "
+                        f"Pass {pass_idx + 1}: {invalid_rate * 100:.1f}% invalid vectors "
                         f"({true_invalid_count}/{unmasked_total})"
                     )
 
@@ -1021,8 +1020,8 @@ class InstantaneousCorrelatorCPU(CrossCorrelator):
             logging.debug(
                 f"  delta_ab_old from prev pass: shape={self.delta_ab_old.shape}, "
                 f"nan_count={np.isnan(self.delta_ab_old).sum()}, "
-                f"dx range=[{np.nanmin(self.delta_ab_old[...,1]):.4f}, {np.nanmax(self.delta_ab_old[...,1]):.4f}], "
-                f"dy range=[{np.nanmin(self.delta_ab_old[...,0]):.4f}, {np.nanmax(self.delta_ab_old[...,0]):.4f}]"
+                f"dx range=[{np.nanmin(self.delta_ab_old[..., 1]):.4f}, {np.nanmax(self.delta_ab_old[..., 1]):.4f}], "
+                f"dy range=[{np.nanmin(self.delta_ab_old[..., 0]):.4f}, {np.nanmax(self.delta_ab_old[..., 0]):.4f}]"
             )
 
             if config.instantaneous_predictor_smoothing:
@@ -1294,20 +1293,20 @@ class InstantaneousCorrelatorCPU(CrossCorrelator):
         )
 
         # Verify caching integrity (keep assertions for debugging)
-        assert len(self.cached_dense_maps) == len(
-            config.window_sizes
-        ), f"Dense maps cache length mismatch: {len(self.cached_dense_maps)} vs {len(config.window_sizes)}"
-        assert len(self.cached_predictor_maps) == len(
-            config.window_sizes
-        ), f"Predictor maps cache length mismatch: {len(self.cached_predictor_maps)} vs {len(config.window_sizes)}"
+        assert len(self.cached_dense_maps) == len(config.window_sizes), (
+            f"Dense maps cache length mismatch: {len(self.cached_dense_maps)} vs {len(config.window_sizes)}"
+        )
+        assert len(self.cached_predictor_maps) == len(config.window_sizes), (
+            f"Predictor maps cache length mismatch: {len(self.cached_predictor_maps)} vs {len(config.window_sizes)}"
+        )
 
         for pass_idx in range(1, len(config.window_sizes)):
-            assert (
-                self.cached_dense_maps[pass_idx] is not None
-            ), f"Dense map for pass {pass_idx} is None"
-            assert (
-                self.cached_predictor_maps[pass_idx] is not None
-            ), f"Predictor map for pass {pass_idx} is None"
+            assert self.cached_dense_maps[pass_idx] is not None, (
+                f"Dense map for pass {pass_idx} is None"
+            )
+            assert self.cached_predictor_maps[pass_idx] is not None, (
+                f"Predictor map for pass {pass_idx} is None"
+            )
 
 
 def plot_corr_planes(corr_avg_flat, n_win_y, n_win_x, win_h, win_w, pass_idx):

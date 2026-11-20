@@ -516,7 +516,7 @@ if __name__ == "__main__":
         (64, 64), np.array([32.5]), np.array([32.5]), np.array([1.0]), sigma=0.85
     )
     print(f"  Peak value: {img.max():.4f} (expected ~1.0)")
-    print(f"  Sum: {img.sum():.4f} (expected ~{2*np.pi*0.85**2:.4f})")
+    print(f"  Sum: {img.sum():.4f} (expected ~{2 * np.pi * 0.85**2:.4f})")
 
     print("\nTesting generate_particle_image...")
     img = generate_particle_image((128, 128), 100, 2.0, seed=42)

@@ -218,7 +218,9 @@ def plot_corr_quality():
             )
 
         paths = validate_and_get_paths(params)
-        ts_file = Path(paths["stats_dir"]) / "mean_stats" / "corr_quality_timeseries.mat"
+        ts_file = (
+            Path(paths["stats_dir"]) / "mean_stats" / "corr_quality_timeseries.mat"
+        )
         if not ts_file.exists():
             return (
                 jsonify(
@@ -1020,9 +1022,7 @@ def check_available_data():
                     except Exception as e:
                         logger.debug(f"Error reading ensemble vars: {e}")
             else:
-                frame_files = list_vector_files(
-                    data_dir, vector_fmt, num_frame_pairs
-                )
+                frame_files = list_vector_files(data_dir, vector_fmt, num_frame_pairs)
 
                 if frame_files:
                     result["exists"] = True

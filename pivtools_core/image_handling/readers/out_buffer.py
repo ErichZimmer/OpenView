@@ -13,7 +13,9 @@ from typing import Tuple
 import numpy as np
 
 
-def check_out(out: np.ndarray, expected_shape: Tuple[int, ...], what: str) -> np.ndarray:
+def check_out(
+    out: np.ndarray, expected_shape: Tuple[int, ...], what: str
+) -> np.ndarray:
     """Return ``out`` if it satisfies the ``out=`` contract, else raise by name.
 
     Args:
@@ -26,7 +28,9 @@ def check_out(out: np.ndarray, expected_shape: Tuple[int, ...], what: str) -> np
             every mismatch at once so one round trip fixes them all.
     """
     if not isinstance(out, np.ndarray):
-        raise ValueError(f"{what}: out must be a numpy array, got {type(out).__name__}.")
+        raise ValueError(
+            f"{what}: out must be a numpy array, got {type(out).__name__}."
+        )
     expected = tuple(int(n) for n in expected_shape)
     problems = []
     if tuple(out.shape) != expected:

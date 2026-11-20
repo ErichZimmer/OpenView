@@ -740,8 +740,7 @@ def run_self_calibration(
     out_w = max(1, int(round((x_max - x_min) / mm_per_pixel)))
     out_h = max(1, int(round((y_max - y_min) / mm_per_pixel)))
     logger.info(
-        f"Native pixel scale: {mm_per_pixel:.4f} mm/px -> "
-        f"dewarped size {out_w}x{out_h}"
+        f"Native pixel scale: {mm_per_pixel:.4f} mm/px -> dewarped size {out_w}x{out_h}"
     )
 
     # Stereo angle (informational)
@@ -1041,7 +1040,7 @@ def run_self_calibration(
     else:
         logger.info(
             f"Self-calibration improved RMS {initial_rms:.1f} -> {final_rms:.1f} px "
-            f"({initial_rms/final_rms:.1f}x) but corrections still changing"
+            f"({initial_rms / final_rms:.1f}x) but corrections still changing"
         )
 
     return SelfCalibrationResult(

@@ -2344,8 +2344,7 @@ def write_self_cal_figures(
         ax1.set_ylabel("Y (mm)")
         ax2.imshow(ov_after, extent=extent, origin="lower", aspect="equal")
         ax2.set_title(
-            f"AFTER (Z={result.z_offset:.2f} mm, "
-            f"tX={math.degrees(result.tilt_x):.2f}°)"
+            f"AFTER (Z={result.z_offset:.2f} mm, tX={math.degrees(result.tilt_x):.2f}°)"
         )
         ax2.set_xlabel("X (mm)")
         fig.tight_layout()

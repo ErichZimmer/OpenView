@@ -238,9 +238,9 @@ def test_rms_disparity_reduced(self_calibration_result):
 
 def test_iterations_reasonable(self_calibration_result):
     """Should converge in < 10 iterations."""
-    assert (
-        self_calibration_result.n_iterations < 10
-    ), f"Took {self_calibration_result.n_iterations} iterations (expected < 10)"
+    assert self_calibration_result.n_iterations < 10, (
+        f"Took {self_calibration_result.n_iterations} iterations (expected < 10)"
+    )
 
 
 # ---------------------------------------------------------------------------

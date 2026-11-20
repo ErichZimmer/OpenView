@@ -279,9 +279,9 @@ def test_generate_force_redetect_keeps_stored_clicks(env):
     assert data["success"] is True, data
     assert data["detections_cached"] is False
     side = INP.load_inputs(mdir)
-    assert (
-        side.coords is not None
-    ), "force_redetect erased the stored world-frame clicks"
+    assert side.coords is not None, (
+        "force_redetect erased the stored world-frame clicks"
+    )
     assert np.allclose(side.coords["origin"], clicks["origin"])
     assert side.coords["origin_mm"] == clicks["origin_mm"]
 

@@ -50,15 +50,16 @@ def plot_corr_planes(
         import matplotlib.pyplot as plt
     except ImportError:
         logging.warning(
-            "Matplotlib not available, skipping correlation " "plane visualization"
+            "Matplotlib not available, skipping correlation plane visualization"
         )
         return
 
     # Verify shape
     if corr_planes.shape != (n_win_y, n_win_x, win_h, win_w):
         logging.error(
-            "Shape mismatch: expected ({}, {}, {}, {}), "
-            "got {}".format(n_win_y, n_win_x, win_h, win_w, corr_planes.shape)
+            "Shape mismatch: expected ({}, {}, {}, {}), got {}".format(
+                n_win_y, n_win_x, win_h, win_w, corr_planes.shape
+            )
         )
         return
 
@@ -193,7 +194,7 @@ def plot_window_surface(
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
     except ImportError:
-        logging.warning("Matplotlib not available, skipping window " "surface plot")
+        logging.warning("Matplotlib not available, skipping window surface plot")
         return
 
     # Reshape to 2D

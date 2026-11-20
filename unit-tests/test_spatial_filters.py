@@ -384,6 +384,6 @@ class TestApplyAllFiltersSlim:
         )
 
         # gaussian→median should differ from median→gaussian
-        assert not np.array_equal(
-            result_a, result_b
-        ), "Different filter orderings should produce different results"
+        assert not np.array_equal(result_a, result_b), (
+            "Different filter orderings should produce different results"
+        )

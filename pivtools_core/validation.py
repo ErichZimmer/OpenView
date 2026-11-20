@@ -174,16 +174,16 @@ def validate_config(config: Config) -> Tuple[bool, str, List[str]]:
     # Check source paths exist
     for i, source_path in enumerate(config.source_paths):
         if not source_path.exists():
-            errors.append(f"Source path {i+1} does not exist: {source_path}")
+            errors.append(f"Source path {i + 1} does not exist: {source_path}")
 
     # Check base paths exist (create if missing)
     for i, base_path in enumerate(config.base_paths):
         if not base_path.exists():
             try:
                 base_path.mkdir(parents=True, exist_ok=True)
-                warnings.append(f"Created base path {i+1}: {base_path}")
+                warnings.append(f"Created base path {i + 1}: {base_path}")
             except Exception as e:
-                errors.append(f"Failed to create base path {i+1}: {base_path} - {e}")
+                errors.append(f"Failed to create base path {i + 1}: {base_path} - {e}")
 
     if errors:
         return False, "\n".join(errors), warnings
@@ -475,7 +475,7 @@ def validate_ensemble_config(config: Config) -> Tuple[bool, List[str], List[str]
     # 3. Validate overlap values are in range
     for i, ovlp in enumerate(overlaps):
         if ovlp < 0 or ovlp > 95:
-            errors.append(f"Pass {i+1}: overlap {ovlp}% out of range (0-95%)")
+            errors.append(f"Pass {i + 1}: overlap {ovlp}% out of range (0-95%)")
 
     # 4. Window sizes should decrease or stay the same across passes
     for i in range(1, len(window_sizes)):
@@ -483,7 +483,7 @@ def validate_ensemble_config(config: Config) -> Tuple[bool, List[str], List[str]
         curr = window_sizes[i]
         if curr[0] > prev[0] or curr[1] > prev[1]:
             warnings.append(
-                f"Pass {i+1}: window size {curr} is larger than pass {i} ({prev}). "
+                f"Pass {i + 1}: window size {curr} is larger than pass {i} ({prev}). "
                 "Typically window sizes decrease across passes."
             )
 

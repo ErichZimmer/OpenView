@@ -104,9 +104,7 @@ class TestComputeFrameGains:
         contaminated = frames.copy()
         contaminated[:, :, :8, :] = np.iinfo(np.uint16).max
         gains, prov = compute_frame_gains(_as_dask(contaminated), mask)
-        np.testing.assert_allclose(
-            gains, _oracle_gains(contaminated, mask), rtol=1e-6
-        )
+        np.testing.assert_allclose(gains, _oracle_gains(contaminated, mask), rtol=1e-6)
         np.testing.assert_allclose(gains, _oracle_gains(frames, mask), rtol=1e-6)
         assert prov["mask_applied"] is True
         assert prov["n_masked_pixels"] == int(mask.sum())
@@ -148,9 +146,9 @@ class TestPipelineApplication:
         out = create_filter_pipeline(
             images, _cfg(filters=[]), None, frame_gains=gains
         ).compute()
-        expected = frames.astype(np.float32) / gains.astype(np.float32)[
-            :, :, None, None
-        ]
+        expected = (
+            frames.astype(np.float32) / gains.astype(np.float32)[:, :, None, None]
+        )
         np.testing.assert_allclose(out, expected, rtol=1e-6)
         assert out.dtype == np.float32
 

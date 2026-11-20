@@ -119,7 +119,9 @@ def test_forced_infill_mask_matches_diagnostics(make_figures):
     # fabricated at its lattice node: the node is absent from the grid.
     centers = np.asarray(grid["centers"], dtype=np.float64)
     gi = np.asarray(grid["grid_indices"])
-    node = np.array([MARGIN + 4 * SPACING_PX, MARGIN + 3 * SPACING_PX], dtype=np.float64)
+    node = np.array(
+        [MARGIN + 4 * SPACING_PX, MARGIN + 3 * SPACING_PX], dtype=np.float64
+    )
     assert np.min(np.linalg.norm(centers - node, axis=1)) > 0.5 * SPACING_PX
     assert len(gi) == len(centers)
 
@@ -317,7 +319,9 @@ def test_distorted_board_with_reflection_keeps_whole_board():
     """Distortion plus a two-row reflection: the board is kept whole and no
     reflected dot survives (whichever stage rejects the reflection)."""
     board, reflected, shape = _perspective_board_points(2, DISTORTION_K1)
-    ok, grid, info = detect_grid_automatic(_render_dots(np.vstack([board, reflected]), shape))
+    ok, grid, info = detect_grid_automatic(
+        _render_dots(np.vstack([board, reflected]), shape)
+    )
     assert ok
     centers = np.asarray(grid["centers"], dtype=np.float64)
     n_board, n_refl, d_board = _split_kept(centers, board, reflected)
@@ -337,7 +341,9 @@ def test_reflection_seam_rows_dropped():
     drop-and-refit iteration removes that; this test pins it.
     """
     board, reflected, shape = _perspective_board_points(2, 0.0)
-    ok, grid, info = detect_grid_automatic(_render_dots(np.vstack([board, reflected]), shape))
+    ok, grid, info = detect_grid_automatic(
+        _render_dots(np.vstack([board, reflected]), shape)
+    )
     assert ok
     centers = np.asarray(grid["centers"], dtype=np.float64)
     n_board, n_refl, d_board = _split_kept(centers, board, reflected)
@@ -394,7 +400,12 @@ def test_outlier_gate_refit_floor_is_visible():
 
 
 def _fake_detection(
-    success=True, n=12, n_rescued=0, n_outliers_dropped=0, n_border_dropped=0, warning=None
+    success=True,
+    n=12,
+    n_rescued=0,
+    n_outliers_dropped=0,
+    n_border_dropped=0,
+    warning=None,
 ) -> DetectionResult:
     diag = {
         "n_rescued": n_rescued,
@@ -421,7 +432,9 @@ def _fake_detection(
 def test_view_diagnostics_summary_arrays():
     dets = [
         _fake_detection(n_rescued=2),
-        _fake_detection(n_outliers_dropped=3, n_border_dropped=4, warning="partial board"),
+        _fake_detection(
+            n_outliers_dropped=3, n_border_dropped=4, warning="partial board"
+        ),
     ]
     s = view_diagnostics_summary(dets)
     np.testing.assert_array_equal(s["view_index"], [0, 1])
@@ -491,7 +504,8 @@ def test_stereo_record_nested_view_diagnostics_roundtrip(tmp_path):
         np.asarray(got["cam1"]["n_rescued"]).reshape(-1), vd1["n_rescued"]
     )
     np.testing.assert_array_equal(
-        np.asarray(got["cam2"]["n_outliers_dropped"]).reshape(-1), vd2["n_outliers_dropped"]
+        np.asarray(got["cam2"]["n_outliers_dropped"]).reshape(-1),
+        vd2["n_outliers_dropped"],
     )
     np.testing.assert_array_equal(
         np.asarray(got["cam2"]["n_synthetic"]).reshape(-1), vd2["n_synthetic"]

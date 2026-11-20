@@ -201,11 +201,11 @@ def _run_ensemble_piv(fit_method):
 
     from pivtools_core.ensemble import run_ensemble_piv
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"  Running ensemble PIV — fit_method={fit_method}")
     print("  3 passes: 32std -> 16single -> 16single")
     print(f"  {num_pairs} pairs, batch_size=10, omp_threads=4, workers=2")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     client = Client(
         processes=False,
@@ -417,9 +417,9 @@ class TestInstantaneousWarping:
 
         err = np.abs(ux[interior] - gt_grid[interior])
         median_err = np.median(err)
-        assert (
-            median_err < 0.3
-        ), f"median |ux - gt| = {median_err:.3f} px, expected < 0.3"
+        assert median_err < 0.3, (
+            f"median |ux - gt| = {median_err:.3f} px, expected < 0.3"
+        )
 
     def test_uy_near_zero(self, instantaneous_workspace):
         """Vertical displacement should be near zero for Poiseuille."""
@@ -510,7 +510,7 @@ class TestPredictorConvergence:
             p = ws["pass_data"][pidx]
             ux, pred_x = p["ux"], p["pred_x"]
             if pred_x is None:
-                pytest.skip(f"pred_x not saved for pass {pidx+1}")
+                pytest.skip(f"pred_x not saved for pass {pidx + 1}")
 
             valid = np.isfinite(ux) & np.isfinite(pred_x)
             interior = _interior_mask(ux.shape) & valid
@@ -593,7 +593,7 @@ class TestVelocityAccuracy:
         interior = _interior_mask(uy.shape) & valid
         median_uy = np.median(np.abs(uy[interior]))
         assert median_uy < 0.1, (
-            f"[{ws['fit_method']}] median |uy| = {median_uy:.3f} px, " f"expected < 0.1"
+            f"[{ws['fit_method']}] median |uy| = {median_uy:.3f} px, expected < 0.1"
         )
 
 
@@ -605,14 +605,18 @@ class TestSingleModeSpecific:
         ws = ensemble_workspace
         for pidx in [PASS_2_IDX, PASS_3_IDX]:
             p = ws["pass_data"][pidx]
-            assert p["ux"] is not None, f"[{ws['fit_method']}] Pass {pidx+1} ux is None"
-            assert p["uy"] is not None, f"[{ws['fit_method']}] Pass {pidx+1} uy is None"
-            assert (
-                p["peakheight"] is not None
-            ), f"[{ws['fit_method']}] Pass {pidx+1} peakheight is None"
+            assert p["ux"] is not None, (
+                f"[{ws['fit_method']}] Pass {pidx + 1} ux is None"
+            )
+            assert p["uy"] is not None, (
+                f"[{ws['fit_method']}] Pass {pidx + 1} uy is None"
+            )
+            assert p["peakheight"] is not None, (
+                f"[{ws['fit_method']}] Pass {pidx + 1} peakheight is None"
+            )
             valid = np.isfinite(p["ux"])
             assert valid.sum() > 10, (
-                f"[{ws['fit_method']}] Pass {pidx+1} has too few valid "
+                f"[{ws['fit_method']}] Pass {pidx + 1} has too few valid "
                 f"windows ({valid.sum()})"
             )
 

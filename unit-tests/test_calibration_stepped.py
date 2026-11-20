@@ -101,16 +101,16 @@ def _assert_two_level_recovery(res):
     # counts rather than assuming which slot holds the peak grid.
     assert max(na, nb) >= 0.75 * n_large, f"larger level short: {max(na, nb)}"
     assert min(na, nb) >= 0.75 * n_small, f"smaller level short: {min(na, nb)}"
-    assert res.n >= 0.78 * (
-        n_large + n_small
-    ), f"too few points: {res.n} of {n_large + n_small}"
+    assert res.n >= 0.78 * (n_large + n_small), (
+        f"too few points: {res.n} of {n_large + n_small}"
+    )
 
     # Stitch produced a genuine two-level frame (not a degraded single level).
     meta = res.diagnostics["stitch"]
     assert not meta["degraded_single_level"]
-    assert (
-        meta["consensus_pct"] > 80.0
-    ), f"low stitch consensus: {meta['consensus_pct']}"
+    assert meta["consensus_pct"] > 80.0, (
+        f"low stitch consensus: {meta['consensus_pct']}"
+    )
 
     # board_local carries exactly the two physical Z planes (neutral 0 / -step).
     zs = np.unique(np.round(res.board_local_points[:, 2], 6))

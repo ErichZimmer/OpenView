@@ -51,9 +51,9 @@ def clean_pair():
 def _assert_invariant(pass_result):
     assert pass_result.nan_reason is not None
     assert pass_result.nan_reason.dtype == np.int8
-    assert np.array_equal(
-        pass_result.nan_reason != NAN_VALID, pass_result.nan_mask
-    ), "(nan_reason != 0) must equal nan_mask"
+    assert np.array_equal(pass_result.nan_reason != NAN_VALID, pass_result.nan_mask), (
+        "(nan_reason != 0) must equal nan_mask"
+    )
 
 
 class TestNanReasonCodes:

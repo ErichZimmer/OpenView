@@ -575,7 +575,7 @@ def run_ensemble_piv(
             )
 
         logger.info(
-            f"Resuming from pass {resume_from_pass} (loading passes 1-{resume_from_pass-1})..."
+            f"Resuming from pass {resume_from_pass} (loading passes 1-{resume_from_pass - 1})..."
         )
 
         from pivtools_cli.piv.save_results import load_ensemble_result

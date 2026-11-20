@@ -283,8 +283,9 @@ def test_gate_removes_corrupted_dots_and_reports_them(
     same_side_scene,
 ):
     s = same_side_scene
-    f1, f2 = _peak_fiducials(s["projs1"][0], 0, 0), _peak_fiducials(
-        s["projs2"][0], 0, 0
+    f1, f2 = (
+        _peak_fiducials(s["projs1"][0], 0, 0),
+        _peak_fiducials(s["projs2"][0], 0, 0),
     )
     clean = _solve(s, f1, f2, "peak", "peak")
     assert clean.board_meta["n_gated_points1"] == 0

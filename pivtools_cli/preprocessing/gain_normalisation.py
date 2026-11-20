@@ -101,9 +101,7 @@ def compute_frame_gains(
             f"  gain {name}: mean {g.mean():.4f}, RMS jitter "
             f"{g.std() / g.mean():.4f}, range [{g.min():.4f}, {g.max():.4f}]"
         )
-    logger.info(
-        f"  gain pre-pass over {n_pairs} pairs took {time.time() - t0:.1f}s"
-    )
+    logger.info(f"  gain pre-pass over {n_pairs} pairs took {time.time() - t0:.1f}s")
 
     provenance: Dict[str, Any] = {
         "ref_a": ref[0].astype(np.float32),

@@ -116,6 +116,6 @@ def test_release_beats_flat_on_held_out_view():
     R_r, t_r = fit_pose(released, img, K_r, d_r, planar=False)
     rms_f = reprojection_rms(nominal, img, K_f, d_f, cv2.Rodrigues(R_f)[0], t_f)
     rms_r = reprojection_rms(released, img, K_r, d_r, cv2.Rodrigues(R_r)[0], t_r)
-    assert (
-        rms_r < rms_f
-    ), f"released held-out {rms_r:.4f} not better than flat {rms_f:.4f}"
+    assert rms_r < rms_f, (
+        f"released held-out {rms_r:.4f} not better than flat {rms_f:.4f}"
+    )

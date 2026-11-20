@@ -232,15 +232,28 @@ def _load_kspace_lib():
     u8 = np.ctypeslib.ndpointer(dtype=np.uint8, flags="C_CONTIGUOUS")
     lib.kspace_lm_fit_batch.restype = ctypes.c_int
     lib.kspace_lm_fit_batch.argtypes = [
-        f64, f64, f64,  # R_AA, R_BB, R_AB
+        f64,
+        f64,
+        f64,  # R_AA, R_BB, R_AB
         u8,  # mask_flat
         ctypes.c_void_p,  # P_win — NULL selects the flat floor
-        ctypes.c_int, ctypes.c_int, ctypes.c_int,  # n_windows, corr_h, corr_w
-        ctypes.c_int, ctypes.c_int,  # use_kx4, use_ky4
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,  # n_windows, corr_h, corr_w
+        ctypes.c_int,
+        ctypes.c_int,  # use_kx4, use_ky4
         ctypes.c_int,  # n_threads
-        f64, i32, f64,  # gauss_flat, status_flat, initial_guess_flat
-        f64, f64, f64, f64,  # diag: gain, N0, b4x, b4y
-        f64, i32, i32, u8,  # diag: cost_per_pt, n_valid, iter, conv
+        f64,
+        i32,
+        f64,  # gauss_flat, status_flat, initial_guess_flat
+        f64,
+        f64,
+        f64,
+        f64,  # diag: gain, N0, b4x, b4y
+        f64,
+        i32,
+        i32,
+        u8,  # diag: cost_per_pt, n_valid, iter, conv
     ]
     lib.kspace_lm_fit_max_threads.restype = ctypes.c_int
 
@@ -648,8 +661,16 @@ def _run_fit(prep, use_kx4=False, use_ky4=False):
             # quartic modes: append free-signed b4 columns (seed 0, unbounded)
             def fn(x, idx, jac=False):
                 return _resid_jac_quartic(
-                    x, Tre[idx], Tim[idx], W[idx], Fr[idx], KXf, KYf,
-                    use_kx4, use_ky4, jac=jac,
+                    x,
+                    Tre[idx],
+                    Tim[idx],
+                    W[idx],
+                    Fr[idx],
+                    KXf,
+                    KYf,
+                    use_kx4,
+                    use_ky4,
+                    jac=jac,
                     D=Dv[idx] if Dv is not None else None,
                 )
 
@@ -662,7 +683,14 @@ def _run_fit(prep, use_kx4=False, use_ky4=False):
             # gaussian: the untouched 7-parameter path, bit-identical to before
             def fn(x, idx, jac=False):
                 return _resid_jac_v6(
-                    x, Tre[idx], Tim[idx], W[idx], Fr[idx], KXf, KYf, jac=jac,
+                    x,
+                    Tre[idx],
+                    Tim[idx],
+                    W[idx],
+                    Fr[idx],
+                    KXf,
+                    KYf,
+                    jac=jac,
                     D=Dv[idx] if Dv is not None else None,
                 )
 
@@ -740,9 +768,7 @@ def _validate_inputs(R_AA, R_BB, R_AB, mask_flat, corr_size, config, P_win):
                 f"P_win size {P_win.size} != expected {n_windows * n_per} "
                 f"(n_windows={n_windows}, corr_size={corr_size})"
             )
-        P_win = np.ascontiguousarray(P_win, dtype=np.float64).reshape(
-            n_windows, n_per
-        )
+        P_win = np.ascontiguousarray(P_win, dtype=np.float64).reshape(n_windows, n_per)
     elif P_win is not None:
         raise ValueError(
             f"P_win passed but kspace_floor='{floor}' — wiring bug (the flat "
@@ -760,8 +786,18 @@ def _validate_inputs(R_AA, R_BB, R_AB, mask_flat, corr_size, config, P_win):
     )
     mask = np.asarray(mask_flat, dtype=bool)
     return (
-        shape, use_kx4, use_ky4, floor, corr_h, corr_w, n_windows,
-        R_AA, R_BB, R_AB, mask, P_win,
+        shape,
+        use_kx4,
+        use_ky4,
+        floor,
+        corr_h,
+        corr_w,
+        n_windows,
+        R_AA,
+        R_BB,
+        R_AB,
+        mask,
+        P_win,
     )
 
 
@@ -812,11 +848,19 @@ def fit_windows_kspace_lm(
     n_valid, conv, iter, plus b4x/b4y when the shape enables them).
     """
     (
-        shape, use_kx4, use_ky4, floor, corr_h, corr_w, n_windows,
-        R_AA, R_BB, R_AB, mask, P_win,
-    ) = _validate_inputs(
-        R_AA, R_BB, R_AB, mask_flat, corr_size, config, P_win
-    )
+        shape,
+        use_kx4,
+        use_ky4,
+        floor,
+        corr_h,
+        corr_w,
+        n_windows,
+        R_AA,
+        R_BB,
+        R_AB,
+        mask,
+        P_win,
+    ) = _validate_inputs(R_AA, R_BB, R_AB, mask_flat, corr_size, config, P_win)
 
     lib = _load_kspace_lib()
     n_threads = max(1, int(config.omp_threads))
@@ -848,18 +892,31 @@ def fit_windows_kspace_lm(
     d_conv = np.zeros(n_windows, dtype=np.uint8)
 
     ret = lib.kspace_lm_fit_batch(
-        R_AA, R_BB, R_AB,
+        R_AA,
+        R_BB,
+        R_AB,
         mask_u8,
         P_win.ctypes.data if P_win is not None else None,
         # int() on the sizes: corr_size arrives as numpy integers when it comes
         # from a .mat, and ctypes' c_int conversion of those is incidental
         # rather than guaranteed.
-        int(n_windows), int(corr_h), int(corr_w),
-        int(use_kx4), int(use_ky4),
+        int(n_windows),
+        int(corr_h),
+        int(corr_w),
+        int(use_kx4),
+        int(use_ky4),
         int(n_threads),
-        gauss_flat, status_flat, initial_guess_flat,
-        d_gain, d_N0, d_b4x, d_b4y,
-        d_cpp, d_nvalid, d_iter, d_conv,
+        gauss_flat,
+        status_flat,
+        initial_guess_flat,
+        d_gain,
+        d_N0,
+        d_b4x,
+        d_b4y,
+        d_cpp,
+        d_nvalid,
+        d_iter,
+        d_conv,
     )
     if ret != 0:
         raise RuntimeError(
@@ -932,11 +989,19 @@ def fit_windows_kspace_lm_numpy(
     reciprocal-multiply in C (<=1 ulp).
     """
     (
-        shape, use_kx4, use_ky4, floor, corr_h, corr_w, n_windows,
-        R_AA, R_BB, R_AB, mask, P_win,
-    ) = _validate_inputs(
-        R_AA, R_BB, R_AB, mask_flat, corr_size, config, P_win
-    )
+        shape,
+        use_kx4,
+        use_ky4,
+        floor,
+        corr_h,
+        corr_w,
+        n_windows,
+        R_AA,
+        R_BB,
+        R_AB,
+        mask,
+        P_win,
+    ) = _validate_inputs(R_AA, R_BB, R_AB, mask_flat, corr_size, config, P_win)
 
     KX, KY, _ = _kgrids(corr_h, corr_w)
     cy, cx = corr_h // 2, corr_w // 2

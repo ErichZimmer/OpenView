@@ -194,7 +194,9 @@ def test_inconsistent_correspondences_raise():
     # Corrupt cam2 view0's second correspondence to point at the WRONG dot in cam1.
     bad = [a for a in spec.anchors if a.camera == 2 and a.view == 0][0]
     bad.correspondences[1] = Correspondence(
-        pixel_of[(2, 0)][(6, 2)], (1, 0), pixel_of[(1, 0)][(4, 5)]  # mismatched ref dot
+        pixel_of[(2, 0)][(6, 2)],
+        (1, 0),
+        pixel_of[(1, 0)][(4, 5)],  # mismatched ref dot
     )
     with pytest.raises(ValueError):
         resolve_global_grid(detections, spec, spacing_mm=SPACING)

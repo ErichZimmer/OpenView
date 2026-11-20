@@ -326,7 +326,6 @@ def _preload_surrounding_frames(
         attempted = 0
         failures = []  # (pair, exception) per pair that would not read
         for idx in range(start_idx, end_idx + 1):
-
             # Use consistent cache key function
             cache_key_tuple = make_raw_cache_key(
                 source_path_idx, camera, idx, img_format, display_bounds, cfg
@@ -2000,9 +1999,7 @@ def get_ensemble_progress_from_logs(job_id: str, cfg) -> dict:
 
 
 # Time-based cache for get_uncalibrated_count directory scans
-_uncalibrated_count_cache: dict = (
-    {}
-)  # key: (active_paths, type_name, camera) -> {"time": float, "result": dict}
+_uncalibrated_count_cache: dict = {}  # key: (active_paths, type_name, camera) -> {"time": float, "result": dict}
 _UNCALIBRATED_COUNT_CACHE_TTL = 1.0  # seconds
 
 # A result file that is still being written would be read truncated, so the

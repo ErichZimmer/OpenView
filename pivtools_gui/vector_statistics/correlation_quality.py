@@ -93,9 +93,7 @@ def extract_frame_record(mat_path: Path, pass_idx: int) -> FrameRecord:
     """
     frame = int(FRAME_FILE_RE.match(Path(mat_path).name).group(1))
     try:
-        mat = scipy.io.loadmat(
-            str(mat_path), struct_as_record=False, squeeze_me=True
-        )
+        mat = scipy.io.loadmat(str(mat_path), struct_as_record=False, squeeze_me=True)
     except Exception as exc:  # corrupt/unreadable file — skip, visibly
         return FrameRecord(
             frame=frame,
@@ -157,9 +155,7 @@ def aggregate(records: List[FrameRecord]) -> Aggregates:
     for r in records:
         if r.error is not None:
             logger.warning("skipped %s (%s)", r.path, r.error)
-    good = sorted(
-        (r for r in records if r.error is None), key=lambda r: r.frame
-    )
+    good = sorted((r for r in records if r.error is None), key=lambda r: r.frame)
     if not good:
         raise RuntimeError("no readable frame files — nothing to aggregate")
 
@@ -184,8 +180,7 @@ def aggregate(records: List[FrameRecord]) -> Aggregates:
     if not have_ratio and any(r.peak_ratio is not None for r in good):
         # Mixed presence would mean frames from different runs — refuse.
         raise ValueError(
-            "peak_ratio present in some frames but not others — "
-            "directory mixes runs?"
+            "peak_ratio present in some frames but not others — directory mixes runs?"
         )
 
     # Stacks: ~(T, ny, nx) float32; 2100 x 683 x 9 ~ 50 MB each. Acceptable
@@ -199,9 +194,7 @@ def aggregate(records: List[FrameRecord]) -> Aggregates:
         # all-NaN window columns (e.g. permanently dead windows) are
         # expected — the NaN result is the correct answer for the map.
         warnings.simplefilter("ignore", category=RuntimeWarning)
-        mean_peak_mag = np.nanmean(
-            peak_stack.reshape(T, -1), axis=1
-        ).astype(np.float64)
+        mean_peak_mag = np.nanmean(peak_stack.reshape(T, -1), axis=1).astype(np.float64)
         peak_mag_map = np.nanmean(peak_stack, axis=0)
 
     nan_pct = 100.0 * nan_stack.reshape(T, -1).sum(axis=1) / n_unmasked
@@ -221,20 +214,15 @@ def aggregate(records: List[FrameRecord]) -> Aggregates:
         )
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", category=RuntimeWarning)
-            median_peak_ratio = np.nanmedian(
-                ratio_stack.reshape(T, -1), axis=1
-            ).astype(np.float64)
+            median_peak_ratio = np.nanmedian(ratio_stack.reshape(T, -1), axis=1).astype(
+                np.float64
+            )
             ratio_map = np.nanmedian(ratio_stack, axis=0)
 
     # nan_reason breakdown: all codes seen, minus masked (-1, static) and
     # valid (0).
     all_codes = sorted(
-        {
-            c
-            for r in good
-            for c in r.reason_counts
-            if c not in (NAN_MASKED, NAN_VALID)
-        }
+        {c for r in good for c in r.reason_counts if c not in (NAN_MASKED, NAN_VALID)}
     )
     reason_codes = np.array(all_codes, dtype=np.int64)
     reason_counts = np.zeros((len(all_codes), T), dtype=np.int64)
@@ -263,25 +251,17 @@ def aggregate(records: List[FrameRecord]) -> Aggregates:
 
 def discover_frame_files(vector_dir: Path) -> List[Path]:
     """Find per-frame .mat files (B00001.mat or 00001.mat style)."""
-    files = [
-        p for p in Path(vector_dir).iterdir() if FRAME_FILE_RE.match(p.name)
-    ]
+    files = [p for p in Path(vector_dir).iterdir() if FRAME_FILE_RE.match(p.name)]
     if not files:
-        raise FileNotFoundError(
-            f"no frame files matching B?NNNNN.mat in {vector_dir}"
-        )
+        raise FileNotFoundError(f"no frame files matching B?NNNNN.mat in {vector_dir}")
     return sorted(files, key=lambda p: int(FRAME_FILE_RE.match(p.name).group(1)))
 
 
 def probe_passes(first_file: Path) -> List[int]:
     """Return 0-based indices of non-empty passes in the first frame file."""
-    mat = scipy.io.loadmat(
-        str(first_file), struct_as_record=False, squeeze_me=True
-    )
+    mat = scipy.io.loadmat(str(first_file), struct_as_record=False, squeeze_me=True)
     passes = np.atleast_1d(mat["piv_result"])
-    return [
-        i for i, p in enumerate(passes) if np.asarray(p.ux).size > 0
-    ]
+    return [i for i, p in enumerate(passes) if np.asarray(p.ux).size > 0]
 
 
 def load_timeseries_mat(path: Path, run: int) -> Aggregates:
@@ -296,11 +276,7 @@ def load_timeseries_mat(path: Path, run: int) -> Aggregates:
     """
     mat = scipy.io.loadmat(str(path), struct_as_record=False, squeeze_me=True)
     struct = np.atleast_1d(mat["corr_quality"])
-    available = [
-        i + 1
-        for i, e in enumerate(struct)
-        if np.asarray(e.frames).size > 0
-    ]
+    available = [i + 1 for i, e in enumerate(struct) if np.asarray(e.frames).size > 0]
     if run < 1 or run > struct.size or run not in available:
         raise ValueError(
             f"correlation quality has no data for run {run}; "
@@ -346,9 +322,7 @@ def _grid_extent(win_x: np.ndarray, win_y: np.ndarray):
 
 def plot_timeseries(agg: Aggregates, title: str, out: Path) -> None:
     n_panels = 2 if agg.median_peak_ratio is None else 3
-    fig, axes = plt.subplots(
-        n_panels, 1, figsize=(12, 2.8 * n_panels), sharex=True
-    )
+    fig, axes = plt.subplots(n_panels, 1, figsize=(12, 2.8 * n_panels), sharex=True)
     axes[0].plot(agg.frames, agg.mean_peak_mag, lw=0.6, color="tab:blue")
     axes[0].set_ylabel("mean peak_mag\n[corr counts, a.u.]")
     axes[0].set_title(title)
@@ -357,9 +331,7 @@ def plot_timeseries(agg: Aggregates, title: str, out: Path) -> None:
     axes[1].set_ylabel(f"NaN % of {agg.n_unmasked}\nunmasked windows")
 
     if agg.median_peak_ratio is not None:
-        axes[2].plot(
-            agg.frames, agg.median_peak_ratio, lw=0.6, color="tab:green"
-        )
+        axes[2].plot(agg.frames, agg.median_peak_ratio, lw=0.6, color="tab:green")
         axes[2].set_yscale("log")
         axes[2].set_ylabel("median peak_ratio\n[peak1/peak2]")
 
@@ -379,9 +351,7 @@ def plot_spatial_corr(
     out: Path,
 ) -> None:
     n_panels = 1 if agg.ratio_map is None else 2
-    fig, axes = plt.subplots(
-        1, n_panels, figsize=(4.5 * n_panels, 10), squeeze=False
-    )
+    fig, axes = plt.subplots(1, n_panels, figsize=(4.5 * n_panels, 10), squeeze=False)
     axes = axes[0]
     ext = _grid_extent(win_x, win_y)
 
@@ -448,9 +418,7 @@ def plot_nan_reasons(agg: Aggregates, title: str, out: Path) -> None:
             f"{c}: {NAN_REASON_LABELS.get(int(c), 'unknown code')}"
             for c in agg.reason_codes
         ]
-        ax.stackplot(
-            agg.frames, agg.reason_counts, labels=labels, alpha=0.85
-        )
+        ax.stackplot(agg.frames, agg.reason_counts, labels=labels, alpha=0.85)
         ax.legend(loc="upper right", fontsize=8)
     else:
         ax.text(

@@ -27,9 +27,9 @@ EXPECTED_NAMES = {f"B{i:05d}.mat" for i in range(1, NUM_PAIRS + 1)}
 
 def _data_dir(base, cam):
     """Uncalibrated output directory for one camera of one dataset."""
-    return get_data_paths(
-        base, NUM_PAIRS, cam, TYPE_NAME, use_uncalibrated=True
-    )["data_dir"]
+    return get_data_paths(base, NUM_PAIRS, cam, TYPE_NAME, use_uncalibrated=True)[
+        "data_dir"
+    ]
 
 
 def _write_results(base, cam, count, age_s=0.0):

@@ -28,6 +28,7 @@ Usage:
     python gen_codelet.py --validate          # numpy check only, no file written
     python gen_codelet.py --emit codelets_gen.h   # write the C header
 """
+
 from __future__ import annotations
 
 import argparse

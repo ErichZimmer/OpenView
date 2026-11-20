@@ -35,7 +35,9 @@ def _pose(tilt_deg: float, azimuth_deg: float, standoff: float):
     """World->camera pose: board centred at ``standoff`` on the axis, tilted about an
     in-plane axis so the normal leans towards ``azimuth_deg`` in the image plane."""
     az = np.radians(azimuth_deg)
-    axis = np.array([-np.sin(az), np.cos(az), 0.0])  # rotate about this to lean towards az
+    axis = np.array(
+        [-np.sin(az), np.cos(az), 0.0]
+    )  # rotate about this to lean towards az
     R = cv2.Rodrigues(axis * np.radians(tilt_deg))[0]
     centre = _BOARD.mean(axis=0)
     t = np.array([0.0, 0.0, standoff]) - R @ centre
@@ -75,14 +77,21 @@ def test_board_plane_normal_and_planarity():
 
 def test_metrics_recover_hand_built_tilts():
     specs = {
-        1: [(0.0, 0.0, 700.0), (20.0, 0.0, 650.0), (20.0, 90.0, 750.0), (35.0, 200.0, 700.0)]
+        1: [
+            (0.0, 0.0, 700.0),
+            (20.0, 0.0, 650.0),
+            (20.0, 90.0, 750.0),
+            (35.0, 200.0, 700.0),
+        ]
     }
     pd = pose_diversity(_BOARD, *_rig(specs))
     assert pd.cameras == [1]
     assert pd.n_views[1] == 4 and pd.n_views_tilt_above_floor[1] == 3
     assert pd.tilt_deg_min[1] == pytest.approx(0.0, abs=1e-6)
     assert pd.tilt_deg_max[1] == pytest.approx(35.0, abs=1e-6)
-    assert pd.tilt_azimuth_spread_deg[1] == pytest.approx(90.0, abs=1e-6)  # axes 0/90/20
+    assert pd.tilt_azimuth_spread_deg[1] == pytest.approx(
+        90.0, abs=1e-6
+    )  # axes 0/90/20
     assert 0.3 < pd.tilt_anisotropy[1] < 1.0
     assert pd.standoff_mm_min[1] == pytest.approx(650.0, abs=2.0)
     assert pd.standoff_range_fraction[1] == pytest.approx(100.0 / 700.0, abs=0.01)
@@ -231,7 +240,9 @@ def test_fronto_parallel_solve_has_low_rms_and_is_degenerate():
     # The diagnostic must fire on them as they are.
     assert pd.flag_low_tilt[1] and pd.tilt_deg_median[1] < 5.0
     assert not pd.flag_constant_standoff[1]
-    assert pd.board_planarity_rms_mm > 5.0  # a flat board absorbing the missing constraint
+    assert (
+        pd.board_planarity_rms_mm > 5.0
+    )  # a flat board absorbing the missing constraint
     assert set(pd.view_rms_px) == set(res.view_poses)
     text = format_pose_diversity(pd)
     assert "DEGENERATE" in text and "cam1" in text

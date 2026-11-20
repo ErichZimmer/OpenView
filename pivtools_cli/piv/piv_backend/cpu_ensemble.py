@@ -1525,12 +1525,12 @@ class EnsembleCorrelatorCPU(CrossCorrelator):
             # DEBUG: Log predictor edge values BEFORE padding
             logging.debug(
                 f"Pass {pass_idx}: PRE-PADDING predictor edges - "
-                f"top-left=({predictor_field[0,0,0]:.4f}, {predictor_field[0,0,1]:.4f}), "
-                f"top-right=({predictor_field[0,-1,0]:.4f}, {predictor_field[0,-1,1]:.4f}), "
-                f"bot-left=({predictor_field[-1,0,0]:.4f}, {predictor_field[-1,0,1]:.4f}), "
-                f"bot-right=({predictor_field[-1,-1,0]:.4f}, {predictor_field[-1,-1,1]:.4f}), "
-                f"center=({predictor_field[predictor_field.shape[0]//2, predictor_field.shape[1]//2, 0]:.4f}, "
-                f"{predictor_field[predictor_field.shape[0]//2, predictor_field.shape[1]//2, 1]:.4f})"
+                f"top-left=({predictor_field[0, 0, 0]:.4f}, {predictor_field[0, 0, 1]:.4f}), "
+                f"top-right=({predictor_field[0, -1, 0]:.4f}, {predictor_field[0, -1, 1]:.4f}), "
+                f"bot-left=({predictor_field[-1, 0, 0]:.4f}, {predictor_field[-1, 0, 1]:.4f}), "
+                f"bot-right=({predictor_field[-1, -1, 0]:.4f}, {predictor_field[-1, -1, 1]:.4f}), "
+                f"center=({predictor_field[predictor_field.shape[0] // 2, predictor_field.shape[1] // 2, 0]:.4f}, "
+                f"{predictor_field[predictor_field.shape[0] // 2, predictor_field.shape[1] // 2, 1]:.4f})"
             )
 
             predictor_field = np.pad(
@@ -1555,12 +1555,12 @@ class EnsembleCorrelatorCPU(CrossCorrelator):
             # DEBUG: Log predictor edge values AFTER padding
             logging.debug(
                 f"Pass {pass_idx}: POST-PADDING predictor edges - "
-                f"top-left=({predictor_field[0,0,0]:.4f}, {predictor_field[0,0,1]:.4f}), "
-                f"top-right=({predictor_field[0,-1,0]:.4f}, {predictor_field[0,-1,1]:.4f}), "
-                f"bot-left=({predictor_field[-1,0,0]:.4f}, {predictor_field[-1,0,1]:.4f}), "
-                f"bot-right=({predictor_field[-1,-1,0]:.4f}, {predictor_field[-1,-1,1]:.4f}), "
-                f"center=({predictor_field[predictor_field.shape[0]//2, predictor_field.shape[1]//2, 0]:.4f}, "
-                f"{predictor_field[predictor_field.shape[0]//2, predictor_field.shape[1]//2, 1]:.4f})"
+                f"top-left=({predictor_field[0, 0, 0]:.4f}, {predictor_field[0, 0, 1]:.4f}), "
+                f"top-right=({predictor_field[0, -1, 0]:.4f}, {predictor_field[0, -1, 1]:.4f}), "
+                f"bot-left=({predictor_field[-1, 0, 0]:.4f}, {predictor_field[-1, 0, 1]:.4f}), "
+                f"bot-right=({predictor_field[-1, -1, 0]:.4f}, {predictor_field[-1, -1, 1]:.4f}), "
+                f"center=({predictor_field[predictor_field.shape[0] // 2, predictor_field.shape[1] // 2, 0]:.4f}, "
+                f"{predictor_field[predictor_field.shape[0] // 2, predictor_field.shape[1] // 2, 1]:.4f})"
             )
 
             # --- Apply predictor boundary conditions ---
@@ -1607,12 +1607,12 @@ class EnsembleCorrelatorCPU(CrossCorrelator):
             logging.debug(
                 f"Pass {pass_idx}: POST-SMOOTH delta_ab_old edges - "
                 f"shape={self.delta_ab_old.shape}, "
-                f"top-left=({self.delta_ab_old[0,0,0]:.4f}, {self.delta_ab_old[0,0,1]:.4f}), "
-                f"top-right=({self.delta_ab_old[0,-1,0]:.4f}, {self.delta_ab_old[0,-1,1]:.4f}), "
-                f"bot-left=({self.delta_ab_old[-1,0,0]:.4f}, {self.delta_ab_old[-1,0,1]:.4f}), "
-                f"bot-right=({self.delta_ab_old[-1,-1,0]:.4f}, {self.delta_ab_old[-1,-1,1]:.4f}), "
-                f"center=({self.delta_ab_old[self.delta_ab_old.shape[0]//2, self.delta_ab_old.shape[1]//2, 0]:.4f}, "
-                f"{self.delta_ab_old[self.delta_ab_old.shape[0]//2, self.delta_ab_old.shape[1]//2, 1]:.4f}), "
+                f"top-left=({self.delta_ab_old[0, 0, 0]:.4f}, {self.delta_ab_old[0, 0, 1]:.4f}), "
+                f"top-right=({self.delta_ab_old[0, -1, 0]:.4f}, {self.delta_ab_old[0, -1, 1]:.4f}), "
+                f"bot-left=({self.delta_ab_old[-1, 0, 0]:.4f}, {self.delta_ab_old[-1, 0, 1]:.4f}), "
+                f"bot-right=({self.delta_ab_old[-1, -1, 0]:.4f}, {self.delta_ab_old[-1, -1, 1]:.4f}), "
+                f"center=({self.delta_ab_old[self.delta_ab_old.shape[0] // 2, self.delta_ab_old.shape[1] // 2, 0]:.4f}, "
+                f"{self.delta_ab_old[self.delta_ab_old.shape[0] // 2, self.delta_ab_old.shape[1] // 2, 1]:.4f}), "
                 f"sigma={self.sd[pass_idx]:.4f}, ksize={self.ksize_filt[pass_idx]}"
             )
 
@@ -1648,12 +1648,12 @@ class EnsembleCorrelatorCPU(CrossCorrelator):
             logging.debug(
                 f"Pass {pass_idx}: POST-REMAP delta_ab_pred - "
                 f"shape={delta_ab_pred.shape}, "
-                f"top-left=({delta_ab_pred[0,0,0]:.4f}, {delta_ab_pred[0,0,1]:.4f}), "
-                f"top-right=({delta_ab_pred[0,-1,0]:.4f}, {delta_ab_pred[0,-1,1]:.4f}), "
-                f"bot-left=({delta_ab_pred[-1,0,0]:.4f}, {delta_ab_pred[-1,0,1]:.4f}), "
-                f"bot-right=({delta_ab_pred[-1,-1,0]:.4f}, {delta_ab_pred[-1,-1,1]:.4f}), "
-                f"center=({delta_ab_pred[delta_ab_pred.shape[0]//2, delta_ab_pred.shape[1]//2, 0]:.4f}, "
-                f"{delta_ab_pred[delta_ab_pred.shape[0]//2, delta_ab_pred.shape[1]//2, 1]:.4f})"
+                f"top-left=({delta_ab_pred[0, 0, 0]:.4f}, {delta_ab_pred[0, 0, 1]:.4f}), "
+                f"top-right=({delta_ab_pred[0, -1, 0]:.4f}, {delta_ab_pred[0, -1, 1]:.4f}), "
+                f"bot-left=({delta_ab_pred[-1, 0, 0]:.4f}, {delta_ab_pred[-1, 0, 1]:.4f}), "
+                f"bot-right=({delta_ab_pred[-1, -1, 0]:.4f}, {delta_ab_pred[-1, -1, 1]:.4f}), "
+                f"center=({delta_ab_pred[delta_ab_pred.shape[0] // 2, delta_ab_pred.shape[1] // 2, 0]:.4f}, "
+                f"{delta_ab_pred[delta_ab_pred.shape[0] // 2, delta_ab_pred.shape[1] // 2, 1]:.4f})"
             )
 
         # Store window centres and interp mode for _fused_warp_batch

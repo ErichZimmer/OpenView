@@ -155,7 +155,9 @@ def test_joint_ba_analytic_jacobian_matches_finite_differences(mode):
     rng = np.random.default_rng(7)
     cams, views = [1, 2], [0, 1, 2]
     gx, gy = np.meshgrid(np.arange(6), np.arange(5))
-    nominal = np.column_stack([gx.ravel() * SPACING, gy.ravel() * SPACING, np.zeros(30)])
+    nominal = np.column_stack(
+        [gx.ravel() * SPACING, gy.ravel() * SPACING, np.zeros(30)]
+    )
     nominal[:, 2] += rng.normal(0, 0.3, 30)  # a slightly non-flat "released" board
     poses = _board_poses(3, 3)
     rig = {c: _rig(c) for c in cams}
@@ -170,7 +172,9 @@ def test_joint_ba_analytic_jacobian_matches_finite_differences(mode):
             )[0].reshape(-1, 2)
             px += rng.normal(0, 0.2, px.shape)
             view_keys.append((c, v))
-            observations += [(c, v, i, float(px[i, 0]), float(px[i, 1])) for i in range(30)]
+            observations += [
+                (c, v, i, float(px[i, 0]), float(px[i, 1])) for i in range(30)
+            ]
     free_rows = [] if mode == "none" else list(range(3, 30))
     ba = _JointBA(nominal, observations, cams, view_keys, free_rows, mode, datum_view=0)
     board_pose = {v: poses[v] for v in views}
@@ -219,10 +223,15 @@ def test_factorise_rig_seed_recovers_an_exactly_rigid_pose_set():
     cams, n_views = [1, 2, 3], 5
     poses = _board_poses(n_views, 11)
     # make the truth board_datum NOT the identity, so the gauge move is exercised
-    G = (cv2.Rodrigues(np.array([0.1, -0.2, 0.05]))[0], np.array([[3.0], [-4.0], [7.0]]))
+    G = (
+        cv2.Rodrigues(np.array([0.1, -0.2, 0.05]))[0],
+        np.array([[3.0], [-4.0], [7.0]]),
+    )
     poses = [_compose(G, p) for p in poses]
     rig = {c: _compose(_rig(c), (G[0].T, -G[0].T @ G[1])) for c in cams}
-    pose_by_view = {(c, v): _compose(rig[c], poses[v]) for c in cams for v in range(n_views)}
+    pose_by_view = {
+        (c, v): _compose(rig[c], poses[v]) for c in cams for v in range(n_views)
+    }
     # cam3 misses the datum view: the factorisation must still reach it through cam2
     del pose_by_view[(3, 0)]
 
@@ -282,8 +291,12 @@ def test_joint_output_is_rigid_in_every_board_release_mode():
             for c in (2, 3):
                 Rc, tc = _compose(rig[c], board_v)
                 R, t = res.view_poses[(c, v)]
-                np.testing.assert_allclose(Rc, R, atol=1e-9, err_msg=f"{mode} cam{c} v{v}")
-                np.testing.assert_allclose(tc, t, atol=1e-6, err_msg=f"{mode} cam{c} v{v}")
+                np.testing.assert_allclose(
+                    Rc, R, atol=1e-9, err_msg=f"{mode} cam{c} v{v}"
+                )
+                np.testing.assert_allclose(
+                    tc, t, atol=1e-6, err_msg=f"{mode} cam{c} v{v}"
+                )
         # datum view pose IS the rig pose (world = datum board plane)
         for c in (1, 2, 3):
             np.testing.assert_allclose(res.view_poses[(c, 0)][0], rig[c][0], atol=1e-12)

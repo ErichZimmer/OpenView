@@ -215,7 +215,7 @@ def main():
     print(f"Camera: fx={FX}, tz={TZ:.4f} m, {px_per_mm:.1f} px/mm")
     print(f"FOV per camera: {fov_w_mm:.1f} x {fov_h_mm:.1f} mm")
     print(f"Distortion: k1={K1}")
-    print(f"Physical channel height: {H_phys*1000:.1f} mm")
+    print(f"Physical channel height: {H_phys * 1000:.1f} mm")
     print(f"Couette u_max={U_MAX} m/s, uy_const={UY_CONST} m/s, dt={DT} s")
     print(f"Cam1 rvec: {RVEC_CAM1}")
     print(f"Cam2 rvec: {RVEC_CAM2}")

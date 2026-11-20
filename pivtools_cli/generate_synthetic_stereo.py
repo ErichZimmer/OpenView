@@ -190,8 +190,8 @@ def main():
     print(f"\nStereo ground truth saved to {gt_path}")
     print(f"  R_stereo angle: {STEREO_ROTATION_DEG:.1f} deg")
     T_flat = T_stereo.flatten()
-    print(f"  T_stereo: [{T_flat[0]*1000:.1f}, {T_flat[1]:.1f}, {T_flat[2]:.1f}] mm")
-    print(f"  ||T||: {np.linalg.norm(T_stereo)*1000:.1f} mm")
+    print(f"  T_stereo: [{T_flat[0] * 1000:.1f}, {T_flat[1]:.1f}, {T_flat[2]:.1f}] mm")
+    print(f"  ||T||: {np.linalg.norm(T_stereo) * 1000:.1f} mm")
 
 
 if __name__ == "__main__":

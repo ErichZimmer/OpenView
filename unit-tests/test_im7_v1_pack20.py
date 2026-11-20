@@ -211,9 +211,11 @@ TRAILER_EDITS = {
         r"has a mask-offset table",
     ),
     "mask-compression-tag": (
-        lambda d: d[: LAYOUT["mask_starts"][2]]
-        + struct.pack("<i", 2)
-        + d[LAYOUT["mask_starts"][2] + 4 :],
+        lambda d: (
+            d[: LAYOUT["mask_starts"][2]]
+            + struct.pack("<i", 2)
+            + d[LAYOUT["mask_starts"][2] + 4 :]
+        ),
         r"gives mask 2 of 3 compression 2, not 20",
     ),
     "cut-inside-mask-1": (

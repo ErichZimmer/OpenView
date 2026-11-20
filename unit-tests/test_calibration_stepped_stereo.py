@@ -363,9 +363,9 @@ def test_stepped_stereo_same_side_recovery(same_side_scene, request):
     d1 = m1.project(wp + vel) - m1.project(wp)
     d2 = m2.project(wp + vel) - m2.project(wp)
     vr = reconstruct_3c_at_points(m1, m2, wp, d1, d2)
-    assert (
-        np.nanmax(np.abs(vr - vel)) < 0.02
-    ), f"3C recon err {np.nanmax(np.abs(vr - vel)):.4f}"
+    assert np.nanmax(np.abs(vr - vel)) < 0.02, (
+        f"3C recon err {np.nanmax(np.abs(vr - vel)):.4f}"
+    )
 
     if request.config.getoption("--make-figures", default=False):
         _make_figure(s, rec, vel, vr)

@@ -124,9 +124,7 @@ def test_non_paths_update_still_prunes_stale_state_on_disk(env):
     client, yaml_path = env
     _write_yaml(yaml_path, camera_count=1, camera_subfolders=["Cam1"])
 
-    r = client.post(
-        "/backend/update_config", json={"images": {"num_images": 50}}
-    )
+    r = client.post("/backend/update_config", json={"images": {"num_images": 50}})
     assert r.status_code == 200
 
     assert "paths" not in r.get_json()["updated"]

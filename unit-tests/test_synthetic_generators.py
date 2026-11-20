@@ -524,9 +524,9 @@ def test_dotboard_illumination_recovery(
             f"dotboard {illumination} {long_side}px view {i}: recovery {frac:.4f}, "
             f"max err {err:.3f} px"
         )
-        assert (
-            frac >= RAMP_RECOVERY
-        ), f"{illumination} {long_side}px view {i}: {frac:.3f}"
+        assert frac >= RAMP_RECOVERY, (
+            f"{illumination} {long_side}px view {i}: {frac:.3f}"
+        )
         if make_figures and i == 0:
             _save_overlay(
                 output_dir,
