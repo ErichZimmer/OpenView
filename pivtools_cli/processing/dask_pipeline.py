@@ -734,7 +734,6 @@ def correlate_and_save_batch(
         runs_to_save,
         vector_format,
     )
-    # saved_paths.append(path)
 
     return saved_paths
 

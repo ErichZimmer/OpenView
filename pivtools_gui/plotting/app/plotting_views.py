@@ -331,7 +331,7 @@ def plot_ensemble():
 
         var_arr = np.asarray(getattr(pr, raw_var))
         try:
-            mask_arr = np.asarray(getattr(pr, "b_mask")).astype(bool)
+            mask_arr = np.asarray(pr.b_mask).astype(bool)
         except Exception:
             mask_arr = np.zeros_like(var_arr, dtype=bool)
 
@@ -930,8 +930,10 @@ def check_available_data():
         if not base_path:
             try:
                 base_path = cfg.base_paths[base_idx]
-            except Exception:
-                raise ValueError("Invalid base_path and base_path_idx fallback failed")
+            except Exception as err:
+                raise ValueError(
+                    "Invalid base_path and base_path_idx fallback failed"
+                ) from err
 
         camera = camera_number(request.args.get("camera", default=1))
         base_path = Path(base_path)

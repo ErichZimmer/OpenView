@@ -188,7 +188,7 @@ def localvel(u, v, d):
     count_u = np.zeros(s, dtype=np.float64)
     count_v = np.zeros(s, dtype=np.float64)
 
-    for i_offset, j_offset in zip(di, dj):
+    for i_offset, j_offset in zip(di, dj, strict=True):
         # Get shifted arrays
         u_shifted = np.roll(u, (i_offset, j_offset), axis=(0, 1))
         v_shifted = np.roll(v, (i_offset, j_offset), axis=(0, 1))
@@ -251,7 +251,7 @@ def gamma1(x, y, u, v, d=10):
     sum_s = np.zeros(S, dtype=np.float64)
 
     # Iterate over neighbors
-    for k, (i_offset, j_offset) in enumerate(zip(di, dj)):
+    for k, (i_offset, j_offset) in enumerate(zip(di, dj, strict=True)):
         u_shifted = np.roll(U, (i_offset, j_offset), axis=(0, 1))
         v_shifted = np.roll(V, (i_offset, j_offset), axis=(0, 1))
 
@@ -302,7 +302,7 @@ def gamma2(x, y, u, v, d=10):
     # Accumulator
     sum_s = np.zeros(S, dtype=np.float64)
 
-    for k, (i_offset, j_offset) in enumerate(zip(di, dj)):
+    for k, (i_offset, j_offset) in enumerate(zip(di, dj, strict=True)):
         u_shifted = np.roll(U, (i_offset, j_offset), axis=(0, 1))
         v_shifted = np.roll(V, (i_offset, j_offset), axis=(0, 1))
 
@@ -1262,6 +1262,39 @@ class VectorStatisticsProcessor:
 
         config = PlotConfig()
 
+        def _save_run_field(
+            field_data,
+            var_name,
+            units,
+            *,
+            run_num,
+            cx,
+            cy,
+            mask,
+            cmap=None,
+            symmetric=True,
+        ):
+            if field_data is None:
+                return
+
+            save_base = self.figures_dir / f"Run_{run_num}_{var_name}"
+
+            settings = make_scalar_settings(
+                config,
+                variable=var_name,
+                run_label=run_num,
+                save_basepath=save_base,
+                variable_units=units,
+                coords_x=cx,
+                coords_y=cy,
+                cmap=cmap,
+                symmetric_around_zero=symmetric,
+            )
+
+            fig, ax, im = plot_scalar_field(field_data, mask, settings)
+            fig.savefig(f"{save_base}.png", dpi=300, bbox_inches="tight")
+            plt.close(fig)
+
         for idx, run_num in enumerate(valid_runs):
             res = mean_results.get(run_num)
             if not res:
@@ -1270,28 +1303,10 @@ class VectorStatisticsProcessor:
             cx = coords_x_list[idx] if idx < len(coords_x_list) else None
             cy = coords_y_list[idx] if idx < len(coords_y_list) else None
             mask = np.asarray(res["b_mask"]).astype(bool)
-
-            def save_field(field_data, var_name, units, cmap=None, symmetric=True):
-                if field_data is None:
-                    return
-
-                save_base = self.figures_dir / f"Run_{run_num}_{var_name}"
-
-                settings = make_scalar_settings(
-                    config,
-                    variable=var_name,
-                    run_label=run_num,
-                    save_basepath=save_base,
-                    variable_units=units,
-                    coords_x=cx,
-                    coords_y=cy,
-                    cmap=cmap,
-                    symmetric_around_zero=symmetric,
-                )
-
-                fig, ax, im = plot_scalar_field(field_data, mask, settings)
-                fig.savefig(f"{save_base}.png", dpi=300, bbox_inches="tight")
-                plt.close(fig)
+            # Bind this run's values as arguments; a closure here would capture the loop variables.
+            save_field = partial(
+                _save_run_field, run_num=run_num, cx=cx, cy=cy, mask=mask
+            )
 
             # Plot requested statistics
             if "mean_velocity" in active_stats:

@@ -384,8 +384,8 @@ def plot_scaling(csv_path: Path, out_dir: Path) -> list[Path]:
             rel = ((t1_std / t1) ** 2 + (tn_std / tn) ** 2) ** 0.5 if t1 and tn else 0.0
             speedup.append(s)
             speedup_err.append(s * rel)
-        eff = [s / w * 100 for s, w in zip(speedup, workers)]
-        eff_err = [se / w * 100 for se, w in zip(speedup_err, workers)]
+        eff = [s / w * 100 for s, w in zip(speedup, workers, strict=True)]
+        eff_err = [se / w * 100 for se, w in zip(speedup_err, workers, strict=True)]
 
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
         fig.suptitle(
@@ -520,7 +520,7 @@ def plot_throughput_ab(
     for g, lab, mk, col in ((ga, la, "o", "steelblue"), (gb, lb, "s", "tab:red")):
         pts = sorted(((v["total_cores"], v["pairs_per_s"]) for v in g.values()))
         if pts:
-            xs, ys = zip(*pts)
+            xs, ys = zip(*pts, strict=True)
             ax.plot(xs, ys, mk + "-", color=col, label=lab, ms=7)
     ax.set_xlabel("Total logical cores (workers × threads)")
     ax.set_ylabel("Pairs / second")

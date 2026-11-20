@@ -951,7 +951,7 @@ def _global_grid_spec_from_cfg(gg: dict) -> GlobalGridSpec:
             raise SystemExit(
                 f"detect-joint: calibration.global_grid.anchors[{i}] needs integer 'camera' "
                 f"and 'view' ({exc})"
-            )
+            ) from exc
         corr = []
         for j, c in enumerate(a.get("correspondences", []) or []):
             where = f"calibration.global_grid.anchors[{i}].correspondences[{j}]"
@@ -1001,7 +1001,7 @@ def _global_grid_spec_from_cfg(gg: dict) -> GlobalGridSpec:
             raise SystemExit(
                 f"detect-joint: calibration.global_grid.camera_extends[{k!r}] must be "
                 f"[dx, dy] numbers ({exc})"
-            )
+            ) from exc
     return GlobalGridSpec(
         datum_camera=int(gg.get("datum_camera", 1)),
         datum_view=int(gg.get("datum_view", 0)),
@@ -1245,7 +1245,7 @@ def detect_joint_command(args) -> "Path | List[Path]":
             f"to the global grid): {listed}"
         )
     if res.model_type == "polynomial":
-        for cam, p in zip(res.cameras, res.paths):
+        for cam, p in zip(res.cameras, res.paths, strict=True):
             print(
                 f"[calibration] joint-polynomial {board} cam{cam} "
                 f"rms={res.per_camera_rms[cam]:.4f}mm -> {p}"

@@ -155,7 +155,7 @@ def manage_cache_size():
         for k, v in raw_image_cache.items():
             if k in FRAME_1_KEYS:
                 continue  # Never evict frame 1
-            # v = (b64_a, b64_b, stats, last_access_time)
+            # Each entry is (b64_a, b64_b, stats, last_access_time).
             access_time = v[3] if len(v) > 3 else 0
             evictable.append((k, access_time))
 
@@ -163,7 +163,7 @@ def manage_cache_size():
 
         # Remove oldest until under limit
         to_remove = len(raw_image_cache) - RAW_CACHE_MAX_SIZE
-        for key, access_time in evictable[:to_remove]:
+        for key, _access_time in evictable[:to_remove]:
             del raw_image_cache[key]
 
 
@@ -281,11 +281,8 @@ def compute_batch_window(target_idx: int, batch_size: int, total: int):
 
 def recursive_update(d, u):
     for k, v in u.items():
-        # Remove debug print statements
-        # print(f"Updating key: {k}, value type: {type(v)}, current value: {d.get(k, 'MISSING')}")
         if isinstance(v, dict):
             if not isinstance(d.get(k), dict):
-                # print(f"Key '{k}' is missing or not a dict, initializing as dict.")
                 d[k] = {}
             recursive_update(d[k], v)
         else:
@@ -1253,7 +1250,7 @@ def validate_files():
     # Image size is NOT summarised here: cameras can differ in shape, and each
     # camera's [W, H] is already in details["camera_N"]["image_size"].
     top_detected_count = None
-    for cam_key, cam_result in results.items():
+    for _cam_key, cam_result in results.items():
         dc = cam_result.get("detected_count")
         if isinstance(dc, int):
             top_detected_count = dc
@@ -1977,7 +1974,8 @@ def get_ensemble_progress_from_logs(job_id: str, cfg) -> dict:
         total_batches = int(batch_matches[-1][1])
 
     # Calculate overall progress
-    # Progress = (completed_passes * 100 + current_pass_progress) / total_passes
+    # Each completed pass counts 100, the current pass adds its batch fraction,
+    # and the sum is divided by the total number of passes.
     pass_progress = (current_batch / total_batches) * 100 if total_batches > 0 else 0
     overall_progress = ((current_pass - 1) * 100 + pass_progress) / total_passes
 

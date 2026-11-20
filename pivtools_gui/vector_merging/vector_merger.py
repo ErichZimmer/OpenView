@@ -718,7 +718,7 @@ class VectorMerger:
                     continue
 
                 skip_run = False
-                for camera, data in run_data.items():
+                for _camera, data in run_data.items():
                     if data["x"].size == 0:
                         skip_run = True
                         break

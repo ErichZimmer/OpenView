@@ -29,14 +29,14 @@ from ..plot_maker import make_scalar_settings
 # Unit mapping for different PIV variables
 # Used to automatically select correct units when plotting
 VARIABLE_UNITS = {
-    # Velocities (m/s)
+    # Velocities, in m/s
     "ux": "m/s",
     "uy": "m/s",
     "uz": "m/s",
     "mean_ux": "m/s",
     "mean_uy": "m/s",
     "mean_uz": "m/s",
-    # Fluctuations (m/s)
+    # Fluctuations, in m/s
     "u_prime": "m/s",
     "v_prime": "m/s",
     "w_prime": "m/s",
@@ -56,7 +56,7 @@ VARIABLE_UNITS = {
     "vw_inst": "m^2/s^2",
     # Turbulent kinetic energy (m^2/s^2)
     "tke": "m^2/s^2",
-    # Vorticity & Divergence (1/s)
+    # Vorticity and divergence, in 1/s
     "vorticity": "1/s",
     "divergence": "1/s",
     # Gamma vortex criteria (dimensionless)
@@ -240,11 +240,11 @@ def extract_var_and_mask(pr: Any, var: str) -> Tuple[np.ndarray, np.ndarray]:
     """
     try:
         var_arr = np.asarray(getattr(pr, var))
-    except Exception:
-        raise ValueError(f"'{var}' not found in piv_result element")
+    except Exception as err:
+        raise ValueError(f"'{var}' not found in piv_result element") from err
 
     try:
-        mask_arr = np.asarray(getattr(pr, "b_mask")).astype(bool)
+        mask_arr = np.asarray(pr.b_mask).astype(bool)
     except Exception:
         mask_arr = np.zeros_like(var_arr, dtype=bool)
 
@@ -425,8 +425,10 @@ def parse_plot_params(req) -> Dict:
     if not base_path:
         try:
             base_path = cfg.base_paths[base_idx]
-        except Exception:
-            raise ValueError("Invalid base_path and base_path_idx fallback failed")
+        except Exception as err:
+            raise ValueError(
+                "Invalid base_path and base_path_idx fallback failed"
+            ) from err
 
     camera = camera_number(req.args.get("camera", default=1))
     merged_raw = req.args.get("merged", default="0", type=str)
@@ -550,7 +552,7 @@ def validate_and_get_paths(params: Dict) -> Dict[str, Path]:
         )
     except Exception as e:
         logger.error(f"Path resolution failed: {e}")
-        raise ValueError(f"Failed to resolve paths: {e}")
+        raise ValueError(f"Failed to resolve paths: {e}") from e
 
 
 def load_and_plot_data(
@@ -583,10 +585,12 @@ def load_and_plot_data(
     # Special handling for peak_mag (requires indexing via peak_choice)
     if var == "peak_mag":
         try:
-            peak_mag = np.asarray(getattr(pr, "peak_mag"))
-            peak_choice = np.asarray(getattr(pr, "peak_choice"))
-        except Exception:
-            raise ValueError("peak_mag or peak_choice not found in piv_result element")
+            peak_mag = np.asarray(pr.peak_mag)
+            peak_choice = np.asarray(pr.peak_choice)
+        except Exception as err:
+            raise ValueError(
+                "peak_mag or peak_choice not found in piv_result element"
+            ) from err
 
         if peak_mag.ndim == 3:
             if peak_mag.shape[0] == 1:
