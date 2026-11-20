@@ -359,8 +359,6 @@ def main():
         # Start Dask cluster
         logger.info("Starting Dask cluster...")
         cluster, client = start_cluster(
-            n_workers_per_node=config.dask_workers_per_node,
-            memory_limit=config.dask_memory_limit,
             config=config,
             worker_omp_threads=worker_omp_threads,
         )

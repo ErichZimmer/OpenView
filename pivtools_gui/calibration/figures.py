@@ -15,6 +15,7 @@ import v1. Public entry points are the two orchestrators ``write_mono_figures`` 
 
 from __future__ import annotations
 
+import itertools
 import math
 import traceback
 from pathlib import Path
@@ -43,8 +44,7 @@ if TYPE_CHECKING:  # annotations only — avoids a runtime import cycle
     from .record import WorldFrame
 
 # Camera colours, shared by the per-camera figures and the stereo / joint 3D scenes.
-# (>=8 so a joint rig with many cameras is not silently truncated by ``_camera_records``,
-# which zips models against this tuple.)
+# ``_camera_records`` cycles them, so a rig with more cameras reuses colours.
 CAM_COLORS = (
     "#1f77b4",
     "#d62728",
@@ -623,7 +623,9 @@ def _camera_records(models, labels, board_world):
     """Camera world centres + board-pointing optical axes (handles SIG reflection)."""
     centroid = np.asarray(board_world, np.float64).reshape(-1, 3).mean(0)
     recs = []
-    for m, lab, col in zip(models, labels, CAM_COLORS):
+    # More cameras than palette entries reuse colours rather than drop cameras.
+    colors = itertools.islice(itertools.cycle(CAM_COLORS), len(models))
+    for m, lab, col in zip(models, labels, colors, strict=True):
         R = np.asarray(m.R, np.float64)
         t = np.asarray(m.t, np.float64).reshape(3)
         pos = (-R.T @ t).ravel()

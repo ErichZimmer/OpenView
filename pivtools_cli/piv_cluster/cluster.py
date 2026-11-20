@@ -2,7 +2,7 @@ import logging
 import os
 import warnings
 from collections import defaultdict
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from dask.distributed import Client, LocalCluster
 from dask_jobqueue import SLURMCluster
@@ -149,17 +149,20 @@ def select_workers_per_node(client: Client, n_workers_per_node: int = 1) -> List
 
 
 def start_cluster(
-    n_workers_per_node: int = 1,
-    memory_limit: str = "auto",
-    config: Config = Config(),
-    worker_omp_threads: str = None,
+    config: Config,
+    worker_omp_threads: Optional[str] = None,
 ) -> tuple[LocalCluster, Client]:
     """
-    Start a local Dask cluster.
+    Start a local Dask cluster sized from ``config``.
+
+    Args:
+        config: The run's config. Worker count and memory limit come from its
+            ``dask_workers_per_node`` and ``dask_memory_limit`` (via make_cluster)
+        worker_omp_threads: OMP/BLAS thread count pinned in every worker, if given
 
     Returns:
+        cluster: The LocalCluster
         client: Dask Client
-        piv_workers: list of workers to use for PIV
     """
     # Suppress verbose Dask internal logging
     _suppress_dask_verbose_logging()
@@ -168,9 +171,7 @@ def start_cluster(
     client = None
 
     try:
-        cluster, client = make_cluster(
-            config=config  # n_workers_per_node=n_workers_per_node,
-        )
+        cluster, client = make_cluster(config=config)
         client.run(
             setup_worker_logging,
             log_level=getattr(logging, config.log_level, logging.INFO),

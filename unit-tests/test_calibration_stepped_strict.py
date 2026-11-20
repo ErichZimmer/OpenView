@@ -389,6 +389,32 @@ def test_restore_sequence_reports_a_missing_descriptor(client, scene, tmp_path):
     assert "sequence descriptor" in r.get_json()["error"]
 
 
+@pytest.mark.parametrize("damage", ["drop_camera", "short_camera"])
+def test_restore_sequence_refuses_detections_not_covering_a_camera(
+    client, scene, tmp_path, damage
+):
+    """A sidecar camera with missing or short detections used to show no poses."""
+    _detect(client, [1, 2])
+    sv._sequence_cache.clear()
+
+    def _damage(prev):
+        dets = {int(c): list(v) for c, v in prev.detections.items()}
+        if damage == "drop_camera":
+            del dets[2]
+        else:
+            dets[2] = dets[2][:-1]
+        return {"path_type": "stepped", "board_type": "stepped", "detections": dets}
+
+    update_inputs(_stereo_model_dir(tmp_path), _damage)
+
+    r = client.get(
+        "/calibration/stepped/restore_sequence",
+        query_string={"camera_pair": "1,2", "source_path_idx": 0},
+    )
+    assert r.status_code == 410
+    assert "camera 2" in r.get_json()["error"]
+
+
 def test_restore_sequence_unconfigured_source_is_an_error(client, monkeypatch):
     class _NoSource:
         calibration: dict = {}
