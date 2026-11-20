@@ -1330,7 +1330,7 @@ def detect_views():
         # in image order, so ``loaded`` still lines up with ``dets``. A 40-view
         # Detect Dots was ~30 s sequential on gF_Ramp.
         dets: list = _detect_parallel(board, params, imgs)
-        for frame, det in zip(loaded, dets):
+        for frame, det in zip(loaded, dets, strict=True):
             if det.success:
                 frames[str(frame)] = {
                     "image_points": det.image_points.tolist(),
@@ -2438,13 +2438,13 @@ def _global_chain(data):
     except (FileNotFoundError, ValueError, IndexError) as exc:
         raise _GlobalChainError(
             f"missing mono model — calibrate each camera first ({exc})"
-        )
+        ) from exc
     try:
         shifts = gc2.compute_camera_shifts(
             records, datum_camera, datum_pixel, datum_physical, overlap_pairs, z, tx, ty
         )
     except (ValueError, KeyError) as exc:
-        raise _GlobalChainError(str(exc))
+        raise _GlobalChainError(str(exc)) from exc
     return dirs, records, shifts, datum_physical
 
 
@@ -3357,7 +3357,7 @@ def _joint_spec(get, gg, board):
     except (
         SystemExit
     ) as exc:  # the CLI builder signals validation errors via SystemExit
-        raise ValueError(str(exc))
+        raise ValueError(str(exc)) from exc
 
 
 def _joint_origin_mm(board, gg) -> tuple:

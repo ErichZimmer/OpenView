@@ -436,7 +436,7 @@ def _resolve_view(
     if prior is not None:
         px, py = prior
         ranked = []
-        for orient, gidx, H, rms in scored:
+        for _orient, gidx, H, rms in scored:
             gx_dir, gy_dir = _axis_screen_dirs(H, gidx, spacing_mm)
             agree = float(np.dot(gx_dir, px) + np.dot(gy_dir, py))
             ranked.append((agree, rms, gidx, H))

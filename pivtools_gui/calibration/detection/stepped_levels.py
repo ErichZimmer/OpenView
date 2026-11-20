@@ -164,7 +164,9 @@ def run_single_level_detection(
         return None
 
     inlier_mask = inlier_mask.flatten().astype(bool)
-    validated = {k: grid_dict[k] for k, inl in zip(grid_keys, inlier_mask) if inl}
+    validated = {
+        k: grid_dict[k] for k, inl in zip(grid_keys, inlier_mask, strict=True) if inl
+    }
 
     if len(validated) < 9:
         return None

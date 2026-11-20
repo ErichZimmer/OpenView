@@ -1513,7 +1513,7 @@ def write_stepped_figures(
     )
 
     if images is not None:
-        for pose_idx, det in zip(used_pose_indices, used_detections):
+        for pose_idx, det in zip(used_pose_indices, used_detections, strict=True):
             # pose_levels labels level 'a's face per pose (position-aligned to the original
             # detections); pass it so the network is split peak(blue)/trough(red).
             level_a_face = (
