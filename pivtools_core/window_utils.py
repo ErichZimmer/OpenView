@@ -487,14 +487,14 @@ def apply_single_mode_padding(
     )
 
     if image.ndim == 2:
-        # (H, W)
+        # Image axes (H, W)
         pad_width = (
             (pad_top, pad_bottom),
             (pad_left, pad_right),
         )
 
     elif image.ndim == 3:
-        # (N, H, W)
+        # Image axes (N, H, W)
         pad_width = (
             (0, 0),
             (pad_top, pad_bottom),
@@ -502,7 +502,7 @@ def apply_single_mode_padding(
         )
 
     elif image.ndim == 4:
-        # (N, 2, H, W)
+        # Image axes (N, 2, H, W)
         pad_width = (
             (0, 0),  # batch (N)
             (0, 0),  # channel (2)

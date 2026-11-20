@@ -292,7 +292,7 @@ def process_pass_worker_accumulate(
             pass
 
     # Verify locality: check each result is on the worker we pinned it to
-    for fut, pinned_worker in zip(worker_futures, pinned_workers):
+    for fut, pinned_worker in zip(worker_futures, pinned_workers, strict=True):
         try:
             holders = client.who_has(fut)
             if holders:
@@ -789,9 +789,6 @@ def run_ensemble_piv(
 def main():
     """Main entry point for ensemble PIV processing."""
     start_time = time.time()
-
-    # Load configuration
-    # config = Config()
 
     # Validate configuration
     is_valid, error_msg, warnings = validate_config(config)

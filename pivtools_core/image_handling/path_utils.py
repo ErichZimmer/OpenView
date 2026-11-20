@@ -10,6 +10,7 @@ import io
 import logging
 import os
 import re
+from itertools import pairwise
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -435,9 +436,7 @@ def _suggest_pattern(
     ]
     if len(varying) > 1:
         varying = [
-            i
-            for i in varying
-            if all(int(a[i]) < int(b[i]) for a, b in zip(group[:-1], group[1:]))
+            i for i in varying if all(int(a[i]) < int(b[i]) for a, b in pairwise(group))
         ]
     elif not varying and len(first_runs) == 1:
         varying = [0]
