@@ -125,7 +125,7 @@ def extract_frame_record(mat_path: Path, pass_idx: int) -> FrameRecord:
 
     nan_reason = np.asarray(p.nan_reason)
     codes, counts = np.unique(nan_reason, return_counts=True)
-    reason_counts = {int(c): int(n) for c, n in zip(codes, counts)}
+    reason_counts = {int(c): int(n) for c, n in zip(codes, counts, strict=True)}
 
     peak_ratio: Optional[np.ndarray] = None
     ratio_raw = getattr(p, "peak_ratio", None)

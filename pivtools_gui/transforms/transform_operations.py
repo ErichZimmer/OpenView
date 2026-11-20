@@ -349,8 +349,10 @@ def parse_parametric_transform(transformation: str) -> Tuple[str, Optional[float
 
     try:
         factor = float(parts[1])
-    except (ValueError, IndexError):
-        raise ValueError(f"Invalid parameter for {base_name}: expected numeric factor")
+    except (ValueError, IndexError) as err:
+        raise ValueError(
+            f"Invalid parameter for {base_name}: expected numeric factor"
+        ) from err
 
     if factor == 0:
         raise ValueError(f"Scale factor cannot be zero for {base_name}")
@@ -463,49 +465,49 @@ def apply_transformation_to_piv_result(pr: Any, transformation: str) -> None:
     elif base_name == "swap_ux_uy":
         # Swap ux and uy velocity components
         if hasattr(pr, "ux") and hasattr(pr, "uy"):
-            ux = getattr(pr, "ux")
-            uy = getattr(pr, "uy")
-            setattr(pr, "ux", uy)
-            setattr(pr, "uy", ux)
+            ux = pr.ux
+            uy = pr.uy
+            pr.ux = uy
+            pr.uy = ux
         # Swap UU_stress (u'u') <-> VV_stress (v'v'); UV_stress (u'v') is symmetric
         if hasattr(pr, "UU_stress") and hasattr(pr, "VV_stress"):
-            uu = getattr(pr, "UU_stress")
-            vv = getattr(pr, "VV_stress")
-            setattr(pr, "UU_stress", vv)
-            setattr(pr, "VV_stress", uu)
+            uu = pr.UU_stress
+            vv = pr.VV_stress
+            pr.UU_stress = vv
+            pr.VV_stress = uu
 
     elif base_name == "invert_ux_uy":
         # Invert (negate) ux and uy velocity components
         if hasattr(pr, "ux"):
-            ux = np.asarray(getattr(pr, "ux"))
-            setattr(pr, "ux", -ux)
+            ux = np.asarray(pr.ux)
+            pr.ux = -ux
         if hasattr(pr, "uy"):
-            uy = np.asarray(getattr(pr, "uy"))
-            setattr(pr, "uy", -uy)
+            uy = np.asarray(pr.uy)
+            pr.uy = -uy
         # Stresses unchanged: variance(-u) = variance(u), and (-u')(-v') = u'v'
 
     elif base_name == "invert_ux":
         # Invert (negate) only ux velocity component
         if hasattr(pr, "ux"):
-            ux = np.asarray(getattr(pr, "ux"))
-            setattr(pr, "ux", -ux)
+            ux = np.asarray(pr.ux)
+            pr.ux = -ux
         # UV_stress changes sign: (-u')v' = -(u'v')
         if hasattr(pr, "UV_stress"):
-            uv = np.asarray(getattr(pr, "UV_stress"))
+            uv = np.asarray(pr.UV_stress)
             if uv.ndim >= 2 and uv.size > 0:
-                setattr(pr, "UV_stress", -uv)
+                pr.UV_stress = -uv
         # UU_stress, VV_stress unchanged (variance is sign-invariant)
 
     elif base_name == "invert_uy":
         # Invert (negate) only uy velocity component
         if hasattr(pr, "uy"):
-            uy = np.asarray(getattr(pr, "uy"))
-            setattr(pr, "uy", -uy)
+            uy = np.asarray(pr.uy)
+            pr.uy = -uy
         # UV_stress changes sign: u'(-v') = -(u'v')
         if hasattr(pr, "UV_stress"):
-            uv = np.asarray(getattr(pr, "UV_stress"))
+            uv = np.asarray(pr.UV_stress)
             if uv.ndim >= 2 and uv.size > 0:
-                setattr(pr, "UV_stress", -uv)
+                pr.UV_stress = -uv
         # UU_stress, VV_stress unchanged (variance is sign-invariant)
 
     elif base_name == "flip_lr":
