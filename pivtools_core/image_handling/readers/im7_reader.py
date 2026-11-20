@@ -176,7 +176,7 @@ def _parse_header(raw: bytes, source: str) -> IM7Header:
         raise ValueError(f"Header must be {HEADER_SIZE} bytes, got {len(raw)}")
 
     values = struct.unpack_from(HEADER_FORMAT, raw, 0)
-    dims = dict(zip(("size_x", "size_y", "size_z", "size_f"), values[4:8]))
+    dims = dict(zip(("size_x", "size_y", "size_z", "size_f"), values[4:8], strict=True))
     bad = {k: v for k, v in dims.items() if v < 1}
     if bad:
         raise ValueError(

@@ -368,9 +368,9 @@ def load_settings(source: PathLike) -> Dict[str, Any]:
     with _LOCK:
         try:
             st = path.stat()
-        except FileNotFoundError:
+        except FileNotFoundError as err:
             _CACHE.pop(path, None)
-            raise FileNotFoundError(_missing_message(source, path))
+            raise FileNotFoundError(_missing_message(source, path)) from err
         # mtime+size key: Windows last-write time ticks at ~15 ms, so an
         # external write inside one tick would otherwise be served stale.
         stamp = (st.st_mtime_ns, st.st_size)

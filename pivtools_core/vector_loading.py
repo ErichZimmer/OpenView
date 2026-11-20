@@ -445,7 +445,8 @@ def load_vectors_from_directory(
         )
     if missing_count:
         warnings.warn(
-            f"{missing_count} vector files missing in {data_dir} (loaded {len(existing_paths)})"
+            f"{missing_count} vector files missing in {data_dir} (loaded {len(existing_paths)})",
+            stacklevel=2,
         )
 
     # Convert runs (1-based) to zero-based indices for reading
@@ -463,11 +464,12 @@ def load_vectors_from_directory(
             # Debugging: print shape, dtype, and file info
             if first_arr.ndim != 4:
                 warnings.warn(
-                    f"[DEBUG] Unexpected array ndim={first_arr.ndim} in {p.name}"
+                    f"[DEBUG] Unexpected array ndim={first_arr.ndim} in {p.name}",
+                    stacklevel=2,
                 )
             break
         except Exception as e:
-            warnings.warn(f"Failed to read {p.name} during probing: {e}")
+            warnings.warn(f"Failed to read {p.name} during probing: {e}", stacklevel=2)
             raise
     if first_arr is None:
         raise FileNotFoundError(f"Could not read any valid vector files in {data_dir}")
@@ -516,7 +518,8 @@ def load_coords_from_directory(
             if len(zero_based) != len(runs):
                 missing = sorted(set(runs) - set([z + 1 for z in zero_based]))
                 warnings.warn(
-                    f"Skipping out-of-range run indices {missing} for coordinates"
+                    f"Skipping out-of-range run indices {missing} for coordinates",
+                    stacklevel=2,
                 )
         else:
             zero_based = list(range(coords.size))
@@ -528,7 +531,8 @@ def load_coords_from_directory(
     else:
         if runs and 1 not in runs:
             warnings.warn(
-                "Requested runs do not include run 1 present in coordinates; returning empty coords"
+                "Requested runs do not include run 1 present in coordinates; returning empty coords",
+                stacklevel=2,
             )
             return [], []
         x, y = _xy_from_struct(coords)

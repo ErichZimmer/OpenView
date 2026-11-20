@@ -412,7 +412,7 @@ def validate_window_sizes(config: Config) -> List[str]:
         return errors
 
     for pass_idx, (wh, pass_type) in enumerate(
-        zip(config.ensemble_window_sizes, ensemble_types)
+        zip(config.ensemble_window_sizes, ensemble_types, strict=True)
     ):
         if pass_type == "single":
             errors.extend(
