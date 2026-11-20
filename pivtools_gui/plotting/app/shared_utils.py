@@ -29,14 +29,14 @@ from ..plot_maker import make_scalar_settings
 # Unit mapping for different PIV variables
 # Used to automatically select correct units when plotting
 VARIABLE_UNITS = {
-    # Velocities (m/s)
+    # Velocities, in m/s
     "ux": "m/s",
     "uy": "m/s",
     "uz": "m/s",
     "mean_ux": "m/s",
     "mean_uy": "m/s",
     "mean_uz": "m/s",
-    # Fluctuations (m/s)
+    # Fluctuations, in m/s
     "u_prime": "m/s",
     "v_prime": "m/s",
     "w_prime": "m/s",
@@ -56,7 +56,7 @@ VARIABLE_UNITS = {
     "vw_inst": "m^2/s^2",
     # Turbulent kinetic energy (m^2/s^2)
     "tke": "m^2/s^2",
-    # Vorticity & Divergence (1/s)
+    # Vorticity and divergence, in 1/s
     "vorticity": "1/s",
     "divergence": "1/s",
     # Gamma vortex criteria (dimensionless)
@@ -103,10 +103,36 @@ _VAR_SUFFIXES = (
 )
 
 
+# Source prefixes the Results-tab variable dropdown puts on a name ("mean:uu"), as
+# parsed by parseVarType in gui/src/hooks/useVectorViewer.ts. An unprefixed name is
+# an instantaneous frame-file variable there too.
+VAR_SOURCES = ("inst", "inst_stat", "mean", "ens", "corrq")
+
+
+def split_var_source(var: str) -> Tuple[str, str]:
+    """
+    Split a dropdown variable name into (source, bare name).
+
+    ``"mean:uu"`` gives ``("mean", "uu")``; ``"ux"`` gives ``("inst", "ux")``.
+
+    Raises:
+        ValueError: The prefix is not one of :data:`VAR_SOURCES`.
+    """
+    if ":" not in var:
+        return "inst", var
+    source, name = var.split(":", 1)
+    if source not in VAR_SOURCES:
+        raise ValueError(
+            f"Unknown variable source '{source}' in '{var}'; "
+            f"expected one of {', '.join(VAR_SOURCES)}"
+        )
+    return source, name
+
+
 def normalize_var_name(var: str) -> str:
     """'ens:UU_stress_uncorrected' -> 'uu': strip source prefix, lowercase,
     strip ensemble suffixes until stable."""
-    v = var.split(":", 1)[-1].strip().lower()
+    v = split_var_source(var)[1].strip().lower()
     changed = True
     while changed:
         changed = False
@@ -224,31 +250,80 @@ def load_piv_result(mat_path: Path) -> Any:
     return mat["piv_result"]
 
 
-def extract_var_and_mask(pr: Any, var: str) -> Tuple[np.ndarray, np.ndarray]:
+# dtype kinds a stored b_mask may have: bool, or 0/1 as int, uint or float
+# (merging writes uint8, the PIV writer bool). NumPy casts strings and objects to
+# bool without complaint, so the kind is checked rather than relying on astype.
+B_MASK_DTYPE_KINDS = "biuf"
+
+
+def b_mask_for(pr: Any, var_arr: np.ndarray, mat_path: Path) -> np.ndarray:
+    """
+    The boolean ``b_mask`` of one result pass element, checked against its data.
+
+    Every writer of a plotted result emits a ``b_mask`` field on every pass element
+    (PIV ``save_results`` instantaneous and ensemble, calibration apply and stereo
+    reconstruction in ``calibration/runio.py``, ``vector_merger``, mean and
+    per-frame statistics). The field can still be empty on a populated pass: the
+    calibration apply writer (``runio._vectors_struct``) writes an empty array when
+    the source frame's pass had a zero-size ``b_mask``, and the ensemble writer
+    (``save_results._create_ensemble_struct_all_passes``) leaves its empty
+    placeholder when the pass result has no mask, which happens when a resumed run
+    reloads an earlier pass whose stored ``b_mask`` was empty. Fresh PIV always
+    computes a mask. A ``b_mask`` that is missing, not numeric/boolean, empty or not
+    the shape of the plotted field is a stale or broken file, to be regenerated.
+
+    Args:
+        pr: A ``piv_result`` or ``ensemble_result`` element (``loadmat`` with
+            ``struct_as_record=False``)
+        var_arr: The field being plotted from the same element
+        mat_path: The file the element came from, for the error message
+
+    Returns:
+        ``b_mask`` as a bool array of ``var_arr``'s shape
+
+    Raises:
+        ValueError: ``b_mask`` is missing, of a non-mask dtype, empty or of another
+            shape. The message names the file.
+    """
+    if not hasattr(pr, "b_mask"):
+        raise ValueError(f"{mat_path}: result element has no b_mask field")
+    stored = np.asarray(pr.b_mask)
+    if stored.dtype.kind not in B_MASK_DTYPE_KINDS:
+        raise ValueError(
+            f"{mat_path}: b_mask has dtype {stored.dtype}, not a boolean mask"
+        )
+    if stored.shape != var_arr.shape:
+        held = "an empty b_mask" if stored.size == 0 else f"b_mask shape {stored.shape}"
+        raise ValueError(
+            f"{mat_path}: the file holds {held}, which does not match the field's "
+            f"shape {var_arr.shape}; regenerate this result (re-run the step that "
+            "wrote it)"
+        )
+    return stored.astype(bool)
+
+
+def extract_var_and_mask(
+    pr: Any, var: str, mat_path: Path
+) -> Tuple[np.ndarray, np.ndarray]:
     """
     Extract variable and mask arrays from a piv_result element.
 
     Args:
         pr: piv_result struct with attributes
         var: Variable name to extract
+        mat_path: The file ``pr`` came from, for error messages
 
     Returns:
         Tuple of (variable_array, mask_array)
 
     Raises:
-        ValueError: If variable not found
+        ValueError: If the variable is not found, or ``b_mask`` is unusable
+            (see :func:`b_mask_for`)
     """
-    try:
-        var_arr = np.asarray(getattr(pr, var))
-    except Exception:
-        raise ValueError(f"'{var}' not found in piv_result element")
-
-    try:
-        mask_arr = np.asarray(getattr(pr, "b_mask")).astype(bool)
-    except Exception:
-        mask_arr = np.zeros_like(var_arr, dtype=bool)
-
-    return var_arr, mask_arr
+    if not hasattr(pr, var):
+        raise ValueError(f"{mat_path}: '{var}' not found in piv_result element")
+    var_arr = np.asarray(getattr(pr, var))
+    return var_arr, b_mask_for(pr, var_arr, mat_path)
 
 
 def create_and_return_plot(
@@ -425,8 +500,10 @@ def parse_plot_params(req) -> Dict:
     if not base_path:
         try:
             base_path = cfg.base_paths[base_idx]
-        except Exception:
-            raise ValueError("Invalid base_path and base_path_idx fallback failed")
+        except Exception as err:
+            raise ValueError(
+                "Invalid base_path and base_path_idx fallback failed"
+            ) from err
 
     camera = camera_number(req.args.get("camera", default=1))
     merged_raw = req.args.get("merged", default="0", type=str)
@@ -550,7 +627,7 @@ def validate_and_get_paths(params: Dict) -> Dict[str, Path]:
         )
     except Exception as e:
         logger.error(f"Path resolution failed: {e}")
-        raise ValueError(f"Failed to resolve paths: {e}")
+        raise ValueError(f"Failed to resolve paths: {e}") from e
 
 
 def load_and_plot_data(
@@ -583,10 +660,12 @@ def load_and_plot_data(
     # Special handling for peak_mag (requires indexing via peak_choice)
     if var == "peak_mag":
         try:
-            peak_mag = np.asarray(getattr(pr, "peak_mag"))
-            peak_choice = np.asarray(getattr(pr, "peak_choice"))
-        except Exception:
-            raise ValueError("peak_mag or peak_choice not found in piv_result element")
+            peak_mag = np.asarray(pr.peak_mag)
+            peak_choice = np.asarray(pr.peak_choice)
+        except Exception as err:
+            raise ValueError(
+                "peak_mag or peak_choice not found in piv_result element"
+            ) from err
 
         if peak_mag.ndim == 3:
             if peak_mag.shape[0] == 1:
@@ -599,7 +678,7 @@ def load_and_plot_data(
             var_arr = peak_mag
         mask_arr = np.zeros_like(var_arr, dtype=bool)
     else:
-        var_arr, mask_arr = extract_var_and_mask(pr, var)
+        var_arr, mask_arr = extract_var_and_mask(pr, var, mat_path)
 
     cx = cy = None
     if coords_path and coords_path.exists():

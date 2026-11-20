@@ -290,3 +290,75 @@ def test_all_vars_reads_inst_stats_from_its_lowest_frame(env):
 
     assert res.status_code == 200, res.get_data(as_text=True)
     assert "marker_var" in res.get_json()["instantaneous_stats"]
+
+
+def test_vars_of_an_unreadable_frame_is_an_error_naming_it(env):
+    """A dropdown must not go blank in silence: the error names the bad file."""
+    client, base = env
+    folder = _uncal_dir(base)
+    folder.mkdir(parents=True)
+    (folder / (VECTOR_FORMAT % 1)).write_bytes(b"not a mat file")
+
+    res = client.get(
+        f"/plot/check_vars?base_path={base}&camera=1&is_uncalibrated=1&frame=1"
+    )
+
+    assert res.status_code == 400
+    assert VECTOR_FORMAT % 1 in res.get_json()["error"]
+
+
+def test_all_vars_reports_an_unreadable_ensemble_file(env):
+    client, base = env
+    _write_frames(_uncal_dir(base), [1])
+    ens = _uncal_dir(base, type_name="ensemble")
+    ens.mkdir(parents=True)
+    (ens / "ensemble_result.mat").write_bytes(b"not a mat file")
+
+    res = client.get(
+        f"/plot/check_all_vars?base_path={base}&camera=1&is_uncalibrated=1&frame=1"
+    )
+
+    assert res.status_code == 400
+    assert "ensemble_result.mat" in res.get_json()["error"]
+
+
+def test_limits_fail_loudly_on_an_unreadable_sampled_file(env):
+    """Limits from fewer files than sampled used to pass in silence."""
+    client, base = env
+    folder = _write_frames(_uncal_dir(base), [1, 2])
+    # scipy 1.16 raises IndexError, not MatReadError, on this content.
+    (folder / (VECTOR_FORMAT % 3)).write_bytes(b"this is not a mat file")
+
+    res = _limits(client, base)
+
+    assert res.status_code == 400
+    assert VECTOR_FORMAT % 3 in res.get_json()["error"]
+
+
+def test_limits_fail_loudly_when_a_file_lacks_the_variable(env):
+    client, base = env
+    _write_frames(_uncal_dir(base), [1])
+
+    res = _limits(client, base, var="not_a_field")
+
+    assert res.status_code == 400
+    error = res.get_json()["error"]
+    assert VECTOR_FORMAT % 1 in error and "not_a_field" in error
+
+
+def test_limits_skip_an_unsaved_pass(env):
+    """Passes outside runs_to_save hold empty arrays; that is the normal layout."""
+    client, base = env
+    folder = _uncal_dir(base)
+    folder.mkdir(parents=True)
+    struct = np.empty((2,), dtype=[("ux", object), ("uy", object)])
+    struct["ux"][0] = struct["uy"][0] = np.empty((0, 0))
+    struct["ux"][1] = struct["uy"][1] = np.full((3, 4), 7.0)
+    scipy.io.savemat(str(folder / (VECTOR_FORMAT % 1)), {"piv_result": struct})
+
+    res = _limits(client, base)
+
+    assert res.status_code == 200, res.get_data(as_text=True)
+    payload = res.get_json()
+    assert payload["min"] == pytest.approx(7.0)
+    assert payload["files_checked"] == 1

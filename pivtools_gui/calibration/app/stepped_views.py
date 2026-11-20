@@ -243,7 +243,7 @@ def _summarize_sequence(entry: dict, per_frame_status: Optional[dict] = None):
     for camera in entry["cameras"]:
         size = image_size.get(camera, (0, 0))
         cam_poses = []
-        for fi, det in zip(frame_indices, detections[camera]):
+        for fi, det in zip(frame_indices, detections[camera], strict=True):
             s = {
                 "frame_idx": fi,
                 "is_datum": fi == datum_frame_idx,
@@ -486,6 +486,28 @@ def _entry_from_sidecar(data: dict, cameras: List[int]):
         sidecar=side.board_params,
     )
     dets = _dets_from_sidecar(side.detections)
+    for c in cameras:
+        n_saved = len(dets.get(int(c), []))
+        if n_saved != len(frame_indices):
+            # A sidecar from another camera set or a partial save is stale: refuse it
+            # rather than show that camera with no poses.
+            return (
+                None,
+                None,
+                None,
+                (
+                    jsonify(
+                        {
+                            "error": (
+                                f"saved detections for camera {int(c)} cover "
+                                f"{n_saved} of {len(frame_indices)} frames; "
+                                "re-run detect_sequence"
+                            )
+                        }
+                    ),
+                    410,
+                ),
+            )
     entry = {
         "cameras": [int(c) for c in cameras],
         "frame_indices": frame_indices,
@@ -494,7 +516,7 @@ def _entry_from_sidecar(data: dict, cameras: List[int]):
         "params": params,
         "image_format": seq.get("image_format"),
         "image_type": seq.get("image_type"),
-        "detections": {int(c): dets.get(int(c), []) for c in cameras},
+        "detections": {int(c): dets[int(c)] for c in cameras},
         "images": {int(c): [None] * len(frame_indices) for c in cameras},
         "image_size": {int(k): tuple(v) for k, v in side.image_size_by_cam.items()},
         # The detection set this entry IS: generate compares it against the sidecar.

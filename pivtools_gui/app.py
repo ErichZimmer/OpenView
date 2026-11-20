@@ -155,7 +155,7 @@ def manage_cache_size():
         for k, v in raw_image_cache.items():
             if k in FRAME_1_KEYS:
                 continue  # Never evict frame 1
-            # v = (b64_a, b64_b, stats, last_access_time)
+            # Each entry is (b64_a, b64_b, stats, last_access_time).
             access_time = v[3] if len(v) > 3 else 0
             evictable.append((k, access_time))
 
@@ -163,7 +163,7 @@ def manage_cache_size():
 
         # Remove oldest until under limit
         to_remove = len(raw_image_cache) - RAW_CACHE_MAX_SIZE
-        for key, access_time in evictable[:to_remove]:
+        for key, _access_time in evictable[:to_remove]:
             del raw_image_cache[key]
 
 
@@ -281,11 +281,8 @@ def compute_batch_window(target_idx: int, batch_size: int, total: int):
 
 def recursive_update(d, u):
     for k, v in u.items():
-        # Remove debug print statements
-        # print(f"Updating key: {k}, value type: {type(v)}, current value: {d.get(k, 'MISSING')}")
         if isinstance(v, dict):
             if not isinstance(d.get(k), dict):
-                # print(f"Key '{k}' is missing or not a dict, initializing as dict.")
                 d[k] = {}
             recursive_update(d[k], v)
         else:
@@ -326,7 +323,6 @@ def _preload_surrounding_frames(
         attempted = 0
         failures = []  # (pair, exception) per pair that would not read
         for idx in range(start_idx, end_idx + 1):
-
             # Use consistent cache key function
             cache_key_tuple = make_raw_cache_key(
                 source_path_idx, camera, idx, img_format, display_bounds, cfg
@@ -1254,7 +1250,7 @@ def validate_files():
     # Image size is NOT summarised here: cameras can differ in shape, and each
     # camera's [W, H] is already in details["camera_N"]["image_size"].
     top_detected_count = None
-    for cam_key, cam_result in results.items():
+    for _cam_key, cam_result in results.items():
         dc = cam_result.get("detected_count")
         if isinstance(dc, int):
             top_detected_count = dc
@@ -1951,10 +1947,13 @@ def get_ensemble_progress_from_logs(job_id: str, cfg) -> dict:
     log_file = Path(status.get("log_file", ""))
     log_text = ""
     if log_file.exists():
+        # Realistic cause: the log was removed between exists() and open(). Python
+        # opens with read sharing on Windows, so a running job's log stays readable.
+        # Progress then reads as not started, the same as before the log exists.
         try:
             with open(log_file, "r", encoding="utf-8", errors="replace") as f:
                 log_text = f.read()
-        except Exception:
+        except OSError:
             pass
 
     # Parse pass progress: "======== PASS 2/4 ========"
@@ -1978,7 +1977,8 @@ def get_ensemble_progress_from_logs(job_id: str, cfg) -> dict:
         total_batches = int(batch_matches[-1][1])
 
     # Calculate overall progress
-    # Progress = (completed_passes * 100 + current_pass_progress) / total_passes
+    # Each completed pass counts 100, the current pass adds its batch fraction,
+    # and the sum is divided by the total number of passes.
     pass_progress = (current_batch / total_batches) * 100 if total_batches > 0 else 0
     overall_progress = ((current_pass - 1) * 100 + pass_progress) / total_passes
 
@@ -2000,9 +2000,7 @@ def get_ensemble_progress_from_logs(job_id: str, cfg) -> dict:
 
 
 # Time-based cache for get_uncalibrated_count directory scans
-_uncalibrated_count_cache: dict = (
-    {}
-)  # key: (active_paths, type_name, camera) -> {"time": float, "result": dict}
+_uncalibrated_count_cache: dict = {}  # key: (active_paths, type_name, camera) -> {"time": float, "result": dict}
 _UNCALIBRATED_COUNT_CACHE_TTL = 1.0  # seconds
 
 # A result file that is still being written would be read truncated, so the

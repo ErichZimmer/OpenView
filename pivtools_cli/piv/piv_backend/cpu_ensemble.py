@@ -19,8 +19,6 @@ from contextlib import contextmanager
 from typing import List, Optional
 
 import cv2
-import matplotlib
-import matplotlib.pyplot as plt
 import numpy as np
 from scipy.ndimage import gaussian_filter
 
@@ -31,8 +29,6 @@ from pivtools_core.window_utils import (
     compute_window_centers,
     compute_window_centers_single_mode,
 )
-
-matplotlib.use("Agg")
 
 
 class EnsembleCorrelatorCPU(CrossCorrelator):
@@ -1418,8 +1414,10 @@ class EnsembleCorrelatorCPU(CrossCorrelator):
         correl_plane_out = np.ascontiguousarray(
             np.zeros(N * total_windows * corr_size[0] * corr_size[1], dtype=np.float32)
         )
-        (N, n_peaks, n_win_y, n_win_x)
 
+        # The six peak outputs share one 1-element buffer. The C library writes
+        # fPkLocX..fSxy only under ``if (!bEnsemble)``, and this call passes
+        # b_ensemble = True, so they are never written in ensemble mode.
         pk_loc_x = pk_loc_y = pk_height = sx = sy = sxy = np.ascontiguousarray(
             np.zeros((1,), dtype=np.float32)
         )
@@ -1525,12 +1523,12 @@ class EnsembleCorrelatorCPU(CrossCorrelator):
             # DEBUG: Log predictor edge values BEFORE padding
             logging.debug(
                 f"Pass {pass_idx}: PRE-PADDING predictor edges - "
-                f"top-left=({predictor_field[0,0,0]:.4f}, {predictor_field[0,0,1]:.4f}), "
-                f"top-right=({predictor_field[0,-1,0]:.4f}, {predictor_field[0,-1,1]:.4f}), "
-                f"bot-left=({predictor_field[-1,0,0]:.4f}, {predictor_field[-1,0,1]:.4f}), "
-                f"bot-right=({predictor_field[-1,-1,0]:.4f}, {predictor_field[-1,-1,1]:.4f}), "
-                f"center=({predictor_field[predictor_field.shape[0]//2, predictor_field.shape[1]//2, 0]:.4f}, "
-                f"{predictor_field[predictor_field.shape[0]//2, predictor_field.shape[1]//2, 1]:.4f})"
+                f"top-left=({predictor_field[0, 0, 0]:.4f}, {predictor_field[0, 0, 1]:.4f}), "
+                f"top-right=({predictor_field[0, -1, 0]:.4f}, {predictor_field[0, -1, 1]:.4f}), "
+                f"bot-left=({predictor_field[-1, 0, 0]:.4f}, {predictor_field[-1, 0, 1]:.4f}), "
+                f"bot-right=({predictor_field[-1, -1, 0]:.4f}, {predictor_field[-1, -1, 1]:.4f}), "
+                f"center=({predictor_field[predictor_field.shape[0] // 2, predictor_field.shape[1] // 2, 0]:.4f}, "
+                f"{predictor_field[predictor_field.shape[0] // 2, predictor_field.shape[1] // 2, 1]:.4f})"
             )
 
             predictor_field = np.pad(
@@ -1555,12 +1553,12 @@ class EnsembleCorrelatorCPU(CrossCorrelator):
             # DEBUG: Log predictor edge values AFTER padding
             logging.debug(
                 f"Pass {pass_idx}: POST-PADDING predictor edges - "
-                f"top-left=({predictor_field[0,0,0]:.4f}, {predictor_field[0,0,1]:.4f}), "
-                f"top-right=({predictor_field[0,-1,0]:.4f}, {predictor_field[0,-1,1]:.4f}), "
-                f"bot-left=({predictor_field[-1,0,0]:.4f}, {predictor_field[-1,0,1]:.4f}), "
-                f"bot-right=({predictor_field[-1,-1,0]:.4f}, {predictor_field[-1,-1,1]:.4f}), "
-                f"center=({predictor_field[predictor_field.shape[0]//2, predictor_field.shape[1]//2, 0]:.4f}, "
-                f"{predictor_field[predictor_field.shape[0]//2, predictor_field.shape[1]//2, 1]:.4f})"
+                f"top-left=({predictor_field[0, 0, 0]:.4f}, {predictor_field[0, 0, 1]:.4f}), "
+                f"top-right=({predictor_field[0, -1, 0]:.4f}, {predictor_field[0, -1, 1]:.4f}), "
+                f"bot-left=({predictor_field[-1, 0, 0]:.4f}, {predictor_field[-1, 0, 1]:.4f}), "
+                f"bot-right=({predictor_field[-1, -1, 0]:.4f}, {predictor_field[-1, -1, 1]:.4f}), "
+                f"center=({predictor_field[predictor_field.shape[0] // 2, predictor_field.shape[1] // 2, 0]:.4f}, "
+                f"{predictor_field[predictor_field.shape[0] // 2, predictor_field.shape[1] // 2, 1]:.4f})"
             )
 
             # --- Apply predictor boundary conditions ---
@@ -1607,12 +1605,12 @@ class EnsembleCorrelatorCPU(CrossCorrelator):
             logging.debug(
                 f"Pass {pass_idx}: POST-SMOOTH delta_ab_old edges - "
                 f"shape={self.delta_ab_old.shape}, "
-                f"top-left=({self.delta_ab_old[0,0,0]:.4f}, {self.delta_ab_old[0,0,1]:.4f}), "
-                f"top-right=({self.delta_ab_old[0,-1,0]:.4f}, {self.delta_ab_old[0,-1,1]:.4f}), "
-                f"bot-left=({self.delta_ab_old[-1,0,0]:.4f}, {self.delta_ab_old[-1,0,1]:.4f}), "
-                f"bot-right=({self.delta_ab_old[-1,-1,0]:.4f}, {self.delta_ab_old[-1,-1,1]:.4f}), "
-                f"center=({self.delta_ab_old[self.delta_ab_old.shape[0]//2, self.delta_ab_old.shape[1]//2, 0]:.4f}, "
-                f"{self.delta_ab_old[self.delta_ab_old.shape[0]//2, self.delta_ab_old.shape[1]//2, 1]:.4f}), "
+                f"top-left=({self.delta_ab_old[0, 0, 0]:.4f}, {self.delta_ab_old[0, 0, 1]:.4f}), "
+                f"top-right=({self.delta_ab_old[0, -1, 0]:.4f}, {self.delta_ab_old[0, -1, 1]:.4f}), "
+                f"bot-left=({self.delta_ab_old[-1, 0, 0]:.4f}, {self.delta_ab_old[-1, 0, 1]:.4f}), "
+                f"bot-right=({self.delta_ab_old[-1, -1, 0]:.4f}, {self.delta_ab_old[-1, -1, 1]:.4f}), "
+                f"center=({self.delta_ab_old[self.delta_ab_old.shape[0] // 2, self.delta_ab_old.shape[1] // 2, 0]:.4f}, "
+                f"{self.delta_ab_old[self.delta_ab_old.shape[0] // 2, self.delta_ab_old.shape[1] // 2, 1]:.4f}), "
                 f"sigma={self.sd[pass_idx]:.4f}, ksize={self.ksize_filt[pass_idx]}"
             )
 
@@ -1648,12 +1646,12 @@ class EnsembleCorrelatorCPU(CrossCorrelator):
             logging.debug(
                 f"Pass {pass_idx}: POST-REMAP delta_ab_pred - "
                 f"shape={delta_ab_pred.shape}, "
-                f"top-left=({delta_ab_pred[0,0,0]:.4f}, {delta_ab_pred[0,0,1]:.4f}), "
-                f"top-right=({delta_ab_pred[0,-1,0]:.4f}, {delta_ab_pred[0,-1,1]:.4f}), "
-                f"bot-left=({delta_ab_pred[-1,0,0]:.4f}, {delta_ab_pred[-1,0,1]:.4f}), "
-                f"bot-right=({delta_ab_pred[-1,-1,0]:.4f}, {delta_ab_pred[-1,-1,1]:.4f}), "
-                f"center=({delta_ab_pred[delta_ab_pred.shape[0]//2, delta_ab_pred.shape[1]//2, 0]:.4f}, "
-                f"{delta_ab_pred[delta_ab_pred.shape[0]//2, delta_ab_pred.shape[1]//2, 1]:.4f})"
+                f"top-left=({delta_ab_pred[0, 0, 0]:.4f}, {delta_ab_pred[0, 0, 1]:.4f}), "
+                f"top-right=({delta_ab_pred[0, -1, 0]:.4f}, {delta_ab_pred[0, -1, 1]:.4f}), "
+                f"bot-left=({delta_ab_pred[-1, 0, 0]:.4f}, {delta_ab_pred[-1, 0, 1]:.4f}), "
+                f"bot-right=({delta_ab_pred[-1, -1, 0]:.4f}, {delta_ab_pred[-1, -1, 1]:.4f}), "
+                f"center=({delta_ab_pred[delta_ab_pred.shape[0] // 2, delta_ab_pred.shape[1] // 2, 0]:.4f}, "
+                f"{delta_ab_pred[delta_ab_pred.shape[0] // 2, delta_ab_pred.shape[1] // 2, 1]:.4f})"
             )
 
         # Store window centres and interp mode for _fused_warp_batch
@@ -1679,44 +1677,3 @@ class EnsembleCorrelatorCPU(CrossCorrelator):
         self._fused_interp_mode = 0 if image_interp == "cubic" else 1
 
         return delta_ab_pred
-
-
-def plot_corr_planes(corr_avg_flat, n_win_y, n_win_x, win_h, win_w, pass_idx):
-    """
-    Visualize ensemble-averaged correlation planes for PIV in a grid
-    matching the window structure.
-
-    Parameters
-    ----------
-    corr_avg_flat : np.ndarray
-        Flattened correlation planes,
-        shape (n_win_y * n_win_x * win_h * win_w,)
-    n_win_y : int
-        Number of interrogation windows in y direction
-    n_win_x : int
-        Number of interrogation windows in x direction
-    win_h : int
-        Height of each correlation plane (pixels)
-    win_w : int
-        Width of each correlation plane (pixels)
-    pass_idx : int
-        Pass index for naming the output file
-    """
-    # Reshape into (n_win_y, n_win_x, win_h, win_w) using C order
-    corr_planes = corr_avg_flat.reshape((n_win_y, n_win_x, win_h, win_w), order="C")
-
-    fig, axes = plt.subplots(n_win_y, n_win_x, figsize=(3 * n_win_x, 3 * n_win_y))
-
-    for i in range(n_win_y):
-        for j in range(n_win_x):
-            ax = axes[i, j]
-            plane = corr_planes[i, j]
-            im = ax.imshow(plane, origin="lower", cmap="viridis")
-            ax.set_title(f"W{i},{j}")
-            ax.axis("off")
-            fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-
-    plt.tight_layout()
-    plt.savefig(f"corr{pass_idx}.png", dpi=150, bbox_inches="tight")
-    print(f"Saved: corr{pass_idx}.png")
-    plt.close()

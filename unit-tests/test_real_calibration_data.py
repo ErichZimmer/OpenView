@@ -139,9 +139,9 @@ def test_andre_stepped_detection_matches_davis_marks(
     print(f"\n[andre {project[-6:]} cam{camera}] {stats}")
     assert stats["n_shared"] / stats["n_davis"] >= ANDRE_MIN_SHARED_FRACTION, stats
     assert stats["median_px"] <= ANDRE_MAX_MEDIAN_PX, stats
-    assert (
-        stats["n_within_tol"] / stats["n_shared"] >= ANDRE_MIN_WITHIN_TOL_FRACTION
-    ), stats
+    assert stats["n_within_tol"] / stats["n_shared"] >= ANDRE_MIN_WITHIN_TOL_FRACTION, (
+        stats
+    )
 
 
 def _bailey_cases():

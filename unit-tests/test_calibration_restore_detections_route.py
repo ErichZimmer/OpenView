@@ -23,7 +23,6 @@ are exercised against one another rather than against a hand-built sidecar.
 from __future__ import annotations
 
 # ruff: noqa: F811  (the imported ``env`` pytest fixture is re-bound by every test's parameter)
-from test_calibration_detect_views_routes import env  # noqa: F401  (pytest fixture)
 from test_calibration_detect_views_routes import (  # noqa: E402  (sibling-test reuse, as elsewhere)
     FMT,
     N_VIEWS,
@@ -31,6 +30,7 @@ from test_calibration_detect_views_routes import (  # noqa: E402  (sibling-test 
     _FakeDetector,
     _post_views,
     _uneven_counts,
+    env,  # noqa: F401  (pytest fixture)
 )
 from test_calibration_sidecar_resolve import (  # noqa: E402
     _clicks_from_detection,

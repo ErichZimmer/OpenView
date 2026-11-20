@@ -307,7 +307,7 @@ class TestApplyTransformStress:
 
 
 # ===========================================================================
-# Tests: parse_parametric_transform
+# Tests for parse_parametric_transform
 # ===========================================================================
 
 
@@ -349,7 +349,7 @@ class TestParseParametricTransform:
 
 
 # ===========================================================================
-# Tests: validate_transformations
+# Tests for validate_transformations
 # ===========================================================================
 
 

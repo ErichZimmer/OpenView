@@ -29,7 +29,6 @@ import time
 import numpy as np
 import pytest
 from flask import Flask
-from test_calibration_detect_views_routes import env  # noqa: F401  (pytest fixture)
 from test_calibration_detect_views_routes import (  # noqa: E402  (sibling-test reuse)
     FMT,
     N_VIEWS,
@@ -40,6 +39,7 @@ from test_calibration_detect_views_routes import (  # noqa: E402  (sibling-test 
     _mono_key,
     _post_views,
     _tilt,
+    env,  # noqa: F401  (pytest fixture)
 )
 from test_calibration_sidecar_resolve import (  # noqa: E402
     SPACING_MM,

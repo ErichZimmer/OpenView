@@ -10,6 +10,7 @@ Contains endpoints for:
 
 import random
 from pathlib import Path
+from typing import List
 
 import numpy as np
 from flask import Blueprint, jsonify, request
@@ -19,7 +20,11 @@ from scipy.io import loadmat
 from pivtools_core.config import get_config
 from pivtools_core.coordinate_utils import extract_coordinates
 from pivtools_core.paths import get_data_paths, list_vector_files
-from pivtools_core.vector_loading import find_non_empty_run, get_plottable_vars
+from pivtools_core.vector_loading import (
+    find_non_empty_run,
+    get_plottable_vars,
+    load_result_mat,
+)
 from pivtools_gui.vector_statistics.correlation_quality import (
     load_timeseries_mat,
     plot_nan_reasons,
@@ -30,12 +35,14 @@ from ...utils import camera_number
 from ..plot_maker import make_scalar_settings
 from .shared_utils import (
     apply_wall_units,
+    b_mask_for,
     build_response_meta,
     create_and_return_plot,
     length_units_for,
     load_and_plot_data,
     load_piv_result,
     parse_plot_params,
+    split_var_source,
     units_for_var,
     validate_and_get_paths,
 )
@@ -74,11 +81,8 @@ def plot_vector():
         stats_dir = Path(paths["stats_dir"])
         vector_fmt = get_config().vector_format
 
-        # Strip variable prefix (inst:, mean:, inst_stat:) if present
-        # Frontend sends prefixed names like "inst:ux" but mat structs use raw names like "ux"
-        raw_var = params["var"]
-        if ":" in raw_var:
-            _, raw_var = raw_var.split(":", 1)
+        # The source comes from var_source; a dropdown prefix on var is dropped.
+        _, raw_var = split_var_source(params["var"])
 
         # Determine data source
         var_source = request.args.get("var_source", default="inst", type=str)
@@ -218,7 +222,9 @@ def plot_corr_quality():
             )
 
         paths = validate_and_get_paths(params)
-        ts_file = Path(paths["stats_dir"]) / "mean_stats" / "corr_quality_timeseries.mat"
+        ts_file = (
+            Path(paths["stats_dir"]) / "mean_stats" / "corr_quality_timeseries.mat"
+        )
         if not ts_file.exists():
             return (
                 jsonify(
@@ -266,11 +272,8 @@ def plot_ensemble():
         params = parse_plot_params(request)
         params["type_name"] = "ensemble"  # Override type
 
-        # Strip variable prefix (inst:, mean:, inst_stat:) if present
-        # Frontend sends prefixed names like "inst:ux" but ensemble structs use raw names like "ux"
-        raw_var = params["var"]
-        if ":" in raw_var:
-            _, raw_var = raw_var.split(":", 1)
+        # Ensemble structs use bare names; a dropdown prefix on var is dropped.
+        _, raw_var = split_var_source(params["var"])
 
         paths = validate_and_get_paths(params)
         data_dir = Path(paths["data_dir"])
@@ -293,19 +296,7 @@ def plot_ensemble():
                 404,
             )
 
-        mat = loadmat(str(ensemble_file), struct_as_record=False, squeeze_me=True)
-        if "ensemble_result" not in mat:
-            return (
-                jsonify(
-                    {
-                        "success": False,
-                        "error": "Variable 'ensemble_result' not found in mat",
-                    }
-                ),
-                400,
-            )
-
-        ensemble_result = mat["ensemble_result"]
+        ensemble_result = load_result_mat(ensemble_file, "ensemble_result")
 
         # Use centralized helper from vector_loading (same as instantaneous data)
         pr, effective_run = find_non_empty_run(
@@ -328,10 +319,7 @@ def plot_ensemble():
             )
 
         var_arr = np.asarray(getattr(pr, raw_var))
-        try:
-            mask_arr = np.asarray(getattr(pr, "b_mask")).astype(bool)
-        except Exception:
-            mask_arr = np.zeros_like(var_arr, dtype=bool)
+        mask_arr = b_mask_for(pr, var_arr, ensemble_file)
 
         cx = cy = None
         if coords_path and coords_path.exists():
@@ -418,79 +406,7 @@ def check_vars():
                 404,
             )
 
-        data_mat = loadmat(str(mat_path), struct_as_record=False, squeeze_me=True)
-        if "piv_result" not in data_mat:
-            return (
-                jsonify({"success": False, "error": "Variable 'piv_result' not found"}),
-                400,
-            )
-
-        piv_result = data_mat["piv_result"]
-        pr = None
-
-        if isinstance(piv_result, np.ndarray) and piv_result.dtype == object:
-            for el in piv_result:
-                try:
-                    for candidate in ("ux", "uy", "b_mask", "uu"):
-                        val = getattr(el, candidate, None)
-                        if val is not None and np.asarray(val).size > 0:
-                            pr = el
-                            break
-                    if pr:
-                        break
-                except Exception:
-                    continue
-            if not pr and piv_result.size > 0:
-                pr = piv_result.flat[0]
-        else:
-            pr = piv_result
-
-        # Get all available field names
-        all_vars = []
-        dt = getattr(pr, "dtype", None)
-        if dt and getattr(dt, "names", None):
-            all_vars = list(dt.names)
-        else:
-            try:
-                if hasattr(pr, "dtype") and getattr(pr.dtype, "names", None):
-                    all_vars = list(pr.dtype.names)
-                elif hasattr(pr, "dtype") and getattr(pr.dtype, "fields", None):
-                    f = pr.dtype.fields
-                    if isinstance(f, dict):
-                        all_vars = list(f.keys())
-            except Exception:
-                pass
-            if not all_vars:
-                try:
-                    attrs = [
-                        n
-                        for n in dir(pr)
-                        if not n.startswith("_") and not callable(getattr(pr, n, None))
-                    ]
-                    all_vars = attrs
-                except Exception:
-                    all_vars = []
-
-        # Filter to plottable 2D arrays
-        EXCLUDED_VARS = {"x", "y"}
-        plottable_vars = []
-        has_peak_choice = hasattr(pr, "peak_choice")
-
-        for var_name in all_vars:
-            if var_name in EXCLUDED_VARS:
-                continue
-            try:
-                val = getattr(pr, var_name, None)
-                if val is None:
-                    continue
-                arr = np.asarray(val)
-                if arr.ndim == 2:
-                    plottable_vars.append(var_name)
-                elif var_name == "peak_mag" and arr.ndim == 3 and has_peak_choice:
-                    plottable_vars.append(var_name)
-            except Exception:
-                continue
-
+        plottable_vars = get_plottable_vars(mat_path, include_peak_stack=True)
         return jsonify({"success": True, "vars": plottable_vars})
 
     except ValueError as e:
@@ -499,88 +415,6 @@ def check_vars():
     except Exception:
         logger.exception("check_vars: unexpected error")
         return jsonify({"success": False, "error": "Internal server error"}), 500
-
-
-def _extract_plottable_vars(mat_path: Path) -> list:
-    """Extract plottable 2D variable names from a .mat file."""
-    if not mat_path.exists():
-        return []
-
-    try:
-        data_mat = loadmat(str(mat_path), struct_as_record=False, squeeze_me=True)
-        if "piv_result" not in data_mat:
-            return []
-
-        piv_result = data_mat["piv_result"]
-        pr = None
-
-        # Handle multiple runs (array of structs)
-        if isinstance(piv_result, np.ndarray) and piv_result.dtype == object:
-            for el in piv_result:
-                try:
-                    for candidate in ("ux", "uy", "b_mask", "uu", "u_prime"):
-                        val = getattr(el, candidate, None)
-                        if val is not None and np.asarray(val).size > 0:
-                            pr = el
-                            break
-                    if pr:
-                        break
-                except Exception:
-                    continue
-            if not pr and piv_result.size > 0:
-                pr = piv_result.flat[0]
-        else:
-            pr = piv_result
-
-        if pr is None:
-            return []
-
-        # Get all field names
-        all_vars = []
-        dt = getattr(pr, "dtype", None)
-        if dt and getattr(dt, "names", None):
-            all_vars = list(dt.names)
-        else:
-            try:
-                if hasattr(pr, "dtype") and getattr(pr.dtype, "names", None):
-                    all_vars = list(pr.dtype.names)
-                elif hasattr(pr, "dtype") and getattr(pr.dtype, "fields", None):
-                    f = pr.dtype.fields
-                    if isinstance(f, dict):
-                        all_vars = list(f.keys())
-            except Exception:
-                pass
-            if not all_vars:
-                try:
-                    attrs = [
-                        n
-                        for n in dir(pr)
-                        if not n.startswith("_") and not callable(getattr(pr, n, None))
-                    ]
-                    all_vars = attrs
-                except Exception:
-                    all_vars = []
-
-        # Filter to plottable 2D arrays
-        EXCLUDED_VARS = {"x", "y"}
-        plottable_vars = []
-
-        for var_name in all_vars:
-            if var_name in EXCLUDED_VARS:
-                continue
-            try:
-                val = getattr(pr, var_name, None)
-                if val is None:
-                    continue
-                arr = np.asarray(val)
-                if arr.ndim == 2:
-                    plottable_vars.append(var_name)
-            except Exception:
-                continue
-
-        return plottable_vars
-    except Exception:
-        return []
 
 
 @vector_plot_bp.route("/check_all_vars", methods=["GET"])
@@ -659,24 +493,22 @@ def check_all_vars():
         if (mean_stats_dir / "corr_quality_timeseries.mat").exists():
             result["corr_quality"] = ["timeseries", "nan_reasons"]
 
-        # 4. Check ensemble_result.mat
-        try:
-            ens_paths = get_data_paths(
-                base_dir=params["base_path"],
-                num_frame_pairs=get_config().num_frame_pairs,
-                cam=params["camera"],
-                type_name="ensemble",
-                use_uncalibrated=params["use_uncalibrated"],
-                use_merged=params["use_merged"],
-                use_stereo=params.get("use_stereo", False),
-                stereo_camera_pair=params.get("stereo_camera_pair"),
-            )
-            ensemble_file = Path(ens_paths["data_dir"]) / "ensemble_result.mat"
-            result["ensemble"] = get_plottable_vars(
-                ensemble_file, var_name="ensemble_result"
-            )
-        except Exception as e:
-            logger.debug(f"check_all_vars: could not check ensemble vars: {e}")
+        # 4. Check ensemble_result.mat. Path resolution already passed for the same
+        # parameters above, and a file that exists but cannot be read is an error.
+        ens_paths = get_data_paths(
+            base_dir=params["base_path"],
+            num_frame_pairs=get_config().num_frame_pairs,
+            cam=params["camera"],
+            type_name="ensemble",
+            use_uncalibrated=params["use_uncalibrated"],
+            use_merged=params["use_merged"],
+            use_stereo=params.get("use_stereo", False),
+            stereo_camera_pair=params.get("stereo_camera_pair"),
+        )
+        ensemble_file = Path(ens_paths["data_dir"]) / "ensemble_result.mat"
+        result["ensemble"] = get_plottable_vars(
+            ensemble_file, var_name="ensemble_result"
+        )
 
         return jsonify({"success": True, **result})
 
@@ -688,28 +520,98 @@ def check_all_vars():
         return jsonify({"success": False, "error": "Internal server error"}), 500
 
 
+def _sampled_var_values(
+    mat_path: Path, var: str, struct_name: str = "piv_result"
+) -> List[np.ndarray]:
+    """Finite values of ``var`` in every pass element of one sampled result file.
+
+    Every pass element of a result struct shares one set of fields, so an element
+    without ``var`` means the file does not carry it. That, a file that cannot be
+    loaded, a file without ``struct_name`` and a non-numeric ``var`` raise
+    ``ValueError`` naming the file: colour limits silently drawn from fewer files
+    than sampled are a wrong answer.
+    """
+    result = load_result_mat(mat_path, struct_name)
+    elements = list(result.flat) if isinstance(result, np.ndarray) else [result]
+    arrays = []
+    for el in elements:
+        if var not in getattr(el, "_fieldnames", ()):
+            raise ValueError(f"{mat_path}: {struct_name} has no variable '{var}'")
+        arr = np.asarray(getattr(el, var)).ravel()
+        try:
+            arrays.append(arr[np.isfinite(arr)])
+        except TypeError as err:
+            raise ValueError(
+                f"{mat_path}: '{var}' is not numeric ({arr.dtype})"
+            ) from err
+    return arrays
+
+
+# Cap on the per-frame files sampled for a colour range, so a long run is not read
+# in full on every variable switch.
+LIMITS_SAMPLE_FILES = 50
+
+
 @vector_plot_bp.route("/check_limits", methods=["GET"])
 def check_limits():
-    """Sample .mat files to estimate min/max limits for a variable."""
+    """Estimate colour limits for one dropdown variable from the files it is drawn from.
+
+    ``var`` is the dropdown's prefixed name. Instantaneous (``inst``) and per-frame
+    statistics (``inst_stat``) variables sample up to :data:`LIMITS_SAMPLE_FILES`
+    of their per-frame files; mean statistics (``mean``) read ``mean_stats.mat`` and
+    ensemble (``ens``) variables ``ensemble_result.mat``. Correlation-quality
+    (``corrq``) figures are rendered server-side and have no colour range.
+    """
     try:
         params = parse_plot_params(request)
+        source, var = split_var_source(params["var"])
+        if source == "corrq":
+            raise ValueError(
+                f"'{params['var']}': correlation-quality (corrq) figures have no "
+                "colour range"
+            )
+        if source == "ens":
+            # Same override as plot_ensemble: the ensemble directory, not a frame one.
+            params["type_name"] = "ensemble"
         paths = validate_and_get_paths(params)
         data_dir = Path(paths["data_dir"])
+        stats_dir = Path(paths["stats_dir"])
 
-        cfg = get_config()
-        fmt = cfg.vector_format
-        all_mats = list_vector_files(data_dir, fmt, cfg.num_frame_pairs)
+        if source in ("inst", "inst_stat"):
+            struct_name = "piv_result"
+            frames_dir = (
+                data_dir if source == "inst" else stats_dir / "instantaneous_stats"
+            )
+            cfg = get_config()
+            all_mats = list_vector_files(
+                frames_dir, cfg.vector_format, cfg.num_frame_pairs
+            )
+            if not all_mats:
+                return (
+                    jsonify(
+                        {
+                            "success": False,
+                            "error": f"No .mat files found in {frames_dir}",
+                        }
+                    ),
+                    404,
+                )
+        else:
+            if source == "mean":
+                struct_name = "piv_result"
+                single = stats_dir / "mean_stats" / "mean_stats.mat"
+            else:
+                struct_name = "ensemble_result"
+                single = data_dir / "ensemble_result.mat"
+            if not single.exists():
+                return (
+                    jsonify({"success": False, "error": f"Not found: {single}"}),
+                    404,
+                )
+            all_mats = [single]
         files_total = len(all_mats)
 
-        if files_total == 0:
-            return (
-                jsonify(
-                    {"success": False, "error": f"No .mat files found in {data_dir}"}
-                ),
-                404,
-            )
-
-        sample_count = min(files_total, 50)
+        sample_count = min(files_total, LIMITS_SAMPLE_FILES)
         sampled = (
             random.sample(all_mats, sample_count)
             if files_total > sample_count
@@ -720,43 +622,20 @@ def check_limits():
         files_checked = 0
 
         for mat_path in sampled:
-            try:
-                mat = loadmat(str(mat_path), struct_as_record=False, squeeze_me=True)
-                if "piv_result" not in mat:
-                    continue
-                piv_result = mat["piv_result"]
-                vals = []
-                if isinstance(piv_result, np.ndarray):
-                    for el in piv_result:
-                        try:
-                            arr = np.asarray(getattr(el, params["var"])).ravel()
-                            arr = arr[np.isfinite(arr)]
-                            if arr.size > 0:
-                                vals.append(arr)
-                        except Exception:
-                            continue
-                else:
-                    try:
-                        arr = np.asarray(
-                            getattr(piv_result, params["var"], None)
-                        ).ravel()
-                        arr = arr[np.isfinite(arr)]
-                        if arr.size > 0:
-                            vals.append(arr)
-                    except Exception:
-                        pass
-                if vals:
-                    files_checked += 1
-                    all_values.extend(np.concatenate(vals))
-            except Exception:
-                continue
+            vals = _sampled_var_values(mat_path, var, struct_name)
+            # A pass outside runs_to_save holds an empty array, the normal layout
+            # written by save_results; it contributes no values and is skipped.
+            vals = [v for v in vals if v.size > 0]
+            if vals:
+                files_checked += 1
+                all_values.extend(np.concatenate(vals))
 
         if files_checked == 0 or not all_values:
             return (
                 jsonify(
                     {
                         "success": False,
-                        "error": f"No valid values found for var '{params['var']}'",
+                        "error": f"No valid values found for var '{var}'",
                     }
                 ),
                 404,
@@ -815,19 +694,7 @@ def check_runs():
                     404,
                 )
 
-            mat = loadmat(str(ensemble_file), struct_as_record=False, squeeze_me=True)
-            if "ensemble_result" not in mat:
-                return (
-                    jsonify(
-                        {
-                            "success": False,
-                            "error": "Variable 'ensemble_result' not found",
-                        }
-                    ),
-                    400,
-                )
-
-            ensemble_result = mat["ensemble_result"]
+            ensemble_result = load_result_mat(ensemble_file, "ensemble_result")
             runs = []
             # Use default var for run check (ux is typically available)
             check_var = "ux"
@@ -928,8 +795,10 @@ def check_available_data():
         if not base_path:
             try:
                 base_path = cfg.base_paths[base_idx]
-            except Exception:
-                raise ValueError("Invalid base_path and base_path_idx fallback failed")
+            except Exception as err:
+                raise ValueError(
+                    "Invalid base_path and base_path_idx fallback failed"
+                ) from err
 
         camera = camera_number(request.args.get("camera", default=1))
         base_path = Path(base_path)
@@ -1020,9 +889,7 @@ def check_available_data():
                     except Exception as e:
                         logger.debug(f"Error reading ensemble vars: {e}")
             else:
-                frame_files = list_vector_files(
-                    data_dir, vector_fmt, num_frame_pairs
-                )
+                frame_files = list_vector_files(data_dir, vector_fmt, num_frame_pairs)
 
                 if frame_files:
                     result["exists"] = True
@@ -1375,14 +1242,8 @@ def get_vector_at_position():
 
         # Handle ensemble-specific loading
         if var_source == "ens":
-            mat = loadmat(str(mat_path), struct_as_record=False, squeeze_me=True)
-            if "ensemble_result" not in mat:
-                raise ValueError("Variable 'ensemble_result' not found in mat file")
-            piv_result = mat["ensemble_result"]
-            # Strip variable prefix if present (e.g., "inst:ux" -> "ux")
-            var_name = params["var"]
-            if ":" in var_name:
-                _, var_name = var_name.split(":", 1)
+            piv_result = load_result_mat(mat_path, "ensemble_result")
+            _, var_name = split_var_source(params["var"])
         else:
             piv_result = load_piv_result(mat_path)
             var_name = params["var"]

@@ -113,7 +113,7 @@ def test_lz4_entry_decodes_exactly(tmp_path, clean_set_cache, decoder):
 #   0x81 12 88             nibbles +1 +2, high 8 = -8, low 8 ends  4661 4663 4655
 #   0x7f 02 1027 1127      two absolutes                        10000 10001
 #   05 FB 0A               int8 deltas +5 -5 +10                10006 10001 10011
-_IMX_TOKENS = bytes.fromhex("803412" "811288" "7f0210271127" "05fb0a")
+_IMX_TOKENS = bytes.fromhex("8034128112887f021027112705fb0a")
 _IMX_WORDS = [4660, 4661, 4663, 4655, 10000, 10001, 10006, 10001, 10011]
 
 

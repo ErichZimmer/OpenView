@@ -423,7 +423,7 @@ def _real_config(bg_method):
 
 class TestCombinedModeConfig:
     def test_enum_and_derived_properties(self):
-        # (method, base, window_mean_in_correlator, dc_zero)
+        # Columns: method, base, window-mean-in-correlator, dc_zero.
         table = [
             ("correlation", "correlation", False, False),
             ("image", "image", False, False),
@@ -610,14 +610,14 @@ class TestCombinedModeKernel:
         # Route 1: correlation+window_mean
         planes_raw = run_triple(triple_lib, imgs_a, imgs_b, 1, 0)
         planes_bg = run_triple(triple_lib, a_mean[None], b_mean[None], 1, 0)
-        route1 = [raw / n - bg for raw, bg in zip(planes_raw, planes_bg)]
+        route1 = [raw / n - bg for raw, bg in zip(planes_raw, planes_bg, strict=True)]
 
         # Route 2: image+window_mean
         a_centered = np.ascontiguousarray(imgs_a - a_mean, dtype=np.float32)
         b_centered = np.ascontiguousarray(imgs_b - b_mean, dtype=np.float32)
         route2 = [p / n for p in run_triple(triple_lib, a_centered, b_centered, 1, 0)]
 
-        for p1, p2 in zip(route1, route2):
+        for p1, p2 in zip(route1, route2, strict=True):
             rel = np.abs(p1 - p2).max() / np.abs(p2).max()
             assert rel < 1e-4
 
@@ -650,9 +650,7 @@ class TestCombinedModeKernel:
             raw = run_triple(triple_lib, imgs_a, imgs_b, mean_subtract, 0)[0] / n
             if not subtract_bg:
                 return raw
-            bg = run_triple(
-                triple_lib, a_mean[None], b_mean[None], mean_subtract, 0
-            )[0]
+            bg = run_triple(triple_lib, a_mean[None], b_mean[None], mean_subtract, 0)[0]
             return raw - bg
 
         r_window_mean = ab_residual(1, False)  # stationary structure survives

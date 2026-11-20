@@ -66,7 +66,7 @@ def save_piv_result_distributed(
 
     if len(piv_result.passes) == 0:
         logging.warning(
-            f"PIVResult has no passes for frame {frame_number}. " "Skipping save."
+            f"PIVResult has no passes for frame {frame_number}. Skipping save."
         )
         return str(filename)
 

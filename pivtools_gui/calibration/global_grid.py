@@ -436,7 +436,7 @@ def _resolve_view(
     if prior is not None:
         px, py = prior
         ranked = []
-        for orient, gidx, H, rms in scored:
+        for _orient, gidx, H, rms in scored:
             gx_dir, gy_dir = _axis_screen_dirs(H, gidx, spacing_mm)
             agree = float(np.dot(gx_dir, px) + np.dot(gy_dir, py))
             ranked.append((agree, rms, gidx, H))
@@ -954,9 +954,7 @@ def first_view_orientation_candidates(
         detections_by_cam, spec, spacing_mm, tol_px
     )
     if (camera, view) in resolved:
-        return (
-            []
-        )  # resolved unambiguously (single orientation, or a prior/hint settled it)
+        return []  # resolved unambiguously (single orientation, or a prior/hint settled it)
 
     try:
         det = _detection(detections_by_cam, camera, view)
@@ -980,9 +978,7 @@ def first_view_orientation_candidates(
             else:
                 ref_key = (int(c.same_as[0]), int(c.same_as[1]))
                 if ref_key not in resolved:
-                    return (
-                        []
-                    )  # reference not resolved — cannot offer a concrete footprint
+                    return []  # reference not resolved — cannot offer a concrete footprint
                 rdet = _detection(detections_by_cam, ref_key[0], ref_key[1])
                 ref_gate = SNAP_FRACTION * _local_spacing_px(rdet.image_points)
                 j = _snap(

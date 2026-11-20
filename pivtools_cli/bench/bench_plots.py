@@ -15,8 +15,9 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Optional
 
-from . import bench_common as bc
 import matplotlib
+
+from . import bench_common as bc
 
 matplotlib.use("Agg")  # headless: write files, never open a window
 import matplotlib.pyplot as plt  # noqa: E402
@@ -383,8 +384,8 @@ def plot_scaling(csv_path: Path, out_dir: Path) -> list[Path]:
             rel = ((t1_std / t1) ** 2 + (tn_std / tn) ** 2) ** 0.5 if t1 and tn else 0.0
             speedup.append(s)
             speedup_err.append(s * rel)
-        eff = [s / w * 100 for s, w in zip(speedup, workers)]
-        eff_err = [se / w * 100 for se, w in zip(speedup_err, workers)]
+        eff = [s / w * 100 for s, w in zip(speedup, workers, strict=True)]
+        eff_err = [se / w * 100 for se, w in zip(speedup_err, workers, strict=True)]
 
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
         fig.suptitle(
@@ -444,16 +445,18 @@ def plot_scaling(csv_path: Path, out_dir: Path) -> list[Path]:
         # efficiency as a line, both serif-styled.
         pairs_per_s = [v["pairs_per_s"] for _, v in data]
         base_pps = pairs_per_s[workers.index(1)]
-        with plt.rc_context({
-            "font.family": "serif",
-            "font.serif": ["CMU Serif", "Computer Modern Roman", "DejaVu Serif"],
-            "mathtext.fontset": "cm",
-            "axes.labelsize": 17,
-            "axes.titlesize": 18,
-            "legend.fontsize": 13,
-            "xtick.labelsize": 13,
-            "ytick.labelsize": 13,
-        }):
+        with plt.rc_context(
+            {
+                "font.family": "serif",
+                "font.serif": ["CMU Serif", "Computer Modern Roman", "DejaVu Serif"],
+                "mathtext.fontset": "cm",
+                "axes.labelsize": 17,
+                "axes.titlesize": 18,
+                "legend.fontsize": 13,
+                "xtick.labelsize": 13,
+                "ytick.labelsize": 13,
+            }
+        ):
             fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5.5))
             ax1.plot(
                 workers,
@@ -462,8 +465,15 @@ def plot_scaling(csv_path: Path, out_dir: Path) -> list[Path]:
                 color="black",
                 label="Ideal (linear)",
             )
-            ax1.plot(workers, pairs_per_s, "o-", color="tab:blue", ms=8, lw=2,
-                     label="Measured")
+            ax1.plot(
+                workers,
+                pairs_per_s,
+                "o-",
+                color="tab:blue",
+                ms=8,
+                lw=2,
+                label="Measured",
+            )
             ax1.set_xlabel("Workers")
             ax1.set_ylabel(r"Throughput (pairs s$^{-1}$)")
             ax1.set_xticks(workers)
@@ -471,8 +481,7 @@ def plot_scaling(csv_path: Path, out_dir: Path) -> list[Path]:
             ax1.grid(alpha=0.3, ls=":")
 
             ax2.axhline(100, color="black", ls="--", label="Ideal (100%)")
-            ax2.plot(workers, eff, "o-", color="tab:blue", ms=8, lw=2,
-                     label="Measured")
+            ax2.plot(workers, eff, "o-", color="tab:blue", ms=8, lw=2, label="Measured")
             ax2.set_xlabel("Workers")
             ax2.set_ylabel("Parallel efficiency (%)")
             ax2.set_xticks(workers)
@@ -511,7 +520,7 @@ def plot_throughput_ab(
     for g, lab, mk, col in ((ga, la, "o", "steelblue"), (gb, lb, "s", "tab:red")):
         pts = sorted(((v["total_cores"], v["pairs_per_s"]) for v in g.values()))
         if pts:
-            xs, ys = zip(*pts)
+            xs, ys = zip(*pts, strict=True)
             ax.plot(xs, ys, mk + "-", color=col, label=lab, ms=7)
     ax.set_xlabel("Total logical cores (workers × threads)")
     ax.set_ylabel("Pairs / second")
@@ -554,7 +563,7 @@ def plot_budget_ab(
 
     slots = (
         ["Read"]
-        + [f"Pass {p['pass_idx']+1}\n({p['window'][0]} px)" for p in pa]
+        + [f"Pass {p['pass_idx'] + 1}\n({p['window'][0]} px)" for p in pa]
         + ["Save"]
     )
     x = np.arange(len(slots))

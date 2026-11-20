@@ -53,7 +53,7 @@ def render_particles(
     radius = int(np.ceil(cutoff * sigma))
     two_sigma2 = 2.0 * sigma * sigma
 
-    for x, y, intensity in zip(x_pos, y_pos, intensities):
+    for x, y, intensity in zip(x_pos, y_pos, intensities, strict=True):
         # Bounding box clipped to image
         y0 = max(0, int(y) - radius)
         y1 = min(h, int(y) + radius + 1)
@@ -377,7 +377,7 @@ def generate_spatially_varying_rs_images(
         # Frame B: spatially varying displacement per particle
         new_x = np.empty_like(x_pos)
         new_y = np.empty_like(y_pos)
-        for i, (x, y) in enumerate(zip(x_pos, y_pos)):
+        for i, (x, y) in enumerate(zip(x_pos, y_pos, strict=True)):
             physical_y = (H - 1) - y
             frac = physical_y / (H - 1)
             local_scale = 1.0 + frac * (gradient_scale - 1.0)
@@ -516,7 +516,7 @@ if __name__ == "__main__":
         (64, 64), np.array([32.5]), np.array([32.5]), np.array([1.0]), sigma=0.85
     )
     print(f"  Peak value: {img.max():.4f} (expected ~1.0)")
-    print(f"  Sum: {img.sum():.4f} (expected ~{2*np.pi*0.85**2:.4f})")
+    print(f"  Sum: {img.sum():.4f} (expected ~{2 * np.pi * 0.85**2:.4f})")
 
     print("\nTesting generate_particle_image...")
     img = generate_particle_image((128, 128), 100, 2.0, seed=42)

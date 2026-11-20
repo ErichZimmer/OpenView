@@ -270,9 +270,9 @@ class TestMergeMasks:
         y_masked_min = Y[25, 0]
         y_masked_max = Y[34, 0]
         row_mask = (Ym[:, 0] >= y_masked_min) & (Ym[:, 0] <= y_masked_max)
-        assert np.all(
-            np.isnan(uxm[row_mask, :])
-        ), "Fully-masked rows should be NaN in merged output"
+        assert np.all(np.isnan(uxm[row_mask, :])), (
+            "Fully-masked rows should be NaN in merged output"
+        )
 
     def test_mask_at_boundary(self):
         """Mask at cam1 left edge (non-overlap) → NaN at edge, rest valid."""

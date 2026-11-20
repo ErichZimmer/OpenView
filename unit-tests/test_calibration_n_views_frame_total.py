@@ -14,8 +14,12 @@ from __future__ import annotations
 # ruff: noqa: F811  (the imported ``env`` pytest fixture is re-bound by every test's parameter)
 import pytest
 import test_calibration_detect_views_routes as DVR
-from test_calibration_detect_views_routes import env  # noqa: F401  (pytest fixture)
-from test_calibration_detect_views_routes import FMT, _FakeDetector, _tilt
+from test_calibration_detect_views_routes import (
+    FMT,
+    _FakeDetector,
+    _tilt,
+    env,  # noqa: F401  (pytest fixture)
+)
 from test_calibration_sidecar_resolve import _clicks_from_detection, _detection
 
 import pivtools_gui.calibration.app.views as V

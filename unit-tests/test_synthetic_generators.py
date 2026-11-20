@@ -73,7 +73,7 @@ def test_render_dots_centroid_is_subpixel_exact():
     radii = np.array([6.3, 9.7])
     img = render_dots(centres, radii, (140, 64)).astype(np.float64)
     yy, xx = np.mgrid[:64, :140]
-    for c, r in zip(centres, radii):
+    for c, r in zip(centres, radii, strict=True):
         m = (np.hypot(xx - c[0], yy - c[1]) < r + 3) * img
         cx, cy = (m * xx).sum() / m.sum(), (m * yy).sum() / m.sum()
         assert abs(cx - c[0]) < SUBPIXEL_TOL_PX and abs(cy - c[1]) < SUBPIXEL_TOL_PX
@@ -524,9 +524,9 @@ def test_dotboard_illumination_recovery(
             f"dotboard {illumination} {long_side}px view {i}: recovery {frac:.4f}, "
             f"max err {err:.3f} px"
         )
-        assert (
-            frac >= RAMP_RECOVERY
-        ), f"{illumination} {long_side}px view {i}: {frac:.3f}"
+        assert frac >= RAMP_RECOVERY, (
+            f"{illumination} {long_side}px view {i}: {frac:.3f}"
+        )
         if make_figures and i == 0:
             _save_overlay(
                 output_dir,

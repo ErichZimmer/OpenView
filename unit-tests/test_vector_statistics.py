@@ -67,7 +67,7 @@ def _write_mat_files(data_dir, ux_frames, uy_frames, coords_x, coords_y):
         piv_result[0]["b_mask"] = np.zeros_like(ux_frames[i], dtype=np.float64)
 
         scipy.io.savemat(
-            str(data_dir / f"B{i+1:05d}.mat"),
+            str(data_dir / f"B{i + 1:05d}.mat"),
             {"piv_result": piv_result},
         )
 
@@ -147,9 +147,9 @@ class TestGammaFunctions:
         cy, cx = G1.shape[0] // 2, G1.shape[1] // 2
         # Check center region (3x3)
         center = G1[cy - 1 : cy + 2, cx - 1 : cx + 2]
-        assert np.all(
-            np.abs(center) > 0.85
-        ), f"gamma1 at center should be ~1.0, got {center}"
+        assert np.all(np.abs(center) > 0.85), (
+            f"gamma1 at center should be ~1.0, got {center}"
+        )
 
     def test_solid_body_rotation_gamma2(self, rotation_field):
         """gamma2 ~ 1.0 at the center (removes convective velocity)."""
@@ -157,9 +157,9 @@ class TestGammaFunctions:
         G2 = gamma2(X, Y, u, v, d=8)
         cy, cx = G2.shape[0] // 2, G2.shape[1] // 2
         center = G2[cy - 1 : cy + 2, cx - 1 : cx + 2]
-        assert np.all(
-            np.abs(center) > 0.85
-        ), f"gamma2 at center should be ~1.0, got {center}"
+        assert np.all(np.abs(center) > 0.85), (
+            f"gamma2 at center should be ~1.0, got {center}"
+        )
 
     def test_gamma_away_from_vortex(self, rotation_field):
         """gamma1 ~ 0 far from the rotation center."""
@@ -173,9 +173,9 @@ class TestGammaFunctions:
         # Far from vortex center, gamma1 should be small
         # (not exactly 0 for solid body rotation everywhere, but smaller)
         center_val = abs(G1[ny // 2, nx // 2])
-        assert (
-            abs(corner_val) < center_val
-        ), f"Corner gamma1 ({corner_val:.3f}) should be < center ({center_val:.3f})"
+        assert abs(corner_val) < center_val, (
+            f"Corner gamma1 ({corner_val:.3f}) should be < center ({center_val:.3f})"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -462,7 +462,7 @@ class TestDiagnosticFigures:
         plt.colorbar(im4, ax=axes[1, 1])
 
         im5 = axes[1, 2].pcolormesh(X, Y, np.asarray(piv.tke))
-        axes[1, 2].set_title(f"TKE (expected {0.5*(sigma_u**2+sigma_v**2):.1f})")
+        axes[1, 2].set_title(f"TKE (expected {0.5 * (sigma_u**2 + sigma_v**2):.1f})")
         plt.colorbar(im5, ax=axes[1, 2])
 
         fig.tight_layout()
@@ -584,7 +584,7 @@ class TestCorrelationQualityCompute:
                 peak_mag[r, c] = np.nan
             ratio = np.full((2, 3), 3.0, dtype=np.float32)
             _write_quality_mat(
-                tmp_path / f"B{i+1:05d}.mat",
+                tmp_path / f"B{i + 1:05d}.mat",
                 peak_mag,
                 nan_mask,
                 b_mask,
@@ -620,7 +620,7 @@ class TestCorrelationQualityCompute:
         b_mask = np.zeros((2, 2), dtype=bool)
         for i in range(2):
             _write_quality_mat(
-                tmp_path / f"B{i+1:05d}.mat",
+                tmp_path / f"B{i + 1:05d}.mat",
                 np.full((2, 2), 0.5),
                 np.zeros((2, 2), dtype=bool),
                 b_mask,
@@ -656,9 +656,7 @@ class TestCorrelationQualityProcessor:
         base_dir = tmp_path
 
         # Calibrated data dir (ux/uy/b_mask only, as production writes it)
-        cal_dir = (
-            base_dir / "calibrated_piv" / str(n_frames) / "Cam1" / "instantaneous"
-        )
+        cal_dir = base_dir / "calibrated_piv" / str(n_frames) / "Cam1" / "instantaneous"
         coords_x, coords_y = _make_coords(shape)
         ux = np.ones((n_frames,) + shape)
         uy = np.ones((n_frames,) + shape)
@@ -679,7 +677,7 @@ class TestCorrelationQualityProcessor:
                 nan_reason[2, 1] = 1
                 peak_mag[2, 1] = np.nan
             _write_quality_mat(
-                uncal_dir / f"B{i+1:05d}.mat",
+                uncal_dir / f"B{i + 1:05d}.mat",
                 peak_mag,
                 nan_mask,
                 b_mask,
@@ -781,11 +779,7 @@ class TestUncalibratedDiagnosticsTarget:
         a b_mask-aware reduction from a naive one.
         """
         uncal_dir = (
-            base_dir
-            / "uncalibrated_piv"
-            / str(n_frames)
-            / "Cam1"
-            / "instantaneous"
+            base_dir / "uncalibrated_piv" / str(n_frames) / "Cam1" / "instantaneous"
         )
         uncal_dir.mkdir(parents=True, exist_ok=True)
 
@@ -813,7 +807,7 @@ class TestUncalibratedDiagnosticsTarget:
                         "peak_ratio": np.full(shape, 2.0, dtype=np.float32),
                     }
                 )
-            _write_quality_mat_passes(uncal_dir / f"B{i+1:05d}.mat", passes)
+            _write_quality_mat_passes(uncal_dir / f"B{i + 1:05d}.mat", passes)
 
         _write_coords(uncal_dir, shape, n_passes=n_passes)
         return uncal_dir
@@ -933,9 +927,9 @@ class TestUncalibratedDiagnosticsTarget:
                 "CorrQuality_Timeseries",
                 "CorrQuality_NanReasons",
             ):
-                assert (
-                    proc.figures_dir / f"Run_{run}_{name}.png"
-                ).exists(), f"missing Run_{run}_{name}.png"
+                assert (proc.figures_dir / f"Run_{run}_{name}.png").exists(), (
+                    f"missing Run_{run}_{name}.png"
+                )
 
     def test_unknown_statistic_name_warns(self, tmp_path, caplog):
         """A stale config key must be named, not silently ignored."""

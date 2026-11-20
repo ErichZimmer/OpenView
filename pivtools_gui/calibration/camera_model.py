@@ -617,7 +617,7 @@ def per_view_rms(
 ) -> List[float]:
     """RMS reprojection error (px) for each view."""
     out: List[float] = []
-    for o, i, r, t in zip(object_points, image_points, rvecs, tvecs):
+    for o, i, r, t in zip(object_points, image_points, rvecs, tvecs, strict=True):
         out.append(reprojection_rms(o, i, K, dist, r, t))
     return out
 

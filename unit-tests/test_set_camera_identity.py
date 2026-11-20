@@ -247,7 +247,7 @@ def test_oracle_comparison_fails_when_frames_are_bound_wrongly(clean_set_cache):
 
 
 # ---------------------------------------------------------------------------
-# Binding and merging (StreamSet.xml, not N)
+# Binding and merging, via StreamSet.xml rather than N
 # ---------------------------------------------------------------------------
 
 

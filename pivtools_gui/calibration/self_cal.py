@@ -457,8 +457,8 @@ def baked_block(
         "last_fitted_tilt_x": float(result.tilt_x),
         "last_fitted_tilt_y": float(result.tilt_y),
     }
-    block.update({k: float(v) for k, v in zip(_CUM_RVEC_KEYS, rvec_tot)})
-    block.update({k: float(v) for k, v in zip(_CUM_T_KEYS, t_tot)})
+    block.update({k: float(v) for k, v in zip(_CUM_RVEC_KEYS, rvec_tot, strict=True)})
+    block.update({k: float(v) for k, v in zip(_CUM_T_KEYS, t_tot, strict=True)})
     block.update(
         {
             "converged": int(bool(result.converged)),

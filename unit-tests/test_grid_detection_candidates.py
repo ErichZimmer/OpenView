@@ -34,8 +34,12 @@ import pytest
 from scipy.spatial import cKDTree
 
 # ruff: noqa: F811  (the imported ``env`` pytest fixture is re-bound by the test parameter)
-from test_calibration_detect_views_routes import env  # noqa: F401  (pytest fixture)
-from test_calibration_detect_views_routes import FMT, N_VIEWS, _post_views
+from test_calibration_detect_views_routes import (
+    FMT,
+    N_VIEWS,
+    _post_views,
+    env,  # noqa: F401  (pytest fixture)
+)
 
 from pivtools_cli.generate_synthetic_dotboard import generate
 from pivtools_cli.synthetic_calibration_common import render_dots

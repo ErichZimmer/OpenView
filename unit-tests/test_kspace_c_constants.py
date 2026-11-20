@@ -19,9 +19,7 @@ import pytest
 
 import pivtools_cli.piv.piv_backend.kspace_lm_fitting as klm
 
-C_SOURCE = (
-    Path(__file__).parent.parent / "pivtools_cli" / "lib" / "kspace_lm_fit.c"
-)
+C_SOURCE = Path(__file__).parent.parent / "pivtools_cli" / "lib" / "kspace_lm_fit.c"
 
 # C #define -> the Python value it must equal.
 NAME_MAPPED = {

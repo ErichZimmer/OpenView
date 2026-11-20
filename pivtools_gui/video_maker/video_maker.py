@@ -346,7 +346,6 @@ def _select_variable_from_arrs(
                     return arr, (b_mask if b_mask is not None else None)
 
             # fallback: flatten first item (for non-3D/4D or invalid var_idx)
-            # logger.debug(f"Fallback: arrs[0].shape={arrs[0].shape}")
             arr = arrs[0]
             if arr.ndim != 2:
                 raise ValueError(
@@ -645,12 +644,12 @@ class FFmpegVideoWriter:
             raise RuntimeError("ffmpeg stdin is not available")
         try:
             stdin.write(rgb_frame_uint8.tobytes())
-        except BrokenPipeError:
+        except BrokenPipeError as err:
             _, stderr = self.proc.communicate()
             if stderr:
                 msg = stderr.decode(errors="replace").strip()
                 print(f"ffmpeg stderr: {msg}")
-            raise RuntimeError("ffmpeg process has exited (broken pipe)")
+            raise RuntimeError("ffmpeg process has exited (broken pipe)") from err
 
     def release(self):
         stdin = self.proc.stdin
@@ -805,13 +804,13 @@ def make_video_from_scalar(
             or "No valid runs" in str(e)
             or "Run not found" in str(e)
         ):
-            raise ValueError(f"Run not found: {e}")
+            raise ValueError(f"Run not found: {e}") from e
         raise
     except Exception as e:
         logger.error(f"Failed to validate run_index {run_index} in {files[0]}: {e}")
         raise ValueError(
             f"Run not found: unable to load data with run_index {run_index}"
-        )
+        ) from e
 
     # Use effective_run_index for all subsequent operations
     run_index = effective_run_index

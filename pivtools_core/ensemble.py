@@ -42,7 +42,7 @@ from pivtools_cli.piv.save_results import (
     save_ensemble_coordinates_from_config_distributed,
     save_ensemble_result_distributed,
 )
-from pivtools_cli.piv_cluster.cluster import start_cluster
+from pivtools_cli.piv_cluster.cluster import shutdown_cluster, start_cluster
 from pivtools_cli.processing.dask_pipeline import (
     correlate_worker_batches,
     create_filter_pipeline,
@@ -250,8 +250,10 @@ def process_pass_worker_accumulate(
                 if pct > last_pct[0]:
                     logger.info(f"  Pass {pass_idx + 1} correlation: {pct}%")
                     last_pct[0] = pct
+            # Diagnostics only: the progress line must never kill the run, and the
+            # next tick retries. Logged so a persistent failure is diagnosable.
             except Exception:
-                pass
+                logger.debug("Progress poll failed", exc_info=True)
             stop_progress.wait(3)
 
     progress_thread = threading.Thread(target=poll_progress, daemon=True)
@@ -266,8 +268,9 @@ def process_pass_worker_accumulate(
                 "in": metrics.get("transfer_incoming_bytes", 0),
                 "out": metrics.get("transfer_outgoing_bytes", 0),
             }
+    # Diagnostics only: an empty baseline just skips the transfer report below.
     except Exception:
-        pass  # Non-critical diagnostics
+        logger.debug("Pre-pass transfer counters unavailable", exc_info=True)
 
     # Wait for all workers (check errors without pulling data to client)
     completed_count = 0
@@ -286,13 +289,14 @@ def process_pass_worker_accumulate(
     stop_progress.set()
     progress_thread.join(timeout=5)
     for v in progress_vars:
+        # Best-effort cleanup: the cluster teardown reclaims a leftover Variable.
         try:
             v.delete()
         except Exception:
-            pass
+            logger.debug("Progress Variable cleanup failed", exc_info=True)
 
     # Verify locality: check each result is on the worker we pinned it to
-    for fut, pinned_worker in zip(worker_futures, pinned_workers):
+    for fut, pinned_worker in zip(worker_futures, pinned_workers, strict=True):
         try:
             holders = client.who_has(fut)
             if holders:
@@ -303,8 +307,9 @@ def process_pass_worker_accumulate(
                     f"held_on={[h.split('/')[-1] for h in held_on]} "
                     f"{'OK' if is_local else 'MOVED'}"
                 )
+        # Diagnostics only: the debug line above is the whole purpose of the block.
         except Exception:
-            pass
+            logger.debug("Locality check failed", exc_info=True)
 
     # Tree reduction of per-worker results
     futures = list(worker_futures)
@@ -363,8 +368,9 @@ def process_pass_worker_accumulate(
             f"  Transfer during pass: in={total_in / 1e6:.1f} MB, "
             f"out={total_out / 1e6:.1f} MB"
         )
+    # Diagnostics only: a missing counter skips the transfer report.
     except Exception:
-        pass
+        logger.debug("Transfer report failed", exc_info=True)
 
     return final
 
@@ -406,10 +412,12 @@ def signal_handler(signum, frame):
         if _client is not None:
             logger.info("Cancelling pending futures...")
             # Cancel all pending futures to stop work immediately
+            # Shutdown must continue even if the cancel fails (no futures, already
+            # cancelled, scheduler gone), so the failure is only logged.
             try:
                 _client.cancel(_client.futures, force=True)
             except Exception:
-                pass  # May fail if no futures or already cancelled
+                logger.debug("Cancelling pending futures failed", exc_info=True)
 
             logger.info("Closing Dask client...")
             _client.close(timeout=5)
@@ -575,7 +583,7 @@ def run_ensemble_piv(
             )
 
         logger.info(
-            f"Resuming from pass {resume_from_pass} (loading passes 1-{resume_from_pass-1})..."
+            f"Resuming from pass {resume_from_pass} (loading passes 1-{resume_from_pass - 1})..."
         )
 
         from pivtools_cli.piv.save_results import load_ensemble_result
@@ -790,9 +798,6 @@ def main():
     """Main entry point for ensemble PIV processing."""
     start_time = time.time()
 
-    # Load configuration
-    # config = Config()
-
     # Validate configuration
     is_valid, error_msg, warnings = validate_config(config)
     log_validation_result(is_valid, error_msg, warnings, config)
@@ -948,48 +953,7 @@ def main():
     # after the cluster is shut down, so the process exits non-zero with the
     # message (the CLI wrapper prints it; a direct script run shows the traceback).
     finally:
-        # Clean shutdown - suppress noisy distributed logs during teardown
-        import io as _io
-        import logging as _logging
-        import sys as _sys
-
-        for name in [
-            "distributed.worker",
-            "distributed.scheduler",
-            "distributed.nanny",
-            "distributed.core",
-            "distributed.comm",
-            "distributed.comm.tcp",
-            "distributed.batched",
-            "tornado.application",
-            "tornado.general",
-        ]:
-            _logging.getLogger(name).setLevel(_logging.CRITICAL)
-
-        # Suppress stderr during cluster shutdown to hide Tornado tracebacks
-        _old_stderr = _sys.stderr
-        _sys.stderr = _io.StringIO()
-
-        try:
-            if _client is not None:
-                _client.close(timeout=5)
-        except Exception:
-            pass  # Suppress errors during shutdown
-
-        # Small delay to let workers finish cleanly
-        time.sleep(0.5)
-
-        try:
-            if _cluster is not None:
-                _cluster.close(timeout=5)
-        except Exception:
-            pass  # Suppress errors during shutdown
-
-        # Wait a bit more for async cleanup to complete
-        time.sleep(0.2)
-
-        # Restore stderr
-        _sys.stderr = _old_stderr
+        shutdown_cluster(_client, _cluster)
 
         end_time = time.time()
         elapsed = end_time - start_time

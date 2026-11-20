@@ -42,6 +42,7 @@ def results_dir() -> Path:
     invoking working directory (never inside the installed package)."""
     return Path.cwd() / "bench_results"
 
+
 # The one FFTW symbol guaranteed present in any FFTW build and absent from the
 # codelet build. Verified against both worktrees' libbulkxcorr2d.so.
 _FFTW_PROBE_SYMBOL = "fftwf_execute"

@@ -81,7 +81,7 @@ def numpy_to_png_base64(arr: np.ndarray, compress_level: int = 1) -> str:
         compress_level: PNG compression level (0-9). Lower = faster, higher = smaller.
                        Default is 1 for speed. Use 6 for better compression.
     """
-    return numpy_to_base64(arr, format="png", compress_level=compress_level)
+    return numpy_to_base64(arr, img_format="png", compress_level=compress_level)
 
 
 def get_display_contrast_stats(arr: np.ndarray) -> dict:
@@ -323,7 +323,7 @@ def encode_display_frame(
     q *= _DISPLAY_LEVELS / (enc_hi - enc_lo)
     np.clip(q, 0, _DISPLAY_LEVELS, out=q)
     np.rint(q, out=q)
-    b64 = numpy_to_base64(q.astype(np.uint8), format=img_format)
+    b64 = numpy_to_base64(q.astype(np.uint8), img_format=img_format)
 
     stats = {
         "black": auto["black"],
@@ -339,7 +339,7 @@ def encode_display_frame(
 
 def numpy_to_base64(
     arr: np.ndarray,
-    format: str = "png",
+    img_format: str = "png",
     compress_level: int = 1,
     jpeg_quality: int = 85,
     vmin: float = None,
@@ -359,7 +359,7 @@ def numpy_to_base64(
 
     Args:
         arr: Input numpy array
-        format: Image format - "png" or "jpeg"
+        img_format: Image format - "png" or "jpeg"
         compress_level: PNG compression level (0-9). Lower = faster, higher = smaller.
         jpeg_quality: JPEG quality (1-95). Higher = better quality, larger files.
         vmin: If provided, clip sqrt-domain values below this before normalising
@@ -399,7 +399,7 @@ def numpy_to_base64(
     img = Image.fromarray(arr)
     buf = BytesIO()
 
-    if format.lower() == "jpeg":
+    if img_format.lower() == "jpeg":
         # PIL handles 'L' (grayscale) mode JPEG natively — no need to convert to RGB.
         # Skipping the conversion avoids tripling the data size before compression.
         img.save(buf, format="JPEG", quality=jpeg_quality, optimize=False)

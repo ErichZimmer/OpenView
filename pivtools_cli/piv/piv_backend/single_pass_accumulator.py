@@ -671,8 +671,7 @@ class SinglePassAccumulator:
             R_BB_ensemble = _zero_plane_means(R_BB_ensemble, _n_win, _cs)
             R_AB_ensemble = _zero_plane_means(R_AB_ensemble, _n_win, _cs)
             logging.info(
-                f"Pass {pass_idx + 1}: DC-zero applied to AA/BB/AB planes "
-                f"({bg_method})"
+                f"Pass {pass_idx + 1}: DC-zero applied to AA/BB/AB planes ({bg_method})"
             )
 
         # Step 5: Get configuration for this pass
@@ -1534,16 +1533,16 @@ class SinglePassAccumulator:
             # DEBUG: Log edge values in final pass result to trace edge artifact source
             logging.debug(
                 f"Pass {pass_idx + 1}: FINAL RESULT edge values - "
-                f"ux_mat: TL={ux_mat[0,0]:.4f}, TR={ux_mat[0,-1]:.4f}, "
-                f"BL={ux_mat[-1,0]:.4f}, BR={ux_mat[-1,-1]:.4f}, "
-                f"center={ux_mat[ux_mat.shape[0]//2, ux_mat.shape[1]//2]:.4f}, "
-                f"uy_mat: TL={uy_mat[0,0]:.4f}, TR={uy_mat[0,-1]:.4f}, "
-                f"BL={uy_mat[-1,0]:.4f}, BR={uy_mat[-1,-1]:.4f}, "
-                f"center={uy_mat[uy_mat.shape[0]//2, uy_mat.shape[1]//2]:.4f}, "
-                f"NaN at edges: top_row={np.isnan(ux_mat[0,:]).sum()}, "
-                f"bot_row={np.isnan(ux_mat[-1,:]).sum()}, "
-                f"left_col={np.isnan(ux_mat[:,0]).sum()}, "
-                f"right_col={np.isnan(ux_mat[:,-1]).sum()}"
+                f"ux_mat: TL={ux_mat[0, 0]:.4f}, TR={ux_mat[0, -1]:.4f}, "
+                f"BL={ux_mat[-1, 0]:.4f}, BR={ux_mat[-1, -1]:.4f}, "
+                f"center={ux_mat[ux_mat.shape[0] // 2, ux_mat.shape[1] // 2]:.4f}, "
+                f"uy_mat: TL={uy_mat[0, 0]:.4f}, TR={uy_mat[0, -1]:.4f}, "
+                f"BL={uy_mat[-1, 0]:.4f}, BR={uy_mat[-1, -1]:.4f}, "
+                f"center={uy_mat[uy_mat.shape[0] // 2, uy_mat.shape[1] // 2]:.4f}, "
+                f"NaN at edges: top_row={np.isnan(ux_mat[0, :]).sum()}, "
+                f"bot_row={np.isnan(ux_mat[-1, :]).sum()}, "
+                f"left_col={np.isnan(ux_mat[:, 0]).sum()}, "
+                f"right_col={np.isnan(ux_mat[:, -1]).sum()}"
             )
 
             # Create pass result
@@ -1757,9 +1756,7 @@ class SinglePassAccumulator:
                 "sum_corr_AB",
             )
             if pass_data[key] is not None
-        ) / (
-            1024**2
-        )  # Convert to MB
+        ) / (1024**2)  # Convert to MB
 
         # Clear large arrays (keep metadata for grid info)
         pass_data["sum_warp_A"] = None

@@ -399,7 +399,7 @@ def test_two_bakes_report_total_sheet_in_original_frame():
     assert np.allclose(t_tot, (R1_orig.T @ (rec.model1.t - t1_orig)).ravel(), atol=1e-9)
 
     # Why exact composition matters: summing increments is measurably wrong.
-    naive = tuple(a + b for a, b in zip(SHEET_A, SHEET_B))
+    naive = tuple(a + b for a, b in zip(SHEET_A, SHEET_B, strict=True))
     assert np.max(np.abs(np.subtract(naive, truth))) > NAIVE_MIN_ERR
 
 
@@ -469,7 +469,7 @@ def test_cumulative_sweep_figure(make_figures):
         _bake(rec, sheet_b)
         reported.append(_fitted(rec.self_cal))
         truth.append(_ground_truth_total([SHEET_A, sheet_b]))
-        naive.append(tuple(a + b for a, b in zip(SHEET_A, sheet_b)))
+        naive.append(tuple(a + b for a, b in zip(SHEET_A, sheet_b, strict=True)))
     reported, truth, naive = map(np.asarray, (reported, truth, naive))
     exact_err = reported - truth
     naive_err = naive - truth

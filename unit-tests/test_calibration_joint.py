@@ -27,7 +27,7 @@ _CAM_RVEC = {
     2: np.array([0.0, 0.25, 0.0]),
     3: np.array([0.0, -0.25, 0.0]),
 }
-_WINDOWS = {1: range(0, 7), 2: range(5, 12), 3: range(10, 16)}
+_WINDOWS = {1: range(7), 2: range(5, 12), 3: range(10, 16)}
 _N_VIEWS = 6
 
 
@@ -119,9 +119,9 @@ def test_joint_full3d_recovers_intrinsics_and_bow():
     # per-camera intrinsics
     for cam in (1, 2, 3):
         fx = res.models[cam].K[0, 0]
-        assert (
-            abs(fx - _FX[cam]) / _FX[cam] < 0.02
-        ), f"cam{cam} fx {fx:.1f} vs {_FX[cam]}"
+        assert abs(fx - _FX[cam]) / _FX[cam] < 0.02, (
+            f"cam{cam} fx {fx:.1f} vs {_FX[cam]}"
+        )
         assert res.models[cam].K[0, 0] == pytest.approx(
             res.models[cam].K[1, 1]
         )  # fx==fy

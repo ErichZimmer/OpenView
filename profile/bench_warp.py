@@ -196,7 +196,7 @@ def main(argv=None):
         gtaps = (taps / t_opt) / 1e9
         print(
             f"{_MODE_NAME[mode]:<9}{ms_ref:>13.2f}{ms_opt:>13.2f}"
-            f"{t_ref/t_opt:>8.2f}x{gtaps:>12.2f}{max_d:>10.2e}"
+            f"{t_ref / t_opt:>8.2f}x{gtaps:>12.2f}{max_d:>10.2e}"
         )
     print()
 

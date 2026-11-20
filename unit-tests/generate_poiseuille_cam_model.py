@@ -140,7 +140,7 @@ def main():
     H_phys = fov_mm / 1000.0  # physical channel height in metres
     print(f"Camera: fx={FX}, tz={TZ:.4f} m, {px_per_mm:.1f} px/mm, FOV={fov_mm:.1f} mm")
     print(f"Distortion: k1={K1}")
-    print(f"Physical channel height: {H_phys*1000:.1f} mm")
+    print(f"Physical channel height: {H_phys * 1000:.1f} mm")
     print(f"Poiseuille u_max={U_MAX} m/s, dt={DT} s")
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)

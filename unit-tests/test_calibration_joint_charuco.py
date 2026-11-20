@@ -34,7 +34,7 @@ _CAM_RVEC = {
     3: np.array([0.0, -0.25, 0.0]),
 }
 # Overlapping global-index windows: adjacent cameras share corner ids (the charuco hallmark).
-_WINDOWS = {1: range(0, 6), 2: range(4, 10), 3: range(8, 14)}
+_WINDOWS = {1: range(6), 2: range(4, 10), 3: range(8, 14)}
 _N_VIEWS = 6
 
 
@@ -246,17 +246,17 @@ def test_charuco_joint_model_world_frame_is_the_board_plane():
         image_size_by_cam=_IMG_SIZES,
     )
     board = np.array([res.board[k] for k in sorted(res.board)])
-    assert (
-        abs(board[:, 2]).max() < 2.0
-    ), "released board should sit near the world Z=0 plane"
+    assert abs(board[:, 2]).max() < 2.0, (
+        "released board should sit near the world Z=0 plane"
+    )
 
     for cam, model in sorted(res.models.items()):
         px = model.project(board)
         W, H = model.image_size
         on = (px[:, 0] >= 0) & (px[:, 0] < W) & (px[:, 1] >= 0) & (px[:, 1] < H)
-        assert (
-            on.sum() >= 20
-        ), f"cam{cam}: only {on.sum()} board points land on the sensor"
+        assert on.sum() >= 20, (
+            f"cam{cam}: only {on.sum()} board points land on the sensor"
+        )
         back = model.back_project_to_plane(px[on], z_world=0.0)[:, :2]
         err = np.linalg.norm(back - board[on][:, :2], axis=1)
         assert err.max() < 0.5, (
@@ -355,9 +355,9 @@ def test_charuco_joint_pinhole_recovers_intrinsics():
     assert res.converged
     for cam in (1, 2, 3):
         fx = res.models[cam].K[0, 0]
-        assert (
-            abs(fx - _FX[cam]) / _FX[cam] < 0.02
-        ), f"cam{cam} fx {fx:.1f} vs {_FX[cam]}"
+        assert abs(fx - _FX[cam]) / _FX[cam] < 0.02, (
+            f"cam{cam} fx {fx:.1f} vs {_FX[cam]}"
+        )
         assert res.models[cam].K[0, 0] == pytest.approx(
             res.models[cam].K[1, 1]
         )  # fx==fy

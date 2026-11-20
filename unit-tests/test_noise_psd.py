@@ -159,15 +159,16 @@ class TestLanczos3DTFT:
         # Lanczos can slightly exceed 1 due to ringing — allow small margin
         assert np.all(np.abs(H) <= 1.05)
 
-    def test_sharper_rolloff_than_bicubic(self):
-        """Lanczos-3 should have sharper high-k rolloff than bicubic."""
+    def test_mid_band_at_least_as_flat_as_bicubic(self):
+        """Lanczos-3 passband is at least as flat as bicubic in the mid band.
+
+        At a quarter-pixel shift, the mean gain over 0.1 < |k| < 0.3 cycles/px is
+        no more than 0.05 below bicubic's. Nothing is claimed near Nyquist.
+        """
         k = np.linspace(-0.5, 0.5, 128)
         f = 0.25
         H_bic = np.abs(bicubic_dtft(k, f))
         H_lan = np.abs(lanczos3_dtft(k, f))
-        # Near Nyquist (|k| > 0.4), Lanczos should have equal or lower gain
-        np.abs(k) > 0.4
-        # Lanczos passband is flatter (closer to 1 at mid-k)
         mid_k = (np.abs(k) > 0.1) & (np.abs(k) < 0.3)
         assert np.mean(H_lan[mid_k]) >= np.mean(H_bic[mid_k]) - 0.05
 

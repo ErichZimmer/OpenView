@@ -3,14 +3,13 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import numpy as np
 from flask import Blueprint, jsonify, request, send_file
 from loguru import logger
-from scipy.io import loadmat
 
 from pivtools_core.config import PairingStrideError, get_config
 from pivtools_core.image_handling.readers.pivraw_reader import PivrawError
 from pivtools_core.paths import count_vector_files, get_data_paths, list_vector_files
+from pivtools_core.vector_loading import ResultFileError, get_plottable_vars
 from pivtools_gui.services.job_manager import job_manager
 from pivtools_gui.video_maker.video_maker import (
     VideoMaker,
@@ -22,10 +21,6 @@ video_maker_bp = Blueprint("video_maker", __name__)
 # Constants
 VIDEO_EXTENSIONS = (".mp4", ".avi", ".mov", ".mkv")
 MAX_DEPTH = 5  # For deep search
-
-# Excluded coordinate variables (not plottable as fields)
-EXCLUDED_VARS = {"x", "y"}
-
 
 # Label formatting for special variables (matching VectorViewer)
 VARIABLE_LABELS = {
@@ -52,90 +47,6 @@ VARIABLE_LABELS = {
     "vorticity": "ω (Vorticity)",
     "divergence": "∇·u (Divergence)",
 }
-
-
-def _extract_plottable_vars(mat_path: Path) -> list:
-    """
-    Extract plottable 2D variable names from a .mat file.
-    Copied from plotting_views.py for consistency.
-    """
-    if not mat_path.exists():
-        return []
-
-    try:
-        data_mat = loadmat(str(mat_path), struct_as_record=False, squeeze_me=True)
-        if "piv_result" not in data_mat:
-            return []
-
-        piv_result = data_mat["piv_result"]
-        pr = None
-
-        # Handle multiple runs (array of structs)
-        if isinstance(piv_result, np.ndarray) and piv_result.dtype == object:
-            for el in piv_result:
-                try:
-                    for candidate in ("ux", "uy", "b_mask", "uu", "u_prime", "uu_inst"):
-                        val = getattr(el, candidate, None)
-                        if val is not None and np.asarray(val).size > 0:
-                            pr = el
-                            break
-                    if pr:
-                        break
-                except Exception:
-                    continue
-            if not pr and piv_result.size > 0:
-                pr = piv_result.flat[0]
-        else:
-            pr = piv_result
-
-        if pr is None:
-            return []
-
-        # Get all field names
-        all_vars = []
-        dt = getattr(pr, "dtype", None)
-        if dt and getattr(dt, "names", None):
-            all_vars = list(dt.names)
-        else:
-            try:
-                if hasattr(pr, "dtype") and getattr(pr.dtype, "names", None):
-                    all_vars = list(pr.dtype.names)
-                elif hasattr(pr, "dtype") and getattr(pr.dtype, "fields", None):
-                    f = pr.dtype.fields
-                    if isinstance(f, dict):
-                        all_vars = list(f.keys())
-            except Exception:
-                pass
-            if not all_vars:
-                try:
-                    attrs = [
-                        n
-                        for n in dir(pr)
-                        if not n.startswith("_") and not callable(getattr(pr, n, None))
-                    ]
-                    all_vars = attrs
-                except Exception:
-                    all_vars = []
-
-        # Filter to plottable 2D arrays
-        plottable_vars = []
-
-        for var_name in all_vars:
-            if var_name in EXCLUDED_VARS:
-                continue
-            try:
-                val = getattr(pr, var_name, None)
-                if val is None:
-                    continue
-                arr = np.asarray(val)
-                if arr.ndim == 2 and arr.size > 0:
-                    plottable_vars.append(var_name)
-            except Exception:
-                continue
-
-        return plottable_vars
-    except Exception:
-        return []
 
 
 def _get_variable_label(var_name: str) -> str:
@@ -636,7 +547,7 @@ def available_variables():
                 data_dir, cfg.vector_format, cfg.num_frame_pairs
             )[:1]
             if mat_files:
-                inst_vars = _extract_plottable_vars(mat_files[0])
+                inst_vars = get_plottable_vars(mat_files[0])
                 grouped_variables["instantaneous"] = inst_vars
                 has_stereo = "uz" in inst_vars
 
@@ -669,7 +580,7 @@ def available_variables():
                 inst_stats_dir, cfg.vector_format, cfg.num_frame_pairs
             )[:1]
             if inst_stats_files:
-                stats_vars = _extract_plottable_vars(inst_stats_files[0])
+                stats_vars = get_plottable_vars(inst_stats_files[0])
                 # Filter out base instantaneous vars to avoid duplicates
                 base_vars = set(grouped_variables["instantaneous"])
                 # Keep stats-specific vars or known computed stats
@@ -735,6 +646,10 @@ def available_variables():
             }
         )
 
+    except ResultFileError as e:
+        # A result file exists but cannot be listed; the message names it.
+        logger.warning(f"[VIDEO] available_variables: {e}")
+        return jsonify({"success": False, "error": str(e)}), 400
     except Exception as e:
         logger.exception(f"[VIDEO] Failed to get available variables: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
@@ -858,7 +773,8 @@ def start_video():
         )
 
     # Get base path from request or config
-    # Priority: base_path (direct) > base_path_idx > source_path_idx > config.video_base_path_idx
+    # Priority, highest first: base_path, base_path_idx, source_path_idx,
+    # then config.video_base_path_idx.
     base_path_str = data.get("base_path")
     if base_path_str:
         base = Path(base_path_str).expanduser()

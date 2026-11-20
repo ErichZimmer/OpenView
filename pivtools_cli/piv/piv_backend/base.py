@@ -8,7 +8,6 @@ from pivtools_core.config import Config
 
 
 class CrossCorrelator(ABC):
-
     @abstractmethod
     def correlate_batch(
         self, images: np.ndarray, config: Config, vector_masks: List[np.ndarray] = None
@@ -185,9 +184,9 @@ class CrossCorrelator(ABC):
         self.ksize_filt: list[tuple[int, int]] = []
         self.sd: list[float] = []
         self.G_smooth_predictor: list[np.ndarray] = []
-        self.padding_per_pass: list[tuple[int, int, int, int]] = (
-            []
-        )  # For single mode coordinate conversion
+        self.padding_per_pass: list[
+            tuple[int, int, int, int]
+        ] = []  # For single mode coordinate conversion
 
         H, W = self.H, self.W
 

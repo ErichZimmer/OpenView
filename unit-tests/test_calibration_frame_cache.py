@@ -226,8 +226,9 @@ def _stride_reader(fake_read):
     """A reader whose output depends on num_cameras, standing in for the
     container stride logic without needing a real .set/.im7 fixture."""
 
-    def _inner(*, file_path, camera, frame_idx, image_type, num_cameras,
-               use_camera_subfolders):
+    def _inner(
+        *, file_path, camera, frame_idx, image_type, num_cameras, use_camera_subfolders
+    ):
         return fake_read(
             file_path=file_path,
             camera=camera,
@@ -280,7 +281,7 @@ def test_display_path_accepts_a_read_only_frame(tmp_path, reads):
 
     stats = get_display_contrast_stats(arr)
     assert "vmin_pct" in stats
-    assert numpy_to_base64(arr, format="jpeg")
+    assert numpy_to_base64(arr, img_format="jpeg")
 
 
 def test_the_real_detectors_accept_a_read_only_frame(tmp_path, reads):
@@ -328,7 +329,9 @@ def test_lru_evicts_oldest_and_stays_inside_the_budget(tmp_path, reads, monkeypa
         )
         assert CL._frame_cache_bytes <= one_frame * 3
     # Frame 1 was evicted by 4 and 5, so it costs a sixth decode.
-    CL.read_calibration_frame_at(normalize_uint8=False, **_kwargs(tmp_path, frame_idx=1))
+    CL.read_calibration_frame_at(
+        normalize_uint8=False, **_kwargs(tmp_path, frame_idx=1)
+    )
     assert reads["n"] == 6
 
 

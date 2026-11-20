@@ -718,7 +718,7 @@ class VectorMerger:
                     continue
 
                 skip_run = False
-                for camera, data in run_data.items():
+                for _camera, data in run_data.items():
                     if data["x"].size == 0:
                         skip_run = True
                         break
@@ -961,7 +961,6 @@ class VectorMerger:
 
         # Merge data for each run
         merged_runs = {}
-        has_stress_fields = False  # Track if ensemble with stress data
 
         for run_idx, run_num in enumerate(valid_runs):
             logger.debug(f"Processing run {run_num} (index {run_idx})")

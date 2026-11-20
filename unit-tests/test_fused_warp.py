@@ -490,9 +490,9 @@ class TestScalarSimdEquivalence:
         max_d = float(max(np.max(np.abs(opt_a - ref_a)), np.max(np.abs(opt_b - ref_b))))
         # 1e-3 on 0..255 data (~4e-6 relative) absorbs FMA/reassociation; today's
         # interior split is exact (0.0), the headroom is for the SIMD path.
-        assert (
-            max_d < 1e-3
-        ), f"{pattern}/{INTERP_NAMES[interp_mode]}: scalar-vs-opt max|Δ|={max_d:.3e}"
+        assert max_d < 1e-3, (
+            f"{pattern}/{INTERP_NAMES[interp_mode]}: scalar-vs-opt max|Δ|={max_d:.3e}"
+        )
 
 
 # ---------------------------------------------------------------------------

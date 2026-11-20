@@ -108,7 +108,8 @@ def test_calibration_source_path_is_stripped(tmp_path):
     """
     yaml_path = tmp_path / "config.yaml"
     _write_yaml(
-        yaml_path, {"calibration_sources": ["  /data/calib_a 	"], "active": "charuco"}
+        yaml_path,
+        {"calibration_sources": ["  /data/calib_a 	"], "active": "charuco"},
     )
     cfg = Config(path=str(yaml_path))
     assert cfg.calibration_sources == [Path("/data/calib_a")]

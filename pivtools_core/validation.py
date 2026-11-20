@@ -167,23 +167,23 @@ def validate_config(config: Config) -> Tuple[bool, str, List[str]]:
 
     # The dataset selection must name real datasets (an empty one is refused too)
     try:
-        config.active_paths
+        config.active_paths  # noqa: B018 evaluated for its ActivePathsError
     except ActivePathsError as e:
         errors.append(str(e))
 
     # Check source paths exist
     for i, source_path in enumerate(config.source_paths):
         if not source_path.exists():
-            errors.append(f"Source path {i+1} does not exist: {source_path}")
+            errors.append(f"Source path {i + 1} does not exist: {source_path}")
 
     # Check base paths exist (create if missing)
     for i, base_path in enumerate(config.base_paths):
         if not base_path.exists():
             try:
                 base_path.mkdir(parents=True, exist_ok=True)
-                warnings.append(f"Created base path {i+1}: {base_path}")
+                warnings.append(f"Created base path {i + 1}: {base_path}")
             except Exception as e:
-                errors.append(f"Failed to create base path {i+1}: {base_path} - {e}")
+                errors.append(f"Failed to create base path {i + 1}: {base_path} - {e}")
 
     if errors:
         return False, "\n".join(errors), warnings
@@ -240,12 +240,9 @@ def validate_config(config: Config) -> Tuple[bool, str, List[str]]:
             if matching_files:
                 indices = []
                 for f in matching_files:
-                    try:
-                        m = re.search(r"(\d+)", f.name)
-                        if m:
-                            indices.append(int(m.group(1)))
-                    except Exception:
-                        pass
+                    m = re.search(r"(\d+)", f.name)
+                    if m:
+                        indices.append(int(m.group(1)))
                 if indices:
                     min_idx = min(indices)
                     expected_min = config.start_index
@@ -412,7 +409,7 @@ def validate_window_sizes(config: Config) -> List[str]:
         return errors
 
     for pass_idx, (wh, pass_type) in enumerate(
-        zip(config.ensemble_window_sizes, ensemble_types)
+        zip(config.ensemble_window_sizes, ensemble_types, strict=True)
     ):
         if pass_type == "single":
             errors.extend(
@@ -475,7 +472,7 @@ def validate_ensemble_config(config: Config) -> Tuple[bool, List[str], List[str]
     # 3. Validate overlap values are in range
     for i, ovlp in enumerate(overlaps):
         if ovlp < 0 or ovlp > 95:
-            errors.append(f"Pass {i+1}: overlap {ovlp}% out of range (0-95%)")
+            errors.append(f"Pass {i + 1}: overlap {ovlp}% out of range (0-95%)")
 
     # 4. Window sizes should decrease or stay the same across passes
     for i in range(1, len(window_sizes)):
@@ -483,21 +480,21 @@ def validate_ensemble_config(config: Config) -> Tuple[bool, List[str], List[str]
         curr = window_sizes[i]
         if curr[0] > prev[0] or curr[1] > prev[1]:
             warnings.append(
-                f"Pass {i+1}: window size {curr} is larger than pass {i} ({prev}). "
+                f"Pass {i + 1}: window size {curr} is larger than pass {i} ({prev}). "
                 "Typically window sizes decrease across passes."
             )
 
     # 5. Validate sum_window when single mode is used
     if "single" in ensemble_types:
         try:
-            config.ensemble_sum_window
+            config.ensemble_sum_window  # noqa: B018 evaluated for its ValueError
         except ValueError as e:
             errors.append(f"Ensemble sum window: {e}")
 
     # 6. Validate sum_fitting_window when enabled
     if config.ensemble_sum_fitting_window_enabled:
         try:
-            config.ensemble_sum_fitting_window
+            config.ensemble_sum_fitting_window  # noqa: B018 evaluated for its ValueError
         except ValueError as e:
             errors.append(f"Ensemble sum fitting window: {e}")
 

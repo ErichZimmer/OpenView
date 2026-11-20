@@ -623,9 +623,10 @@ _ATTRIBUTE_READER_NAME = "AttributeReaderV1"
 # only Name on the 24 FrameReaders of the surveyed drives.
 _FRAME_READER_NAME = "Images_16bit_8Bit"
 
-# Reader Names LaVision's own DLL describes for other vendors' camera formats
-# ("Reads Photron MRAW format.", "Reads Vision Research cine X format."), matched
-# case-insensitively so the refusal names the vendor. Upper-cased Name: advice.
+# Reader Names LaVision's own DLL describes for other vendors' camera formats,
+# for example "Reads Photron MRAW format." and "Reads Vision Research cine X
+# format.", matched case-insensitively so the refusal names the vendor.
+# Upper-cased Name: advice.
 _FOREIGN_READER_NAMES = {
     "MRAW": "a Photron MRAW stream. PIVTOOLs has no Photron reader; export the "
     "images from DaVis as .im7 or TIFF",
@@ -1792,7 +1793,9 @@ def _parse_set(set_path: Union[str, Path]) -> SetInfo:
     cameras = None if rec is None else group_cameras(rec)
     for camera in cameras or ():
         for stream, role in zip(
-            camera.frames, DOUBLE_FRAME_ROLES if camera.double_frame else ("",)
+            camera.frames,
+            DOUBLE_FRAME_ROLES if camera.double_frame else ("",),
+            strict=True,
         ):
             frames[stream].camera_label = camera.label
             frames[stream].camera_id = camera.camera_id

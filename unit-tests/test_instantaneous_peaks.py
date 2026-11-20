@@ -226,12 +226,12 @@ class TestPositionRecovery:
         fit_i0 = peak_loc[0] - ci
         fit_j0 = peak_loc[1] - cj
 
-        assert (
-            abs(fit_i0 - i0_true) < 0.01
-        ), f"row error: true={i0_true:.3f}, fit={fit_i0:.4f}"
-        assert (
-            abs(fit_j0 - j0_true) < 0.01
-        ), f"col error: true={j0_true:.3f}, fit={fit_j0:.4f}"
+        assert abs(fit_i0 - i0_true) < 0.01, (
+            f"row error: true={i0_true:.3f}, fit={fit_i0:.4f}"
+        )
+        assert abs(fit_j0 - j0_true) < 0.01, (
+            f"col error: true={j0_true:.3f}, fit={fit_j0:.4f}"
+        )
 
 
 class TestSigmaRecovery:
@@ -292,16 +292,16 @@ class TestSigmaRecovery:
 
         if fit_type == 4:
             # Check averaged sigma is close
-            assert (
-                abs(fit_sr - true_sr) / true_sr < tol
-            ), f"sigma_row: true={true_sr:.3f}, fit={fit_sr:.4f}"
+            assert abs(fit_sr - true_sr) / true_sr < tol, (
+                f"sigma_row: true={true_sr:.3f}, fit={fit_sr:.4f}"
+            )
         else:
-            assert (
-                abs(fit_sr - true_sr) / true_sr < tol
-            ), f"sigma_row: true={true_sr:.3f}, fit={fit_sr:.4f}"
-            assert (
-                abs(fit_sc - true_sc) / true_sc < tol
-            ), f"sigma_col: true={true_sc:.3f}, fit={fit_sc:.4f}"
+            assert abs(fit_sr - true_sr) / true_sr < tol, (
+                f"sigma_row: true={true_sr:.3f}, fit={fit_sr:.4f}"
+            )
+            assert abs(fit_sc - true_sc) / true_sc < tol, (
+                f"sigma_col: true={true_sc:.3f}, fit={fit_sc:.4f}"
+            )
 
 
 class TestAstigmatismChallenge:
@@ -360,9 +360,9 @@ class TestAstigmatismChallenge:
         err_j = abs(peak_loc[1] - cj - self.J0)
         pos_err = np.sqrt(err_i**2 + err_j**2)
 
-        assert (
-            pos_err < 0.01
-        ), f"Type 4 position error={pos_err:.4f} px (expected > 0.01)"
+        assert pos_err < 0.01, (
+            f"Type 4 position error={pos_err:.4f} px (expected > 0.01)"
+        )
 
 
 class TestFitFailureSentinel:
@@ -383,9 +383,9 @@ class TestFitFailureSentinel:
 
     @staticmethod
     def _assert_nan_sentinel(peak_loc, std_dev, label):
-        assert np.isnan(peak_loc[0]) and np.isnan(
-            peak_loc[1]
-        ), f"{label}: expected NaN row/col, got {peak_loc[:2]}"
+        assert np.isnan(peak_loc[0]) and np.isnan(peak_loc[1]), (
+            f"{label}: expected NaN row/col, got {peak_loc[:2]}"
+        )
         assert peak_loc[2] == 0, f"{label}: expected height 0, got {peak_loc[2]}"
         assert np.all(std_dev == 0), f"{label}: expected std_dev 0, got {std_dev}"
 
@@ -476,9 +476,9 @@ class TestFitFailureSentinel:
                 self.SHAPE, 1000.0, 0.35, 0.27, 1.5**2, 1.5**2, 0.0
             )
         peak_loc, _ = _run_single_fit(xcorr, fit_type)
-        assert np.all(
-            np.isfinite(peak_loc)
-        ), f"clean Gaussian marked failed: {peak_loc}"
+        assert np.all(np.isfinite(peak_loc)), (
+            f"clean Gaussian marked failed: {peak_loc}"
+        )
         ci, cj = (self.SHAPE[0] - 1) / 2, (self.SHAPE[1] - 1) / 2
         assert abs(peak_loc[0] - ci - 0.35) < 0.01
         assert abs(peak_loc[1] - cj - 0.27) < 0.01
@@ -491,9 +491,9 @@ class TestFitFailureSentinel:
         xcorr = _generate_gaussian_4dof(self.SHAPE, 1000.0, 0.35, 0.27, 1.5)
         xcorr = xcorr + rng.normal(0.0, 10.0, self.SHAPE).astype(np.float32)
         peak_loc, _ = _run_single_fit(xcorr, fit_type)
-        assert np.all(
-            np.isfinite(peak_loc)
-        ), f"noisy Gaussian marked failed: {peak_loc}"
+        assert np.all(np.isfinite(peak_loc)), (
+            f"noisy Gaussian marked failed: {peak_loc}"
+        )
         ci, cj = (self.SHAPE[0] - 1) / 2, (self.SHAPE[1] - 1) / 2
         assert abs(peak_loc[0] - ci - 0.35) < 0.1
         assert abs(peak_loc[1] - cj - 0.27) < 0.1

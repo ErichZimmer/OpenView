@@ -9,7 +9,6 @@ from contextlib import contextmanager
 from typing import List, Optional
 
 import cv2
-import matplotlib
 import numpy as np
 from scipy.ndimage import gaussian_filter
 
@@ -33,9 +32,6 @@ from pivtools_cli.piv.piv_backend.outlier_detection import apply_outlier_detecti
 from pivtools_cli.piv.piv_result import PIVPassResult, PIVResult
 from pivtools_core.config import Config
 from pivtools_core.window_utils import compute_window_centers
-
-matplotlib.use("Agg")
-from matplotlib import pyplot as plt
 
 
 class InstantaneousCorrelatorCPU(CrossCorrelator):
@@ -234,8 +230,10 @@ class InstantaneousCorrelatorCPU(CrossCorrelator):
                 if lib is not None:
                     try:
                         lib.fftw_library_cleanup()
-                    except Exception:
-                        pass  # Ignore errors during cleanup
+                    # atexit handler: nothing can act on a failure here, and
+                    # raising would only print a traceback during shutdown.
+                    except Exception:  # noqa: S110
+                        pass
 
     def _bind_kernel_timers(self) -> None:
         """Detect + bind the flag-gated FFT-vs-peak-fit sub-kernel timers on this
@@ -452,13 +450,12 @@ class InstantaneousCorrelatorCPU(CrossCorrelator):
             images_b_contig = np.ascontiguousarray(images[:, 1, :, :], dtype=np.float32)
 
             for pass_idx, win_size in enumerate(config.window_sizes):
-
                 pass_start = time.perf_counter()
-                logging.debug(f"\n{'='*60}")
+                logging.debug(f"\n{'=' * 60}")
                 logging.debug(
                     f"PASS {pass_idx + 1} of {len(config.window_sizes)} (window_size={win_size})"
                 )
-                logging.debug(f"{'='*60}")
+                logging.debug(f"{'=' * 60}")
 
                 with self._profile_section(pass_idx, "predictor_corrector"):
                     images_a_prime, images_b_prime, self.delta_ab_pred = (
@@ -644,18 +641,30 @@ class InstantaneousCorrelatorCPU(CrossCorrelator):
                     if config.outlier_detection_enabled:
                         outlier_methods = config.outlier_detection_methods
                         if outlier_methods:
-
-                            def _detect_outliers(im_idx):
+                            # The pass's arrays are passed in rather than closed over:
+                            # pk_height is deleted at the end of the pass loop.
+                            def _detect_outliers(im_idx, ux, uy, methods, pk, mask):
                                 return im_idx, apply_outlier_detection(
-                                    ux_mat[im_idx],
-                                    uy_mat[im_idx],
-                                    outlier_methods,
-                                    peak_mag=pk_height[im_idx, 0],
-                                    masked=win_mask,
+                                    ux[im_idx],
+                                    uy[im_idx],
+                                    methods,
+                                    peak_mag=pk[im_idx, 0],
+                                    masked=mask,
                                 )
 
                             results = self._run_parallel(
-                                _detect_outliers, [(i,) for i in range(N)]
+                                _detect_outliers,
+                                [
+                                    (
+                                        i,
+                                        ux_mat,
+                                        uy_mat,
+                                        outlier_methods,
+                                        pk_height,
+                                        win_mask,
+                                    )
+                                    for i in range(N)
+                                ],
                             )
                             for im_idx, outlier_mask in results:
                                 outliers_detected_count += outlier_mask.sum()
@@ -666,7 +675,7 @@ class InstantaneousCorrelatorCPU(CrossCorrelator):
 
                 with self._profile_section(pass_idx, "secondary_peaks"):
                     if config.secondary_peak:
-                        for pk in range(1, n_peaks):
+                        for _pk in range(1, n_peaks):
                             active = nan_mask & (peak_choice < n_peaks)
                             if not active.any():
                                 break
@@ -707,9 +716,9 @@ class InstantaneousCorrelatorCPU(CrossCorrelator):
                                             & ~sub_nan[im_idx]
                                         )
                                         nan_mask[im_idx] |= re_flag
-                                        nan_reason[im_idx][
-                                            re_flag
-                                        ] = NAN_SECONDARY_OUTLIER
+                                        nan_reason[im_idx][re_flag] = (
+                                            NAN_SECONDARY_OUTLIER
+                                        )
 
                         # Masked windows must stay flagged regardless of what the
                         # substitution loop did (their peaks are all NaN, so this
@@ -775,32 +784,35 @@ class InstantaneousCorrelatorCPU(CrossCorrelator):
                             float(self.win_spacing_x[pass_idx]),
                         )
 
-                        def _infill_one(im_idx):
-                            if (
-                                np.isnan(ux_mat[im_idx]).any()
-                                or np.isnan(uy_mat[im_idx]).any()
-                            ):
-                                infill_mask = np.isnan(ux_mat[im_idx]) | np.isnan(
-                                    uy_mat[im_idx]
+                        # The pass's arrays are passed in rather than closed over
+                        # (they are rebound on every pass-loop iteration).
+                        def _infill_one(im_idx, ux, uy, mask, infill_cfg, spacing):
+                            if np.isnan(ux[im_idx]).any() or np.isnan(uy[im_idx]).any():
+                                infill_mask = np.isnan(ux[im_idx]) | np.isnan(
+                                    uy[im_idx]
                                 )
-                                if (infill_mask | win_mask).all():
+                                if (infill_mask | mask).all():
                                     logging.error(
                                         f"CRITICAL: 100% of vectors invalid for image {im_idx}; "
                                         f"infilling has no donor points and will abort this batch."
                                     )
                                 # Masked windows hold 0 (not data): never donors.
                                 return im_idx, apply_infilling(
-                                    ux_mat[im_idx],
-                                    uy_mat[im_idx],
+                                    ux[im_idx],
+                                    uy[im_idx],
                                     infill_mask,
-                                    cfg,
-                                    spacing=infill_spacing,
-                                    exclude=win_mask,
+                                    infill_cfg,
+                                    spacing=spacing,
+                                    exclude=mask,
                                 )
                             return im_idx, None
 
                         results = self._run_parallel(
-                            _infill_one, [(i,) for i in range(N)]
+                            _infill_one,
+                            [
+                                (i, ux_mat, uy_mat, win_mask, cfg, infill_spacing)
+                                for i in range(N)
+                            ],
                         )
                         for im_idx, result in results:
                             if result is not None:
@@ -817,7 +829,7 @@ class InstantaneousCorrelatorCPU(CrossCorrelator):
                 )
                 if invalid_rate > 0.20:
                     logging.warning(
-                        f"Pass {pass_idx + 1}: {invalid_rate*100:.1f}% invalid vectors "
+                        f"Pass {pass_idx + 1}: {invalid_rate * 100:.1f}% invalid vectors "
                         f"({true_invalid_count}/{unmasked_total})"
                     )
 
@@ -1021,8 +1033,8 @@ class InstantaneousCorrelatorCPU(CrossCorrelator):
             logging.debug(
                 f"  delta_ab_old from prev pass: shape={self.delta_ab_old.shape}, "
                 f"nan_count={np.isnan(self.delta_ab_old).sum()}, "
-                f"dx range=[{np.nanmin(self.delta_ab_old[...,1]):.4f}, {np.nanmax(self.delta_ab_old[...,1]):.4f}], "
-                f"dy range=[{np.nanmin(self.delta_ab_old[...,0]):.4f}, {np.nanmax(self.delta_ab_old[...,0]):.4f}]"
+                f"dx range=[{np.nanmin(self.delta_ab_old[..., 1]):.4f}, {np.nanmax(self.delta_ab_old[..., 1]):.4f}], "
+                f"dy range=[{np.nanmin(self.delta_ab_old[..., 0]):.4f}, {np.nanmax(self.delta_ab_old[..., 0]):.4f}]"
             )
 
             if config.instantaneous_predictor_smoothing:
@@ -1201,7 +1213,6 @@ class InstantaneousCorrelatorCPU(CrossCorrelator):
         b_ensemble = False  # Instantaneous PIV, not ensemble
 
         # Output arrays shape: (n_peaks, n_win_y, n_win_x) in C-contiguous format
-        # out_shape = (n_peaks, n_win_y, n_win_x)
         out_shape = (N, n_peaks, n_win_y, n_win_x)
         pk_loc_x = np.zeros(out_shape, dtype=np.float32)
         pk_loc_y = np.zeros(out_shape, dtype=np.float32)
@@ -1294,64 +1305,17 @@ class InstantaneousCorrelatorCPU(CrossCorrelator):
         )
 
         # Verify caching integrity (keep assertions for debugging)
-        assert len(self.cached_dense_maps) == len(
-            config.window_sizes
-        ), f"Dense maps cache length mismatch: {len(self.cached_dense_maps)} vs {len(config.window_sizes)}"
-        assert len(self.cached_predictor_maps) == len(
-            config.window_sizes
-        ), f"Predictor maps cache length mismatch: {len(self.cached_predictor_maps)} vs {len(config.window_sizes)}"
+        assert len(self.cached_dense_maps) == len(config.window_sizes), (
+            f"Dense maps cache length mismatch: {len(self.cached_dense_maps)} vs {len(config.window_sizes)}"
+        )
+        assert len(self.cached_predictor_maps) == len(config.window_sizes), (
+            f"Predictor maps cache length mismatch: {len(self.cached_predictor_maps)} vs {len(config.window_sizes)}"
+        )
 
         for pass_idx in range(1, len(config.window_sizes)):
-            assert (
-                self.cached_dense_maps[pass_idx] is not None
-            ), f"Dense map for pass {pass_idx} is None"
-            assert (
-                self.cached_predictor_maps[pass_idx] is not None
-            ), f"Predictor map for pass {pass_idx} is None"
-
-
-def plot_corr_planes(corr_avg_flat, n_win_y, n_win_x, win_h, win_w, pass_idx):
-    """
-    Visualize ensemble-averaged correlation planes for PIV in a grid
-    matching the window structure.
-
-    Parameters
-    ----------
-    corr_avg_flat : np.ndarray
-        Flattened correlation planes,
-        shape (n_win_y * n_win_x * win_h * win_w,)
-    n_win_y : int
-        Number of interrogation windows in y direction
-    n_win_x : int
-        Number of interrogation windows in x direction
-    win_h : int
-        Height of each correlation plane (pixels)
-    win_w : int
-        Width of each correlation plane (pixels)
-    pass_idx : int
-        Pass index for naming the output file
-    """
-    # Reshape into (n_win_y, n_win_x, win_h, win_w) using C order
-    corr_planes = corr_avg_flat.reshape((n_win_y, n_win_x, win_h, win_w), order="C")
-    logging.info(f"{corr_planes.shape}")
-    try:
-        fig, axes = plt.subplots(n_win_y, n_win_x, figsize=(3 * n_win_x, 3 * n_win_y))
-        logging.info(
-            f"Created figure with {n_win_y} rows and {n_win_x} columns of subplots"
-        )
-        for i in range(n_win_y):
-            for j in range(n_win_x):
-                ax = axes[i, j]
-                plane = corr_planes[i, j]
-                im = ax.imshow(plane, origin="lower", cmap="viridis")
-                ax.set_title(f"W{i},{j}")
-                ax.axis("off")
-                fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-        logging.info(f"Plotted correlation planes for pass {pass_idx}")
-        plt.tight_layout()
-        plt.savefig(f"corr{pass_idx}.png", dpi=150, bbox_inches="tight")
-        logging.info(f"Saved: corr{pass_idx}.png")
-    except Exception as e:
-        logging.error(f"Error occurred while plotting correlation planes: {e}")
-    finally:
-        plt.close()
+            assert self.cached_dense_maps[pass_idx] is not None, (
+                f"Dense map for pass {pass_idx} is None"
+            )
+            assert self.cached_predictor_maps[pass_idx] is not None, (
+                f"Predictor map for pass {pass_idx} is None"
+            )

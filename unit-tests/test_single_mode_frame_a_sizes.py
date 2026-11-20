@@ -99,9 +99,9 @@ class TestFrameAMask:
 
 
 class TestPadding:
-    # expected = (48 - m) / 2
     @pytest.mark.parametrize("m,expected", [(4, 22), (6, 21), (16, 16)])
     def test_symmetric_padding_for_even_sizes(self, m, expected):
+        """The expected pad on each side is 48 minus m, halved."""
         pad = compute_padding_for_single_mode((m, m), (SUM, SUM))
         assert pad == (expected, expected, expected, expected)
 

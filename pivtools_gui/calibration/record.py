@@ -753,8 +753,9 @@ def save_stereo(record: StereoRecord, model_dir: Path) -> Path:
     model_type = _model_type_of(record.model1)
     path = model_dir / f"stereo_model_{model_type}.mat"
     if model_type == "polynomial3d":
-        m1, m2 = _polynomial3d_to_dict(record.model1), _polynomial3d_to_dict(
-            record.model2
+        m1, m2 = (
+            _polynomial3d_to_dict(record.model1),
+            _polynomial3d_to_dict(record.model2),
         )
     else:
         m1, m2 = _camera_to_dict(record.model1), _camera_to_dict(record.model2)

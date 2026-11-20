@@ -15,6 +15,7 @@ import v1. Public entry points are the two orchestrators ``write_mono_figures`` 
 
 from __future__ import annotations
 
+import itertools
 import math
 import traceback
 from pathlib import Path
@@ -43,8 +44,7 @@ if TYPE_CHECKING:  # annotations only — avoids a runtime import cycle
     from .record import WorldFrame
 
 # Camera colours, shared by the per-camera figures and the stereo / joint 3D scenes.
-# (>=8 so a joint rig with many cameras is not silently truncated by ``_camera_records``,
-# which zips models against this tuple.)
+# ``_camera_records`` cycles them, so a rig with more cameras reuses colours.
 CAM_COLORS = (
     "#1f77b4",
     "#d62728",
@@ -552,7 +552,7 @@ def write_boards_planes_3d(
         from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
         planes = []
-        for rv, tv, pl in zip(rvecs, tvecs, board_local_points):
+        for rv, tv, pl in zip(rvecs, tvecs, board_local_points, strict=True):
             R, _ = cv2.Rodrigues(np.asarray(rv, np.float64).reshape(3))
             planes.append(_board_corners_cam(R, tv, pl))
         if not planes:
@@ -623,7 +623,9 @@ def _camera_records(models, labels, board_world):
     """Camera world centres + board-pointing optical axes (handles SIG reflection)."""
     centroid = np.asarray(board_world, np.float64).reshape(-1, 3).mean(0)
     recs = []
-    for m, lab, col in zip(models, labels, CAM_COLORS):
+    # More cameras than palette entries reuse colours rather than drop cameras.
+    colors = itertools.islice(itertools.cycle(CAM_COLORS), len(models))
+    for m, lab, col in zip(models, labels, colors, strict=True):
         R = np.asarray(m.R, np.float64)
         t = np.asarray(m.t, np.float64).reshape(3)
         pos = (-R.T @ t).ravel()
@@ -1513,7 +1515,7 @@ def write_stepped_figures(
     )
 
     if images is not None:
-        for pose_idx, det in zip(used_pose_indices, used_detections):
+        for pose_idx, det in zip(used_pose_indices, used_detections, strict=True):
             # pose_levels labels level 'a's face per pose (position-aligned to the original
             # detections); pass it so the network is split peak(blue)/trough(red).
             level_a_face = (
@@ -2344,8 +2346,7 @@ def write_self_cal_figures(
         ax1.set_ylabel("Y (mm)")
         ax2.imshow(ov_after, extent=extent, origin="lower", aspect="equal")
         ax2.set_title(
-            f"AFTER (Z={result.z_offset:.2f} mm, "
-            f"tX={math.degrees(result.tilt_x):.2f}°)"
+            f"AFTER (Z={result.z_offset:.2f} mm, tX={math.degrees(result.tilt_x):.2f}°)"
         )
         ax2.set_xlabel("X (mm)")
         fig.tight_layout()

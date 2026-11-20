@@ -713,7 +713,9 @@ class BuildCLibraries(build):
             "--transforms",
             "cfft",
         ]
-        print(">>> [PIVTOOLS_FFT] codegen renders: ['scalar_d'] (cfft only, libkspacefit)")
+        print(
+            ">>> [PIVTOOLS_FFT] codegen renders: ['scalar_d'] (cfft only, libkspacefit)"
+        )
         self._run(cmd)
         if not out_hdr.exists():
             raise RuntimeError(f"codelet generation failed: {out_hdr} not created")

@@ -353,7 +353,7 @@ def _clipped_dotboard_pair(n_views: int = 6):
     keep2 = gi_full[:, 0] >= _CAM2_CLIP_COLS
     gi_clip = gi_full[keep2] - np.array([_CAM2_CLIP_COLS, 0])
     det1, det2, datum_px = [], [], {}
-    for v, ((rv1, tv1), (rv2, tv2)) in enumerate(zip(poses1, poses2)):
+    for v, ((rv1, tv1), (rv2, tv2)) in enumerate(zip(poses1, poses2, strict=True)):
         p1, _ = cv2.projectPoints(obj_m, rv1, tv1, K, np.zeros(5))
         p2, _ = cv2.projectPoints(obj_m, rv2, tv2, K, np.zeros(5))
         p1, p2 = p1.reshape(-1, 2), p2.reshape(-1, 2)
@@ -594,7 +594,9 @@ def test_apply_mono_parallel_pool(tmp_path, monkeypatch):
         ps["ux"][0] = np.full(X.shape, float(k + 1), np.float64)
         ps["uy"][0] = np.full(X.shape, -2.0, np.float64)
         ps["b_mask"][0] = np.ones(X.shape, bool)
-        scipy.io.savemat(str(ud / f"B{k+1:05d}.mat"), {"piv_result": ps}, oned_as="row")
+        scipy.io.savemat(
+            str(ud / f"B{k + 1:05d}.mat"), {"piv_result": ps}, oned_as="row"
+        )
 
     progress = []
     written = runio.calibrate_mono_run(
@@ -602,12 +604,12 @@ def test_apply_mono_parallel_pool(tmp_path, monkeypatch):
     )
 
     assert [Path(w).name for w in written] == [
-        f"B{k+1:05d}.mat" for k in range(n_frames)
+        f"B{k + 1:05d}.mat" for k in range(n_frames)
     ]
     assert progress == [(k + 1, n_frames) for k in range(n_frames)]
     # fx=8000, Z~1000mm -> 1 px = 0.125 mm; dt=0.001 s -> k+1 px = 0.125*(k+1) m/s
     for k in range(n_frames):
-        bb = scipy.io.loadmat(str(od / f"B{k+1:05d}.mat"), squeeze_me=True)[
+        bb = scipy.io.loadmat(str(od / f"B{k + 1:05d}.mat"), squeeze_me=True)[
             "piv_result"
         ]
         u = np.asarray(bb["ux"].tolist() if bb["ux"].dtype == object else bb["ux"])
@@ -638,10 +640,12 @@ def test_apply_mono_worker_failure_raises(tmp_path, monkeypatch):
         ps["ux"][0] = np.full(X.shape, 3.0, np.float64)
         ps["uy"][0] = np.full(X.shape, -2.0, np.float64)
         ps["b_mask"][0] = np.ones(X.shape, bool)
-        scipy.io.savemat(str(ud / f"B{k+1:05d}.mat"), {"piv_result": ps}, oned_as="row")
+        scipy.io.savemat(
+            str(ud / f"B{k + 1:05d}.mat"), {"piv_result": ps}, oned_as="row"
+        )
     (ud / "B00004.mat").write_bytes(b"this is not a mat file")
 
-    with pytest.raises(Exception):
+    with pytest.raises(runio.ApplyFailed, match="apply failed after"):
         runio.calibrate_mono_run(rec, ud, od, dt=0.001)
 
 
@@ -687,7 +691,7 @@ def test_reconstruct_stereo_run_parallel(stereo_render, tmp_path, monkeypatch):
             ps["uy"][0] = np.zeros(Xw.shape)
             ps["b_mask"][0] = np.ones(Xw.shape, bool)
             scipy.io.savemat(
-                str(ud / f"B{k+1:05d}.mat"), {"piv_result": ps}, oned_as="row"
+                str(ud / f"B{k + 1:05d}.mat"), {"piv_result": ps}, oned_as="row"
             )
 
     od = tmp_path / "stereo_out"

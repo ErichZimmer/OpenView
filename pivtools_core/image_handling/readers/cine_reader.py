@@ -114,8 +114,7 @@ def read_cine_pair(
     # Explicit shape checks before np.copyto: it broadcasts silently, and a
     # (1, H, W) or (H, 1) frame would fill the slot with plausible wrong pixels.
     what = (
-        f"read_cine_pair frames ({idx}, {frame_b_idx}) of "
-        f"{os.path.basename(file_path)}"
+        f"read_cine_pair frames ({idx}, {frame_b_idx}) of {os.path.basename(file_path)}"
     )
     if frame_b.shape != frame_a.shape:
         raise ValueError(

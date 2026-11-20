@@ -37,10 +37,16 @@ COMMON = dict(dx=8.0, dy=4.0, window_size=(8, 96))  # (L_y, L_x)
 def _window_corr(U, V, pred_U=None, pred_V=None):
     zeros = np.zeros_like(U)
     out = compute_gradient_corrections(
-        U=U, V=V, sig_A_x=zeros, sig_A_y=zeros,
-        UU_stress=np.full_like(U, 5.0), VV_stress=np.full_like(U, 2.0),
+        U=U,
+        V=V,
+        sig_A_x=zeros,
+        sig_A_y=zeros,
+        UU_stress=np.full_like(U, 5.0),
+        VV_stress=np.full_like(U, 2.0),
         UV_stress=np.full_like(U, -1.0),
-        pred_U=pred_U, pred_V=pred_V, **COMMON,
+        pred_U=pred_U,
+        pred_V=pred_V,
+        **COMMON,
     )
     return out  # 9-tuple
 
@@ -59,9 +65,8 @@ class TestUnwarpedBehaviourUnchanged:
     def test_pred_none_equals_pred_zeros(self):
         U, V = _shear_fields()
         ref = _window_corr(U, V)
-        zer = _window_corr(U, V, pred_U=np.zeros_like(U),
-                           pred_V=np.zeros_like(V))
-        for a, b in zip(ref, zer):
+        zer = _window_corr(U, V, pred_U=np.zeros_like(U), pred_V=np.zeros_like(V))
+        for a, b in zip(ref, zer, strict=True):
             assert np.allclose(a, b, equal_nan=True)
 
 
@@ -69,8 +74,9 @@ class TestResidualGradient:
     def test_fully_tracked_predictor_zeroes_window_correction(self):
         """Converged warped pass: pred == U -> no shear reaches the planes."""
         U, V = _shear_fields()
-        (UUc, _, _, UUw, VVw, UVw, *_ ) = _window_corr(U, V, pred_U=U.copy(),
-                                                       pred_V=V.copy())
+        (UUc, _, _, UUw, VVw, UVw, *_) = _window_corr(
+            U, V, pred_U=U.copy(), pred_V=V.copy()
+        )
         assert np.allclose(UUw, 0.0)
         assert np.allclose(VVw, 0.0)
         assert np.allclose(UVw, 0.0)
@@ -79,8 +85,7 @@ class TestResidualGradient:
     def test_partial_predictor_uses_residual(self):
         shear = 0.25
         U, V = _shear_fields(shear=shear)
-        (_, _, _, UUw, *_ ) = _window_corr(U, V, pred_U=0.6 * U,
-                                           pred_V=V.copy())
+        (_, _, _, UUw, *_) = _window_corr(U, V, pred_U=0.6 * U, pred_V=V.copy())
         expected = (8**2 / 12.0) * (0.4 * shear) ** 2
         assert np.allclose(UUw, expected)
 
@@ -91,7 +96,7 @@ class TestResidualGradient:
         U, V = _shear_fields(shear=shear)
         pred = U.copy()
         pred[:, :5] = np.nan
-        (_, _, _, UUw, *_ ) = _window_corr(U, V, pred_U=pred, pred_V=V.copy())
+        (_, _, _, UUw, *_) = _window_corr(U, V, pred_U=pred, pred_V=V.copy())
         full = (8**2 / 12.0) * shear**2
         # NaN block interior (away from the NaN/tracked seam) -> full corr
         assert np.allclose(UUw[:, :3], full)
@@ -105,14 +110,19 @@ class TestApplyWrapper:
         U, V = _shear_fields()
         zeros = np.zeros_like(U)
         return apply_gradient_correction_to_pass(
-            ux=U, uy=V,
-            UU_stress=np.full_like(U, 5.0), VV_stress=np.full_like(U, 2.0),
+            ux=U,
+            uy=V,
+            UU_stress=np.full_like(U, 5.0),
+            VV_stress=np.full_like(U, 2.0),
             UV_stress=np.full_like(U, -1.0),
-            sig_A_x=zeros, sig_A_y=zeros,
+            sig_A_x=zeros,
+            sig_A_y=zeros,
             win_ctrs_x=np.arange(U.shape[1]) * 8.0,
             win_ctrs_y=np.arange(U.shape[0]) * 4.0,
-            image_height=2048, window_size=(8, 96),
-            pred_x=pred_x, pred_y=pred_y,
+            image_height=2048,
+            window_size=(8, 96),
+            pred_x=pred_x,
+            pred_y=pred_y,
         )
 
     def test_wrapper_threads_predictor(self):

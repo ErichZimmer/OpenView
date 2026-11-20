@@ -440,15 +440,16 @@ def test_masked_exclusion_figure(make_figures, output_dir):
         handles=[
             Patch(color=c, label=lab)
             for c, lab in zip(
-                colours, ["valid", "masked (stored 0)", "flagged outlier"]
+                colours,
+                ["valid", "masked (stored 0)", "flagged outlier"],
+                strict=True,
             )
         ],
         loc="outside lower center",
         ncol=3,
     )
     fig.suptitle(
-        f"median_2d on uniform field (ux={UNIFORM_UX:g} px, uy=0) "
-        "with stair-step mask"
+        f"median_2d on uniform field (ux={UNIFORM_UX:g} px, uy=0) with stair-step mask"
     )
     fig.savefig(output_dir / "test_outlier_masked_exclusion.png", dpi=150)
     plt.close(fig)

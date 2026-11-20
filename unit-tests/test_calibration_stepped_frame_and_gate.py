@@ -28,7 +28,6 @@ import cv2
 import numpy as np
 import pytest
 from scipy.spatial import cKDTree
-from test_calibration_stepped_stereo import same_side_scene  # noqa: F401  (fixture)
 from test_calibration_stepped_stereo import (  # noqa: E402  (sibling-test reuse)
     PEAK_COLS,
     PEAK_ROWS,
@@ -38,6 +37,7 @@ from test_calibration_stepped_stereo import (  # noqa: E402  (sibling-test reuse
     H,
     W,
     _angle_between,
+    same_side_scene,  # noqa: F401  (fixture)
 )
 
 from pivtools_cli import generate_synthetic_stepped as gstep
@@ -283,8 +283,9 @@ def test_gate_removes_corrupted_dots_and_reports_them(
     same_side_scene,
 ):
     s = same_side_scene
-    f1, f2 = _peak_fiducials(s["projs1"][0], 0, 0), _peak_fiducials(
-        s["projs2"][0], 0, 0
+    f1, f2 = (
+        _peak_fiducials(s["projs1"][0], 0, 0),
+        _peak_fiducials(s["projs2"][0], 0, 0),
     )
     clean = _solve(s, f1, f2, "peak", "peak")
     assert clean.board_meta["n_gated_points1"] == 0

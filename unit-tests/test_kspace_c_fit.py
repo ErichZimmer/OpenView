@@ -22,11 +22,10 @@ from synthetic_correlations import generate_correlation_triplet, make_mock_confi
 from pivtools_cli.piv.piv_backend.kspace_lm_fitting import (
     STATUS_MASKED,
     STATUS_SUCCESS,
+    _load_kspace_lib,
     fit_windows_kspace_lm,
     fit_windows_kspace_lm_numpy,
 )
-
-from pivtools_cli.piv.piv_backend.kspace_lm_fitting import _load_kspace_lib
 
 try:
     _load_kspace_lib()
@@ -98,9 +97,7 @@ def _p_win():
 
 def _run_both(shape, floor):
     R_AA, R_BB, R_AB, mask = _batch()
-    cfg = make_mock_config(
-        ensemble_kspace_shape=shape, ensemble_kspace_floor=floor
-    )
+    cfg = make_mock_config(ensemble_kspace_shape=shape, ensemble_kspace_floor=floor)
     kw = {"P_win": _p_win()} if floor == "coloured" else {}
     c = fit_windows_kspace_lm(
         R_AA, R_BB, R_AB, mask, CORR, cfg, 0, return_diagnostics=True, **kw
@@ -146,9 +143,7 @@ class TestCParity:
         (_, _, ic, _), (_, _, ip, _), _ = _run_both(shape, floor)
         cols = [c for c in range(16) if c not in (14, 15)]
         assert np.array_equal(ic[:, cols], ip[:, cols], equal_nan=True)
-        np.testing.assert_allclose(
-            ic[:, 14:16], ip[:, 14:16], rtol=0, atol=1e-12
-        )
+        np.testing.assert_allclose(ic[:, 14:16], ip[:, 14:16], rtol=0, atol=1e-12)
 
     def test_diag_keys_match(self, shape, floor):
         (_, _, _, dc), (_, _, _, dp), _ = _run_both(shape, floor)
@@ -178,7 +173,10 @@ class TestCParity:
             if key not in dc:
                 continue
             np.testing.assert_allclose(
-                dc[key][ok], dp[key][ok], rtol=1e-8, atol=1e-10,
+                dc[key][ok],
+                dp[key][ok],
+                rtol=1e-8,
+                atol=1e-10,
                 err_msg=f"diag['{key}'] disagrees for {shape}/{floor}",
             )
 
@@ -239,12 +237,23 @@ class TestLoaderContract:
         R_AA, R_BB, R_AB, mask = _batch()
         with pytest.raises(ValueError, match="requires P_win"):
             fit_windows_kspace_lm(
-                R_AA, R_BB, R_AB, mask, CORR,
-                make_mock_config(ensemble_kspace_floor="coloured"), 0,
+                R_AA,
+                R_BB,
+                R_AB,
+                mask,
+                CORR,
+                make_mock_config(ensemble_kspace_floor="coloured"),
+                0,
             )
         with pytest.raises(ValueError, match="wiring bug"):
             fit_windows_kspace_lm(
-                R_AA, R_BB, R_AB, mask, CORR, make_mock_config(), 0,
+                R_AA,
+                R_BB,
+                R_AB,
+                mask,
+                CORR,
+                make_mock_config(),
+                0,
                 P_win=_p_win(),
             )
 

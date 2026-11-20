@@ -144,7 +144,7 @@ def _make_config(
 
 
 # ===========================================================================
-# Tests: validate_ensemble_config
+# Tests for validate_ensemble_config
 # ===========================================================================
 
 
@@ -340,7 +340,7 @@ class TestValidateEnsembleConfig:
 
 
 # ===========================================================================
-# Tests: validate_batch_size_for_pod
+# Tests for validate_batch_size_for_pod
 # ===========================================================================
 
 

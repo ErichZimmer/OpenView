@@ -44,7 +44,7 @@ BUFFER_FORMAT_WORD = -4
 # extra_flags of every real version-1 file (drive-survey distinct_values.md).
 EXTRA_FLAGS_REAL = 5
 # Header bytes 30..43 of every real pack-20 file checked (version 0 and 1).
-HEADER_PACK20_BYTES_30_44 = bytes.fromhex("1400000000000000" "0a000200" "0000")
+HEADER_PACK20_BYTES_30_44 = bytes.fromhex("14000000000000000a0002000000")
 IEH_END = 0
 # Real three-string form: "slope offset", unit, description.
 SCALE_RECORDS = (

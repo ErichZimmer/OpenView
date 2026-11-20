@@ -87,8 +87,14 @@ def _build_scene():
         SteppedParams(dot_spacing_mm=SPACING_MM, step_height_mm=STEP_MM)
     )
     gt_z = _gt_z()
-    pl1 = [_level_a_label(det.detect(im), p, gt_z) for im, p in zip(imgs1, projs1)]
-    pl2 = [_level_a_label(det.detect(im), p, gt_z) for im, p in zip(imgs2, projs2)]
+    pl1 = [
+        _level_a_label(det.detect(im), p, gt_z)
+        for im, p in zip(imgs1, projs1, strict=True)
+    ]
+    pl2 = [
+        _level_a_label(det.detect(im), p, gt_z)
+        for im, p in zip(imgs2, projs2, strict=True)
+    ]
     return {
         "images": {1: imgs1, 2: imgs2},
         "fiducials": {1: _fiducials(projs1[0]), 2: _fiducials(projs2[0])},
@@ -193,7 +199,8 @@ def _detect(client, cameras):
 
 def _spec(scene, camera):
     pose_levels = {
-        str(fi): lbl for fi, lbl in zip(FRAMES, scene["pose_levels"][camera])
+        str(fi): lbl
+        for fi, lbl in zip(FRAMES, scene["pose_levels"][camera], strict=True)
     }
     return {
         "fiducials": scene["fiducials"][camera],

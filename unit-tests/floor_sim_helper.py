@@ -28,7 +28,7 @@ def frac_shift(
     offsets, weights_fun = KERNEL_TAPS[kernel]
     w = weights_fun(f)
     out = np.zeros_like(img)
-    for wt, d in zip(w, offsets):
+    for wt, d in zip(w, offsets, strict=True):
         if wt != 0.0:
             out += wt * np.roll(img, -int(d), axis=axis)
     return out
@@ -71,7 +71,9 @@ def simulate_floor(
     both chains (background methods without 'window_mean').
     """
     if weights is not None:
-        w_A = np.asarray(weights[0], dtype=np.float64)
+        # weights[0] (w_A, the singlepix weight) is unused: both frames are
+        # weighted by w_B. Whether that matches the C accumulator is an open
+        # question, deferred to the k-space session (ACTIVE.md ensemble backlog).
         w_B = np.asarray(weights[1], dtype=np.float64)
         sh, sw = w_B.shape
         sy, sx = sh // 2, sw // 2

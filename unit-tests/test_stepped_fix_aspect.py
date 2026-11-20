@@ -144,7 +144,9 @@ def anisotropic_mono_scene():
             np.full(MONO.TROUGH_COLS * MONO.TROUGH_ROWS, -MONO.STEP_MM),
         ]
     )
-    pose_levels = [MONO._level_a_label(d, p, gt_z) for d, p in zip(detections, projs)]
+    pose_levels = [
+        MONO._level_a_label(d, p, gt_z) for d, p in zip(detections, projs, strict=True)
+    ]
     return K_true, images, detections, fiducials, pose_levels
 
 

@@ -82,7 +82,7 @@ def generate_charuco_images(
         raise RuntimeError("Failed to detect corners in hi-res frontal image")
 
     id_to_frontal_px = {}
-    for corner, cid in zip(charuco_corners, charuco_ids.flatten()):
+    for corner, cid in zip(charuco_corners, charuco_ids.flatten(), strict=True):
         id_to_frontal_px[int(cid)] = corner.flatten()
 
     obj_pts_all = board.getChessboardCorners()
@@ -174,8 +174,8 @@ def generate_charuco_dataset(
     )
     print(f"ChArUco ground truth saved to {gt_path}")
     print(
-        f"  fx={cam_mtx[0,0]:.1f}  fy={cam_mtx[1,1]:.1f}  "
-        f"cx={cam_mtx[0,2]:.1f}  cy={cam_mtx[1,2]:.1f}"
+        f"  fx={cam_mtx[0, 0]:.1f}  fy={cam_mtx[1, 1]:.1f}  "
+        f"cx={cam_mtx[0, 2]:.1f}  cy={cam_mtx[1, 2]:.1f}"
     )
 
 

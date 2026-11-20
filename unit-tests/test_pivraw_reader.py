@@ -63,8 +63,10 @@ from pivtools_core.image_handling.path_utils import (  # noqa: E402
     infer_image_type,
     validate_images_generic,
 )
-from pivtools_core.image_handling.readers import get_reader  # noqa: E402
-from pivtools_core.image_handling.readers import pivraw_reader  # noqa: E402
+from pivtools_core.image_handling.readers import (
+    get_reader,  # noqa: E402
+    pivraw_reader,  # noqa: E402
+)
 from pivtools_core.image_handling.readers.pivraw_reader import (  # noqa: E402
     PivrawError,
     clear_header_cache,

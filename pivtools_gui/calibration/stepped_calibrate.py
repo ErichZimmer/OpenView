@@ -398,7 +398,7 @@ def _view_residuals(
 ) -> list:
     """Per-point reprojection residual (px) for every view, position-aligned."""
     out = []
-    for obj, img, rv, tv in zip(obj_views, img_views, rvecs, tvecs):
+    for obj, img, rv, tv in zip(obj_views, img_views, rvecs, tvecs, strict=True):
         proj, _ = cv2.projectPoints(np.asarray(obj, np.float64), rv, tv, K, dist)
         out.append(
             np.linalg.norm(proj.reshape(-1, 2) - np.asarray(img, np.float64), axis=1)
@@ -450,7 +450,7 @@ def fit_pinhole(
 
     init_objs = []
     init_imgs = []
-    for obj, img in zip(obj_views, img_views):
+    for obj, img in zip(obj_views, img_views, strict=True):
         mask = np.abs(obj[:, 2] - z_for_init) < 0.5
         if mask.sum() < 4:
             continue
@@ -1035,11 +1035,13 @@ def calibrate_stepped_mono(
                 )
         dropped = [
             f"pose {used_pose_indices[vi]} ({x:.1f}, {y:.1f}) {r:.1f} px"
-            for vi, (img, k, res) in enumerate(zip(pose_img_views, keep, resid))
-            for (x, y), r in zip(img[~k], res[~k])
+            for vi, (img, k, res) in enumerate(
+                zip(pose_img_views, keep, resid, strict=True)
+            )
+            for (x, y), r in zip(img[~k], res[~k], strict=True)
         ]
-        pose_obj_views = [o[k] for o, k in zip(pose_obj_views, keep)]
-        pose_img_views = [i[k] for i, k in zip(pose_img_views, keep)]
+        pose_obj_views = [o[k] for o, k in zip(pose_obj_views, keep, strict=True)]
+        pose_img_views = [i[k] for i, k in zip(pose_img_views, keep, strict=True)]
         n_gated += n_bad
         logger.warning(
             f"cam{camera}: reprojection gate removed {n_bad} dot(s) above "

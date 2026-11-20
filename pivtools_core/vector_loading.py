@@ -445,7 +445,8 @@ def load_vectors_from_directory(
         )
     if missing_count:
         warnings.warn(
-            f"{missing_count} vector files missing in {data_dir} (loaded {len(existing_paths)})"
+            f"{missing_count} vector files missing in {data_dir} (loaded {len(existing_paths)})",
+            stacklevel=2,
         )
 
     # Convert runs (1-based) to zero-based indices for reading
@@ -463,11 +464,12 @@ def load_vectors_from_directory(
             # Debugging: print shape, dtype, and file info
             if first_arr.ndim != 4:
                 warnings.warn(
-                    f"[DEBUG] Unexpected array ndim={first_arr.ndim} in {p.name}"
+                    f"[DEBUG] Unexpected array ndim={first_arr.ndim} in {p.name}",
+                    stacklevel=2,
                 )
             break
         except Exception as e:
-            warnings.warn(f"Failed to read {p.name} during probing: {e}")
+            warnings.warn(f"Failed to read {p.name} during probing: {e}", stacklevel=2)
             raise
     if first_arr is None:
         raise FileNotFoundError(f"Could not read any valid vector files in {data_dir}")
@@ -516,7 +518,8 @@ def load_coords_from_directory(
             if len(zero_based) != len(runs):
                 missing = sorted(set(runs) - set([z + 1 for z in zero_based]))
                 warnings.warn(
-                    f"Skipping out-of-range run indices {missing} for coordinates"
+                    f"Skipping out-of-range run indices {missing} for coordinates",
+                    stacklevel=2,
                 )
         else:
             zero_based = list(range(coords.size))
@@ -528,7 +531,8 @@ def load_coords_from_directory(
     else:
         if runs and 1 not in runs:
             warnings.warn(
-                "Requested runs do not include run 1 present in coordinates; returning empty coords"
+                "Requested runs do not include run 1 present in coordinates; returning empty coords",
+                stacklevel=2,
             )
             return [], []
         x, y = _xy_from_struct(coords)
@@ -543,8 +547,10 @@ def load_coords_from_directory(
 # =============================================================================
 
 
-# Variables to exclude from plotting (metadata, not 2D plottable)
+# Variables never offered for plotting: grid metadata, not fields.
 EXCLUDED_VARS = {
+    "x",
+    "y",
     "win_ctrs_x",
     "win_ctrs_y",
     "window_size",
@@ -554,34 +560,79 @@ EXCLUDED_VARS = {
     "padded_pred_y",
 }
 
+# A multi-peak ``peak_mag`` is stored (n_peaks, H, W); the viewer picks the plane
+# per vector through ``peak_choice`` (shared_utils.load_and_plot_data).
+PEAK_STACK_VAR = "peak_mag"
+PEAK_STACK_INDEX_VAR = "peak_choice"
+
+
+class ResultFileError(ValueError):
+    """A result ``.mat`` file exists but cannot be read as a result."""
+
+
+def load_result_mat(file_path: Union[str, Path], var_name: str = "piv_result") -> Any:
+    """
+    Load one result ``.mat`` file and return its ``var_name`` entry.
+
+    Args:
+        file_path: Path to an existing .mat file
+        var_name: Struct name in the file ("piv_result" or "ensemble_result")
+
+    Returns:
+        ``mat[var_name]`` as loaded with ``struct_as_record=False, squeeze_me=True``
+
+    Raises:
+        ResultFileError: The file cannot be loaded or lacks ``var_name``. The
+            message names the file.
+    """
+    try:
+        mat = scipy.io.loadmat(str(file_path), struct_as_record=False, squeeze_me=True)
+    # scipy has no single error type for a bad file: MatReadError, IndexError,
+    # ValueError, TypeError and NotImplementedError (v7.3/HDF5) are all seen. Any
+    # of them is re-raised naming the file, never swallowed.
+    except Exception as err:
+        raise ResultFileError(f"{file_path}: cannot be read ({err})") from err
+    if var_name not in mat:
+        raise ResultFileError(f"{file_path}: no '{var_name}' struct in the file")
+    return mat[var_name]
+
 
 def get_plottable_vars(
     file_path: Union[str, Path],
     var_name: str = "piv_result",
     fields_to_check: Sequence[str] = ("ux", "uy"),
+    include_peak_stack: bool = False,
 ) -> List[str]:
     """
-    Extract names of 2D plottable variables from a .mat file.
+    Names of the plottable 2D variables in a result ``.mat`` file.
+
+    The single source for every variable dropdown (vector viewer and video maker).
+    An absent file has no variables and gives ``[]``: callers probe optional sources
+    (mean stats, ensemble) this way. A file that exists but cannot be read raises.
 
     Args:
         file_path: Path to .mat file
-        var_name: Variable name in mat file ("piv_result" or "ensemble_result")
-        fields_to_check: Fields to use for finding valid struct element
+        var_name: Struct name in the file ("piv_result" or "ensemble_result")
+        fields_to_check: Fields that must be non-empty for a struct element (one
+            per pass) to count as populated; unsaved passes hold empty arrays
+        include_peak_stack: Also list a 3D multi-peak ``peak_mag`` when the
+            element carries ``peak_choice`` to index it. Only for callers that
+            resolve the stack (the vector viewer's plot route)
 
     Returns:
-        List of variable names that are 2D arrays suitable for plotting
+        Variable names in alphabetical order
+
+    Raises:
+        ResultFileError: The file cannot be loaded, lacks ``var_name``, or
+            ``var_name`` is not a struct. The message names the file.
     """
     file_path = Path(file_path)
     if not file_path.exists():
         return []
 
-    mat = scipy.io.loadmat(str(file_path), struct_as_record=False, squeeze_me=True)
-    if var_name not in mat:
-        return []
+    data = load_result_mat(file_path, var_name)
 
-    data = mat[var_name]
-
-    # Get first valid struct element
+    # One struct element per pass; take the first populated one.
     if isinstance(data, np.ndarray) and data.dtype == object and data.size > 0:
         struct = None
         for el in data.flat:
@@ -590,48 +641,47 @@ def get_plottable_vars(
             ):
                 struct = el
                 break
-        if struct is None and data.size > 0:
+        if struct is None:
             struct = data.flat[0]
     else:
         struct = data
 
-    return get_plottable_vars_from_struct(struct)
+    if not hasattr(struct, "_fieldnames"):
+        raise ResultFileError(
+            f"{file_path}: '{var_name}' is not a struct (got {type(struct).__name__})"
+        )
+    return get_plottable_vars_from_struct(struct, include_peak_stack)
 
 
-def get_plottable_vars_from_struct(struct: Any) -> List[str]:
+def get_plottable_vars_from_struct(
+    struct: Any, include_peak_stack: bool = False
+) -> List[str]:
     """
-    Extract names of 2D plottable variables from a loaded struct.
+    Names of the plottable 2D variables in one loaded MATLAB struct.
 
     Args:
-        struct: A loaded MATLAB struct with field attributes
+        struct: A ``scipy.io.matlab.mat_struct`` (``loadmat`` with
+            ``struct_as_record=False``)
+        include_peak_stack: See :func:`get_plottable_vars`
 
     Returns:
-        List of variable names that are 2D arrays suitable for plotting
+        Variable names in alphabetical order
     """
-    if struct is None:
-        return []
-
-    # Get all attribute names
-    all_vars = [
-        n
-        for n in dir(struct)
-        if not n.startswith("_") and not callable(getattr(struct, n, None))
-    ]
-
+    has_peak_index = PEAK_STACK_INDEX_VAR in struct._fieldnames
     plottable = []
-    for var_name in all_vars:
-        if var_name in EXCLUDED_VARS:
+    for name in sorted(struct._fieldnames):
+        if name in EXCLUDED_VARS:
             continue
-        try:
-            val = getattr(struct, var_name, None)
-            if val is None:
-                continue
-            arr = np.asarray(val)
-            if arr.ndim == 2 and arr.size > 0:
-                plottable.append(var_name)
-        except Exception:
-            continue
-
+        arr = np.asarray(getattr(struct, name))
+        if arr.ndim == 2 and arr.size > 0:
+            plottable.append(name)
+        elif (
+            include_peak_stack
+            and name == PEAK_STACK_VAR
+            and has_peak_index
+            and arr.ndim == 3
+        ):
+            plottable.append(name)
     return plottable
 
 

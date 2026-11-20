@@ -221,10 +221,8 @@ def compute_window_centers(
     win_spacing_x = max(1, win_spacing_x)
     win_spacing_y = max(1, win_spacing_y)
 
-    # UNIFIED FORMULA: Ensures only full windows fit
-    # Equivalent to both:
-    #   - (win_width - 1) / 2.0
-    #   - -0.5 + win_width / 2.0
+    # UNIFIED FORMULA: Ensures only full windows fit.
+    # The first centre equals (win_width - 1) / 2 and also win_width / 2 - 0.5.
     first_ctr_x = (win_width - 1) / 2.0
     last_ctr_x = W - (win_width + 1) / 2.0
     first_ctr_y = (win_height - 1) / 2.0
@@ -487,14 +485,14 @@ def apply_single_mode_padding(
     )
 
     if image.ndim == 2:
-        # (H, W)
+        # Image axes (H, W)
         pad_width = (
             (pad_top, pad_bottom),
             (pad_left, pad_right),
         )
 
     elif image.ndim == 3:
-        # (N, H, W)
+        # Image axes (N, H, W)
         pad_width = (
             (0, 0),
             (pad_top, pad_bottom),
@@ -502,7 +500,7 @@ def apply_single_mode_padding(
         )
 
     elif image.ndim == 4:
-        # (N, 2, H, W)
+        # Image axes (N, 2, H, W)
         pad_width = (
             (0, 0),  # batch (N)
             (0, 0),  # channel (2)

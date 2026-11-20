@@ -37,8 +37,8 @@ _CAM_POSES = {
     3: (np.array([0.00, -0.32, 0.0]), np.array([-10.0, -60.0, 540.0])),
 }
 # Each camera sees a partial column window; adjacent windows overlap (a connected chain).
-_CAM_WINDOWS = {1: range(0, 7), 2: range(4, 10), 3: range(7, 12)}
-_ROWS = range(0, 9)
+_CAM_WINDOWS = {1: range(7), 2: range(4, 10), 3: range(7, 12)}
+_ROWS = range(9)
 _N_VIEWS = 4
 
 
@@ -194,7 +194,9 @@ def test_inconsistent_correspondences_raise():
     # Corrupt cam2 view0's second correspondence to point at the WRONG dot in cam1.
     bad = [a for a in spec.anchors if a.camera == 2 and a.view == 0][0]
     bad.correspondences[1] = Correspondence(
-        pixel_of[(2, 0)][(6, 2)], (1, 0), pixel_of[(1, 0)][(4, 5)]  # mismatched ref dot
+        pixel_of[(2, 0)][(6, 2)],
+        (1, 0),
+        pixel_of[(1, 0)][(4, 5)],  # mismatched ref dot
     )
     with pytest.raises(ValueError):
         resolve_global_grid(detections, spec, spacing_mm=SPACING)
@@ -341,7 +343,7 @@ def test_charuco_shortcircuit():
     rng = np.random.default_rng(0)
     detections = {1: [], 2: []}
     for cam in (1, 2):
-        for v in range(2):
+        for _v in range(2):
             ids = np.arange(20)
             grid = np.column_stack([ids % 5, ids // 5]).astype(np.int64)
             px = rng.uniform(0, 1000, size=(20, 2))

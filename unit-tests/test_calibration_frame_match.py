@@ -297,7 +297,7 @@ def test_a_run_without_a_dark_refuses_dark_subtracted_notes(tmp_path):
     run = copy_case(tmp_path, DF_CLEAN)
     with pytest.raises(
         CalibrationFrameMismatch,
-        match="dark_subtracted true in its " "note, false in the run",
+        match="dark_subtracted true in its note, false in the run",
     ):
         _plan(_piv_config(tmp_path, run), _calibration(tmp_path))
 
@@ -309,8 +309,7 @@ def test_a_rotated_run_refuses_unrotated_notes(tmp_path):
     edit_run_yaml(run, config=data["config"])
     with pytest.raises(
         CalibrationFrameMismatch,
-        match="camera 1, 00001.tif: "
-        "view_rotation none in its note, ccw90 in the run",
+        match="camera 1, 00001.tif: view_rotation none in its note, ccw90 in the run",
     ):
         _plan(_piv_config(tmp_path, run), _calibration(tmp_path))
 
@@ -319,7 +318,7 @@ def test_a_missing_note_is_refused_by_name(tmp_path):
     run = copy_case(tmp_path, DF_DARK)
     source = _calibration(tmp_path, {(2, 1): None})
     with pytest.raises(
-        CalibrationFrameMismatch, match="camera 2, 00001.tif: no " "image note"
+        CalibrationFrameMismatch, match="camera 2, 00001.tif: no image note"
     ):
         _plan(_piv_config(tmp_path, run), source)
 
@@ -369,8 +368,9 @@ def test_the_gui_apply_route_returns_the_refusal(tmp_path, monkeypatch):
     assert resp.status_code == 400
     assert body["success"] is False
     assert "job_id" not in body
-    assert "camera 2, 00002.tif: camera_serial SIM1 in its note, SIM2 in the run" in (
-        body["error"]
+    assert (
+        "camera 2, 00002.tif: camera_serial SIM1 in its note, SIM2 in the run"
+        in (body["error"])
     )
 
 
@@ -1042,8 +1042,9 @@ def test_gui_self_cal_refuses_a_frame_mismatch_before_any_job(tmp_path, monkeypa
     before = _jobs("calibration_self_cal")
     resp = _client(V).post("/calibration/self_cal/run", json=_self_cal_body())
     assert resp.status_code == 400
-    assert "camera 2, 00001.tif: view_rotation cw90 in its note, none in the run" in (
-        resp.get_json()["error"]
+    assert (
+        "camera 2, 00001.tif: view_rotation cw90 in its note, none in the run"
+        in (resp.get_json()["error"])
     )
     assert _jobs("calibration_self_cal") == before
 

@@ -63,9 +63,9 @@ class TestFindAutoMode:
         expected = int(pod_ref["N_auto1"])
 
         result = find_auto_mode(PSI1, eigVal1, n_images)
-        assert (
-            result == expected
-        ), f"Channel 1: Python find_auto_mode={result}, MATLAB N_auto1={expected}"
+        assert result == expected, (
+            f"Channel 1: Python find_auto_mode={result}, MATLAB N_auto1={expected}"
+        )
 
     def test_channel2_mode_count(self, pod_ref):
         """Python find_auto_mode on channel 2 matches MATLAB N_auto2."""
@@ -75,9 +75,9 @@ class TestFindAutoMode:
         expected = int(pod_ref["N_auto2"])
 
         result = find_auto_mode(PSI2, eigVal2, n_images)
-        assert (
-            result == expected
-        ), f"Channel 2: Python find_auto_mode={result}, MATLAB N_auto2={expected}"
+        assert result == expected, (
+            f"Channel 2: Python find_auto_mode={result}, MATLAB N_auto2={expected}"
+        )
 
 
 class TestPODEigenvalues:
@@ -305,9 +305,9 @@ class TestTimeFilter:
 
         filtered = time_filter_batch(batch, verbose=False)
 
-        assert (
-            filtered.min() >= -1e-6
-        ), f"Time-filtered output has negative values: min = {filtered.min()}"
+        assert filtered.min() >= -1e-6, (
+            f"Time-filtered output has negative values: min = {filtered.min()}"
+        )
 
     def test_minimum_frame_near_zero(self, time_ref):
         """After time filtering, the frame that was the per-pixel minimum
@@ -342,7 +342,7 @@ class TestPODFilterStandalone:
     def test_find_auto_mode_all_noise(self):
         """If all eigenvalues are ~equal (pure noise), return 0 (nothing to remove)."""
         n = 20
-        PSI = np.random.randn(n, n)
+        PSI = np.random.default_rng(0).standard_normal((n, n))
         # Orthogonalize to get realistic eigenvectors
         PSI, _ = np.linalg.qr(PSI)
         eigvals = np.ones(n)  # flat spectrum = noise
@@ -376,7 +376,7 @@ class TestPODFilterStandalone:
 
     def test_pod_filter_preserves_shape(self):
         """Output shape and dtype match input."""
-        images = np.random.rand(10, 32, 32).astype(np.float32)
+        images = np.random.default_rng(0).random((10, 32, 32)).astype(np.float32)
         filtered = pod_filter_single_channel(images.copy(), verbose=False)
         assert filtered.shape == images.shape
         assert filtered.dtype == images.dtype
@@ -402,7 +402,9 @@ class TestPODFilterStandalone:
 
     def test_time_filter_batch_shape(self):
         """time_filter_batch preserves shape and dtype."""
-        batch = np.random.rand(10, 2, 32, 32).astype(np.float32) + 10.0
+        batch = (
+            np.random.default_rng(0).random((10, 2, 32, 32)).astype(np.float32) + 10.0
+        )
         result = time_filter_batch(batch.copy(), verbose=False)
         assert result.shape == batch.shape
         assert result.dtype == batch.dtype
@@ -424,9 +426,7 @@ class TestPODFilterStandalone:
         """
         rng = np.random.RandomState(7)
         n, h, w = 16, 64, 64
-        yy, xx = np.meshgrid(
-            np.linspace(0, 1, h), np.linspace(0, 1, w), indexing="ij"
-        )
+        yy, xx = np.meshgrid(np.linspace(0, 1, h), np.linspace(0, 1, w), indexing="ij")
         modes = [
             500.0 * np.exp(-((yy - 0.5) ** 2 + (xx - 0.5) ** 2) / 0.1),
             50.0 * (xx * yy),
@@ -434,7 +434,7 @@ class TestPODFilterStandalone:
         ]
         images = np.zeros((n, h, w), dtype=np.float32)
         for i in range(n):
-            for amp_scale, m in zip((0.2, 0.5, 0.8), modes):
+            for amp_scale, m in zip((0.2, 0.5, 0.8), modes, strict=True):
                 coeff = np.float32(1.0 + amp_scale * rng.randn())
                 images[i] += coeff * m.astype(np.float32)
             images[i] += rng.rand(h, w).astype(np.float32)  # small noise
@@ -450,9 +450,7 @@ class TestPODFilterStandalone:
 
         # The comparison is only meaningful if both precisions select the
         # same modes (guaranteed here by the separated spectrum).
-        C32 = (images.reshape(n, h * w) @ images.reshape(n, h * w).T).astype(
-            np.float64
-        )
+        C32 = (images.reshape(n, h * w) @ images.reshape(n, h * w).T).astype(np.float64)
         PSI32, S32, _ = np.linalg.svd(C32, full_matrices=False)
         assert find_auto_mode(PSI32, S32, n) == n_remove
         for mode_i in range(n_remove):

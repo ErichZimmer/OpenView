@@ -35,7 +35,7 @@ from pivtools_cli.piv.save_results import (
     get_output_path,
     save_coordinates_from_config_distributed,
 )
-from pivtools_cli.piv_cluster.cluster import start_cluster
+from pivtools_cli.piv_cluster.cluster import shutdown_cluster, start_cluster
 from pivtools_cli.processing.dask_pipeline import (
     correlate_and_save_batch,
     create_filter_pipeline,
@@ -194,10 +194,12 @@ def signal_handler(signum, frame):
     try:
         if _client is not None:
             logger.info("Cancelling pending futures...")
+            # Shutdown must continue even if the cancel fails (no futures, already
+            # cancelled, scheduler gone), so the failure is only logged.
             try:
                 _client.cancel(_client.futures, force=True)
             except Exception:
-                pass
+                logger.debug("Cancelling pending futures failed", exc_info=True)
 
             logger.info("Closing Dask client...")
             _client.close(timeout=5)
@@ -357,8 +359,6 @@ def main():
         # Start Dask cluster
         logger.info("Starting Dask cluster...")
         cluster, client = start_cluster(
-            n_workers_per_node=config.dask_workers_per_node,
-            memory_limit=config.dask_memory_limit,
             config=config,
             worker_omp_threads=worker_omp_threads,
         )
@@ -477,48 +477,7 @@ def main():
     # after the cluster is shut down, so the process exits non-zero with the
     # message (the CLI wrapper prints it; a direct script run shows the traceback).
     finally:
-        # Clean shutdown - suppress noisy distributed logs during teardown
-        import io as _io
-        import logging as _logging
-        import sys as _sys
-
-        for name in [
-            "distributed.worker",
-            "distributed.scheduler",
-            "distributed.nanny",
-            "distributed.core",
-            "distributed.comm",
-            "distributed.comm.tcp",
-            "distributed.batched",
-            "tornado.application",
-            "tornado.general",
-        ]:
-            _logging.getLogger(name).setLevel(_logging.CRITICAL)
-
-        # Suppress stderr during cluster shutdown to hide Tornado tracebacks
-        _old_stderr = _sys.stderr
-        _sys.stderr = _io.StringIO()
-
-        try:
-            if _client is not None:
-                _client.close(timeout=5)
-        except Exception:
-            pass  # Suppress errors during shutdown
-
-        # Small delay to let workers finish cleanly
-        time.sleep(0.5)
-
-        try:
-            if _cluster is not None:
-                _cluster.close(timeout=5)
-        except Exception:
-            pass  # Suppress errors during shutdown
-
-        # Wait a bit more for async cleanup to complete
-        time.sleep(0.2)
-
-        # Restore stderr
-        _sys.stderr = _old_stderr
+        shutdown_cluster(_client, _cluster)
 
         end_time = time.time()
         elapsed = end_time - start_time

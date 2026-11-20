@@ -221,8 +221,12 @@ def same_side_scene():
     detections2 = [det.detect(im) for im in imgs2]
 
     gt_z = _gt_z()
-    pose_levels1 = [_level_a_label(d, p, gt_z) for d, p in zip(detections1, projs1)]
-    pose_levels2 = [_level_a_label(d, p, gt_z) for d, p in zip(detections2, projs2)]
+    pose_levels1 = [
+        _level_a_label(d, p, gt_z) for d, p in zip(detections1, projs1, strict=True)
+    ]
+    pose_levels2 = [
+        _level_a_label(d, p, gt_z) for d, p in zip(detections2, projs2, strict=True)
+    ]
 
     # Closed-form ground truth (see _cam2_pose derivation).
     R_stereo_gt = R_extra
@@ -363,9 +367,9 @@ def test_stepped_stereo_same_side_recovery(same_side_scene, request):
     d1 = m1.project(wp + vel) - m1.project(wp)
     d2 = m2.project(wp + vel) - m2.project(wp)
     vr = reconstruct_3c_at_points(m1, m2, wp, d1, d2)
-    assert (
-        np.nanmax(np.abs(vr - vel)) < 0.02
-    ), f"3C recon err {np.nanmax(np.abs(vr - vel)):.4f}"
+    assert np.nanmax(np.abs(vr - vel)) < 0.02, (
+        f"3C recon err {np.nanmax(np.abs(vr - vel)):.4f}"
+    )
 
     if request.config.getoption("--make-figures", default=False):
         _make_figure(s, rec, vel, vr)
