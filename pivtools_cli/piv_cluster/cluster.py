@@ -1,5 +1,8 @@
+import io
 import logging
 import os
+import sys
+import time
 import warnings
 from collections import defaultdict
 from typing import List, Optional, Tuple
@@ -17,6 +20,26 @@ LOCAL_DASHBOARD_ADDRESS = "127.0.0.1:8788"
 # Loopback with port 0, which lets the OS pick a free port. For the worker
 # dashboards and for in-process clusters, whose ports nobody needs to know.
 LOOPBACK_ANY_PORT = "127.0.0.1:0"
+
+# Teardown timings carried over from the runners' shutdown blocks. Each close
+# gets a bounded wait so a hung scheduler cannot hold the process open, and the
+# pauses let workers and Tornado's async callbacks finish before the next step,
+# which keeps their shutdown chatter inside the silenced window.
+SHUTDOWN_CLOSE_TIMEOUT_S = 5
+SHUTDOWN_WORKER_SETTLE_S = 0.5
+SHUTDOWN_ASYNC_CLEANUP_S = 0.2
+# Loggers that print tracebacks while a healthy cluster shuts down.
+_SHUTDOWN_NOISY_LOGGERS = (
+    "distributed.worker",
+    "distributed.scheduler",
+    "distributed.nanny",
+    "distributed.core",
+    "distributed.comm",
+    "distributed.comm.tcp",
+    "distributed.batched",
+    "tornado.application",
+    "tornado.general",
+)
 
 
 class _DaskNoiseFilter(logging.Filter):
@@ -191,6 +214,50 @@ def start_cluster(
         if cluster is not None:
             cluster.close()
         raise
+
+
+def shutdown_cluster(client: Optional[Client], cluster: Optional[object]) -> None:
+    """Close a run's Dask client and cluster without the shutdown chatter.
+
+    The distributed and Tornado loggers are silenced and stderr is redirected to a
+    discarded buffer while the two close calls run. Teardown stays non-fatal: the
+    results are already written and Tornado errors here are unpredictable. A close
+    that raises an ``Exception`` is kept and printed once stderr is restored (a
+    leaked cluster can hold ports and memory), printed rather than logged because
+    the distributed loggers are silenced. A ``BaseException`` such as
+    ``asyncio.CancelledError`` propagates, after stderr is restored, so its
+    traceback is not swallowed by the buffer.
+
+    Args:
+        client: The run's client, or ``None`` if it was never created
+        cluster: The run's cluster (``LocalCluster`` or ``SLURMCluster``), or ``None``
+    """
+    for name in _SHUTDOWN_NOISY_LOGGERS:
+        logging.getLogger(name).setLevel(logging.CRITICAL)
+
+    teardown_errors = []
+    old_stderr = sys.stderr
+    sys.stderr = io.StringIO()
+    try:
+        try:
+            if client is not None:
+                client.close(timeout=SHUTDOWN_CLOSE_TIMEOUT_S)
+        except Exception as err:
+            teardown_errors.append(f"client.close failed: {err!r}")
+
+        time.sleep(SHUTDOWN_WORKER_SETTLE_S)
+
+        try:
+            if cluster is not None:
+                cluster.close(timeout=SHUTDOWN_CLOSE_TIMEOUT_S)
+        except Exception as err:
+            teardown_errors.append(f"cluster.close failed: {err!r}")
+
+        time.sleep(SHUTDOWN_ASYNC_CLEANUP_S)
+    finally:
+        sys.stderr = old_stderr
+        for teardown_error in teardown_errors:
+            print(f"[WARNING] Dask shutdown: {teardown_error}", flush=True)
 
 
 def setup_worker_logging(log_level=logging.INFO, log_file=None, log_console=True):

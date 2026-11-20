@@ -296,19 +296,7 @@ def plot_ensemble():
                 404,
             )
 
-        mat = loadmat(str(ensemble_file), struct_as_record=False, squeeze_me=True)
-        if "ensemble_result" not in mat:
-            return (
-                jsonify(
-                    {
-                        "success": False,
-                        "error": "Variable 'ensemble_result' not found in mat",
-                    }
-                ),
-                400,
-            )
-
-        ensemble_result = mat["ensemble_result"]
+        ensemble_result = load_result_mat(ensemble_file, "ensemble_result")
 
         # Use centralized helper from vector_loading (same as instantaneous data)
         pr, effective_run = find_non_empty_run(
@@ -706,19 +694,7 @@ def check_runs():
                     404,
                 )
 
-            mat = loadmat(str(ensemble_file), struct_as_record=False, squeeze_me=True)
-            if "ensemble_result" not in mat:
-                return (
-                    jsonify(
-                        {
-                            "success": False,
-                            "error": "Variable 'ensemble_result' not found",
-                        }
-                    ),
-                    400,
-                )
-
-            ensemble_result = mat["ensemble_result"]
+            ensemble_result = load_result_mat(ensemble_file, "ensemble_result")
             runs = []
             # Use default var for run check (ux is typically available)
             check_var = "ux"
@@ -1266,10 +1242,7 @@ def get_vector_at_position():
 
         # Handle ensemble-specific loading
         if var_source == "ens":
-            mat = loadmat(str(mat_path), struct_as_record=False, squeeze_me=True)
-            if "ensemble_result" not in mat:
-                raise ValueError("Variable 'ensemble_result' not found in mat file")
-            piv_result = mat["ensemble_result"]
+            piv_result = load_result_mat(mat_path, "ensemble_result")
             _, var_name = split_var_source(params["var"])
         else:
             piv_result = load_piv_result(mat_path)

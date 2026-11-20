@@ -260,11 +260,17 @@ def b_mask_for(pr: Any, var_arr: np.ndarray, mat_path: Path) -> np.ndarray:
     """
     The boolean ``b_mask`` of one result pass element, checked against its data.
 
-    Every writer of a plotted result emits ``b_mask`` on every pass element (PIV
-    ``save_results`` instantaneous and ensemble, calibration apply and stereo
+    Every writer of a plotted result emits a ``b_mask`` field on every pass element
+    (PIV ``save_results`` instantaneous and ensemble, calibration apply and stereo
     reconstruction in ``calibration/runio.py``, ``vector_merger``, mean and
-    per-frame statistics). One that is missing, not numeric/boolean, or not the
-    shape of the plotted field is a stale or broken file.
+    per-frame statistics). The field can still be empty on a populated pass: the
+    calibration apply writer (``runio._vectors_struct``) writes an empty array when
+    the source frame's pass had a zero-size ``b_mask``, and the ensemble writer
+    (``save_results._create_ensemble_struct_all_passes``) leaves its empty
+    placeholder when the pass result has no mask, which happens when a resumed run
+    reloads an earlier pass whose stored ``b_mask`` was empty. Fresh PIV always
+    computes a mask. A ``b_mask`` that is missing, not numeric/boolean, empty or not
+    the shape of the plotted field is a stale or broken file, to be regenerated.
 
     Args:
         pr: A ``piv_result`` or ``ensemble_result`` element (``loadmat`` with
@@ -276,7 +282,7 @@ def b_mask_for(pr: Any, var_arr: np.ndarray, mat_path: Path) -> np.ndarray:
         ``b_mask`` as a bool array of ``var_arr``'s shape
 
     Raises:
-        ValueError: ``b_mask`` is missing, of a non-mask dtype, or of another
+        ValueError: ``b_mask`` is missing, of a non-mask dtype, empty or of another
             shape. The message names the file.
     """
     if not hasattr(pr, "b_mask"):
@@ -287,9 +293,11 @@ def b_mask_for(pr: Any, var_arr: np.ndarray, mat_path: Path) -> np.ndarray:
             f"{mat_path}: b_mask has dtype {stored.dtype}, not a boolean mask"
         )
     if stored.shape != var_arr.shape:
+        held = "an empty b_mask" if stored.size == 0 else f"b_mask shape {stored.shape}"
         raise ValueError(
-            f"{mat_path}: b_mask shape {stored.shape} does not match the "
-            f"field's shape {var_arr.shape}"
+            f"{mat_path}: the file holds {held}, which does not match the field's "
+            f"shape {var_arr.shape}; regenerate this result (re-run the step that "
+            "wrote it)"
         )
     return stored.astype(bool)
 
