@@ -28,7 +28,6 @@ import cv2
 import numpy as np
 import pytest
 from scipy.spatial import cKDTree
-from test_calibration_stepped_stereo import same_side_scene  # noqa: F401  (fixture)
 from test_calibration_stepped_stereo import (  # noqa: E402  (sibling-test reuse)
     PEAK_COLS,
     PEAK_ROWS,
@@ -38,6 +37,7 @@ from test_calibration_stepped_stereo import (  # noqa: E402  (sibling-test reuse
     H,
     W,
     _angle_between,
+    same_side_scene,  # noqa: F401  (fixture)
 )
 
 from pivtools_cli import generate_synthetic_stepped as gstep

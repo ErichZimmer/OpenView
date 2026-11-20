@@ -215,11 +215,11 @@ class TestOracleAgreement:
         for _ in range(n_cases // _LANES):
             planes = np.stack([_gauss_plane(rng, fit_type) for _ in range(_LANES)])
             bloc, _ = _run_batch(planes, _LANES, fit_type)
-            for l in range(_LANES):
-                sloc, _ = _run_scalar(planes[l], fit_type)
-                assert np.isnan(sloc[0]) == np.isnan(bloc[0, l])
+            for lane in range(_LANES):
+                sloc, _ = _run_scalar(planes[lane], fit_type)
+                assert np.isnan(sloc[0]) == np.isnan(bloc[0, lane])
                 if not np.isnan(sloc[0]):
-                    d = np.hypot(sloc[0] - bloc[0, l], sloc[1] - bloc[1, l])
+                    d = np.hypot(sloc[0] - bloc[0, lane], sloc[1] - bloc[1, lane])
                     dmax = max(dmax, float(d))
         assert dmax < 1e-3, f"type {fit_type}: max |dloc| {dmax:.2e} px vs oracle"
 
@@ -251,19 +251,19 @@ class TestOracleAgreement:
         for _ in range(n_batches):
             amps = rng.uniform(100.0, 1000.0, _LANES)
             planes = []
-            for l in range(_LANES):
+            for lane in range(_LANES):
                 rng2 = np.random.RandomState(rng.randint(2**31))
                 p = _gauss_plane(rng2, fit_type)
-                p *= amps[l] / p.max()
+                p *= amps[lane] / p.max()
                 planes.append(p)
             planes = np.stack(planes) + rng.normal(
                 0, sigma, (_LANES, PLANE_N, PLANE_N)
             ).astype(np.float32)
             bloc, _ = _run_batch(planes, _LANES, fit_type)
-            for l in range(_LANES):
-                sloc, _ = _run_scalar(planes[l], fit_type)
-                sn, bn = bool(np.isnan(sloc[0])), bool(np.isnan(bloc[0, l]))
-                in_safe_band = (sigma / amps[l]) < 0.8 * boundary
+            for lane in range(_LANES):
+                sloc, _ = _run_scalar(planes[lane], fit_type)
+                sn, bn = bool(np.isnan(sloc[0])), bool(np.isnan(bloc[0, lane]))
+                in_safe_band = (sigma / amps[lane]) < 0.8 * boundary
                 if sn != bn:
                     if in_safe_band:
                         safe_flips += 1
@@ -273,7 +273,7 @@ class TestOracleAgreement:
                     marginal_total += 1
                 if not sn and not bn:
                     p99_pool.append(
-                        np.hypot(sloc[0] - bloc[0, l], sloc[1] - bloc[1, l])
+                        np.hypot(sloc[0] - bloc[0, lane], sloc[1] - bloc[1, lane])
                     )
         assert safe_flips == 0, (
             f"type {fit_type}: {safe_flips} NaN flips on GOOD fits (safe band) — "
@@ -315,15 +315,15 @@ class TestFailureMasks:
         ]
         planes = np.stack([self._pathological(k, rng) for k in kinds])
         bloc, bstd = _run_batch(planes, _LANES, fit_type)
-        for l in range(_LANES):
-            sloc, _ = _run_scalar(planes[l], fit_type)
-            assert np.isnan(sloc[0]) == np.isnan(bloc[0, l]), (
-                f"lane {l} ({kinds[l]}): scalar "
+        for lane in range(_LANES):
+            sloc, _ = _run_scalar(planes[lane], fit_type)
+            assert np.isnan(sloc[0]) == np.isnan(bloc[0, lane]), (
+                f"lane {lane} ({kinds[lane]}): scalar "
                 f"{'NaN' if np.isnan(sloc[0]) else 'finite'} vs batch "
-                f"{'NaN' if np.isnan(bloc[0, l]) else 'finite'}"
+                f"{'NaN' if np.isnan(bloc[0, lane]) else 'finite'}"
             )
-            if np.isnan(bloc[0, l]):
-                assert bloc[2, l] == 0 and np.all(bstd[:, l] == 0)
+            if np.isnan(bloc[0, lane]):
+                assert bloc[2, lane] == 0 and np.all(bstd[:, lane] == 0)
 
 
 @needs_batch
@@ -337,9 +337,9 @@ class TestPartialBatch:
         full_loc, _ = _run_batch(planes, _LANES, 6)
         L = max(1, _LANES - 2)
         part_loc, _ = _run_batch(planes, L, 6)
-        for l in range(L):
+        for lane in range(L):
             for comp in range(3):
-                a, b = full_loc[comp, l], part_loc[comp, l]
+                a, b = full_loc[comp, lane], part_loc[comp, lane]
                 assert (a == b) or (np.isnan(a) and np.isnan(b))
-        for l in range(L, _LANES):
-            assert np.isnan(part_loc[0, l])
+        for lane in range(L, _LANES):
+            assert np.isnan(part_loc[0, lane])

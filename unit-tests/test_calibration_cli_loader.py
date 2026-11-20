@@ -17,17 +17,29 @@ dataset runs), not by a stand-in — see the closing note.
 
 from __future__ import annotations
 
+import struct
 import zlib
 
 import cv2
 import numpy as np
+import pytest
 
 import pivtools_cli.calibration_cli as cli
+from pivtools_core.image_handling.load_images import _detect_im7_frames_per_camera
 from pivtools_core.image_handling.path_utils import infer_image_type
+from pivtools_core.image_handling.readers import im7_reader
 from pivtools_core.image_handling.readers.davis_tokens import (
     TokenRunOverrunError,
     TruncatedTokenStreamError,
 )
+from pivtools_core.image_handling.readers.im7_reader import (
+    HEADER_FORMAT,
+    HEADER_SIZE,
+    get_im7_frame_count,
+    read_im7,
+    read_im7_camera,
+)
+from pivtools_core.image_handling.readers.lavision_reader import read_lavision_im7
 
 
 def test_infer_image_type_by_extension():
@@ -68,15 +80,6 @@ def test_load_one_standard_png_roundtrips(tmp_path):
 # Real-data proof: bit-exact vs LaVision lvpyio on merle + andre x25 frames
 # (2026-06-12); this test pins the container layout so it cannot regress.
 # ---------------------------------------------------------------------------
-
-import struct
-
-from pivtools_core.image_handling.readers.im7_reader import (
-    HEADER_FORMAT,
-    HEADER_SIZE,
-    read_im7,
-    read_im7_camera,
-)
 
 
 def _lz4_literals_block(data: bytes) -> bytes:
@@ -148,9 +151,6 @@ def test_pack20_truncated_file_fails_visibly(tmp_path):
 # to decode the whole camera slice (both A and B) and slice the result, so every
 # multi-camera .im7 calibration read decoded twice the data it needed.
 # ---------------------------------------------------------------------------
-
-from pivtools_core.image_handling.readers import im7_reader
-from pivtools_core.image_handling.readers.lavision_reader import read_lavision_im7
 
 # IEH_SCALE_X record (type 1) that opens the attribute list of every real DaVis
 # file; payload copied from a real DaVis dark image.
@@ -330,11 +330,6 @@ def test_im7_frames_clamps_to_available(tmp_path):
 # bug where a 6-frame, 3-camera (A/B) buffer mislabelled as 4 cameras failed
 # only on camera 4 with a misleading "first frame not found".
 # ---------------------------------------------------------------------------
-
-import pytest
-
-from pivtools_core.image_handling.load_images import _detect_im7_frames_per_camera
-from pivtools_core.image_handling.readers.im7_reader import get_im7_frame_count
 
 
 def test_get_im7_frame_count(tmp_path):

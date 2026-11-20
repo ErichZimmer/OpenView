@@ -17,12 +17,12 @@ from fixtures.vector_sets import (
     _frame_piv_result,
     write_stereo_vector_sets,
 )
-from test_calibration_apply_chain import chain  # noqa: F401  (pytest fixture)
 from test_calibration_apply_chain import (  # noqa: E402  (sibling-test reuse)
     N_FRAMES,
     STEREO_GRID,
     _uncal,
     _wait,
+    chain,  # noqa: F401  (pytest fixture)
 )
 from test_calibration_self_cal import _stereo_record
 

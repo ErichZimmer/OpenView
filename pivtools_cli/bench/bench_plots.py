@@ -15,8 +15,9 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Optional
 
-from . import bench_common as bc
 import matplotlib
+
+from . import bench_common as bc
 
 matplotlib.use("Agg")  # headless: write files, never open a window
 import matplotlib.pyplot as plt  # noqa: E402

@@ -227,7 +227,7 @@ def test_manual_window_encodes_linearly_in_counts():
     assert stats["enc_hi"] == 250.0
     assert (stats["data_min"], stats["data_max"]) == (30.0, 250.0)
     # Without bounds, numpy_to_base64 still passes uint8 through (calibration).
-    assert np.array_equal(_decode(numpy_to_base64(arr, format="png")), arr)
+    assert np.array_equal(_decode(numpy_to_base64(arr, img_format="png")), arr)
 
 
 def test_auto_encode_span_and_stats(rng):
@@ -394,7 +394,7 @@ def _figure(frame: np.ndarray, win: dict, out_dir: Path) -> None:
     gh, gw = _GLARE_TILES
     y0, x0 = gh * h // TILE_GRID - 128, gw * w // TILE_GRID - 128
     crop = (slice(y0, y0 + 256), slice(x0, x0 + 256))
-    old = _decode(numpy_to_base64(frame, format="png"))  # old sqrt 0.5-99.5 encode
+    old = _decode(numpy_to_base64(frame, img_format="png"))  # old sqrt 0.5-99.5 encode
     b64, stats = encode_display_frame(frame, "png")
     new = _decode(b64)
     # Client remap of the auto window inside the encode span (as the viewer does).

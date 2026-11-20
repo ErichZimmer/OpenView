@@ -17,7 +17,6 @@ from pivtools_gui.calibration import record as REC
 from pivtools_gui.calibration.camera_model import ScaleFactorModel
 from pivtools_gui.calibration.pipeline import build_scale_factor_record
 
-
 # ---------------------------------------------------------------------------
 # back_project_to_plane algebra
 # ---------------------------------------------------------------------------

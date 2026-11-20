@@ -37,8 +37,8 @@ _CAM_POSES = {
     3: (np.array([0.00, -0.32, 0.0]), np.array([-10.0, -60.0, 540.0])),
 }
 # Each camera sees a partial column window; adjacent windows overlap (a connected chain).
-_CAM_WINDOWS = {1: range(0, 7), 2: range(4, 10), 3: range(7, 12)}
-_ROWS = range(0, 9)
+_CAM_WINDOWS = {1: range(7), 2: range(4, 10), 3: range(7, 12)}
+_ROWS = range(9)
 _N_VIEWS = 4
 
 

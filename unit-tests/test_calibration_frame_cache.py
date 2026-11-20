@@ -281,7 +281,7 @@ def test_display_path_accepts_a_read_only_frame(tmp_path, reads):
 
     stats = get_display_contrast_stats(arr)
     assert "vmin_pct" in stats
-    assert numpy_to_base64(arr, format="jpeg")
+    assert numpy_to_base64(arr, img_format="jpeg")
 
 
 def test_the_real_detectors_accept_a_read_only_frame(tmp_path, reads):

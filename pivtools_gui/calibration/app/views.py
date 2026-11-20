@@ -718,7 +718,7 @@ def _figure_rank(name: str) -> int:
         return 0
     if n.startswith("detection"):
         return 1
-    if n.startswith("reprojection") or n.startswith("polynomial_fit"):
+    if n.startswith(("reprojection", "polynomial_fit")):
         return 2
     if n.startswith("world_frame"):
         return 3
@@ -1155,7 +1155,9 @@ def frame_json():
     stats["vmax_pct"] = contrast["vmax_pct"]
     return jsonify(
         {
-            "image": numpy_to_base64(arr, format=output_format, jpeg_quality=quality),
+            "image": numpy_to_base64(
+                arr, img_format=output_format, jpeg_quality=quality
+            ),
             "mime_type": f"image/{output_format}",
             "width": int(arr.shape[1]),
             "height": int(arr.shape[0]),

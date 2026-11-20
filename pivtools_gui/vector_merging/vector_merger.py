@@ -961,7 +961,6 @@ class VectorMerger:
 
         # Merge data for each run
         merged_runs = {}
-        has_stress_fields = False  # Track if ensemble with stress data
 
         for run_idx, run_num in enumerate(valid_runs):
             logger.debug(f"Processing run {run_num} (index {run_idx})")

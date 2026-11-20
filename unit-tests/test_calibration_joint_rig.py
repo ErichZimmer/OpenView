@@ -72,7 +72,7 @@ def _dataset(views_of, n_views, seed=0, noise_px=0.0, windows=None):
     cameras). Undetected views are ``success=False`` entries, which ``resolve_global_grid``
     skips, so the grid holds exactly the (camera, view) pairs in ``views_of``.
     """
-    windows = windows or {1: range(0, 6), 2: range(4, 10), 3: range(8, 14)}
+    windows = windows or {1: range(6), 2: range(4, 10), 3: range(8, 14)}
     poses = _board_poses(n_views, seed)
     noise_rng = np.random.default_rng(seed + 10_000)
     detections = {c: [] for c in _CAM_RVEC}

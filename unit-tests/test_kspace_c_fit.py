@@ -22,11 +22,10 @@ from synthetic_correlations import generate_correlation_triplet, make_mock_confi
 from pivtools_cli.piv.piv_backend.kspace_lm_fitting import (
     STATUS_MASKED,
     STATUS_SUCCESS,
+    _load_kspace_lib,
     fit_windows_kspace_lm,
     fit_windows_kspace_lm_numpy,
 )
-
-from pivtools_cli.piv.piv_backend.kspace_lm_fitting import _load_kspace_lib
 
 try:
     _load_kspace_lib()

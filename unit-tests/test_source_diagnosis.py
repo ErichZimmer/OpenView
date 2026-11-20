@@ -1061,7 +1061,7 @@ def test_folder_rules_silent_unless_camera_numbers_are_exactly_1_to_k(
 
 
 def test_start_index_rule(tmp_path):
-    touch(tmp_path, [f"B{i:05d}.tif" for i in range(0, 10)])
+    touch(tmp_path, [f"B{i:05d}.tif" for i in range(10)])
     [s] = rule_start_index(_inp(tmp_path, start_index=1, expected_count=10))
     assert s == {
         "id": "start_index",
@@ -1221,7 +1221,7 @@ def tree_pattern(root):
 
 
 def tree_start_index(root):
-    touch(root, [f"B{i:05d}.tif" for i in range(0, 10)])
+    touch(root, [f"B{i:05d}.tif" for i in range(10)])
     return root, make_ctx(root, start_index=1), root, 10
 
 

@@ -643,18 +643,30 @@ class InstantaneousCorrelatorCPU(CrossCorrelator):
                     if config.outlier_detection_enabled:
                         outlier_methods = config.outlier_detection_methods
                         if outlier_methods:
-
-                            def _detect_outliers(im_idx):
+                            # The pass's arrays are passed in rather than closed over:
+                            # pk_height is deleted at the end of the pass loop.
+                            def _detect_outliers(im_idx, ux, uy, methods, pk, mask):
                                 return im_idx, apply_outlier_detection(
-                                    ux_mat[im_idx],
-                                    uy_mat[im_idx],
-                                    outlier_methods,
-                                    peak_mag=pk_height[im_idx, 0],
-                                    masked=win_mask,
+                                    ux[im_idx],
+                                    uy[im_idx],
+                                    methods,
+                                    peak_mag=pk[im_idx, 0],
+                                    masked=mask,
                                 )
 
                             results = self._run_parallel(
-                                _detect_outliers, [(i,) for i in range(N)]
+                                _detect_outliers,
+                                [
+                                    (
+                                        i,
+                                        ux_mat,
+                                        uy_mat,
+                                        outlier_methods,
+                                        pk_height,
+                                        win_mask,
+                                    )
+                                    for i in range(N)
+                                ],
                             )
                             for im_idx, outlier_mask in results:
                                 outliers_detected_count += outlier_mask.sum()

@@ -11,6 +11,7 @@ from __future__ import annotations
 import cv2
 import numpy as np
 import pytest
+from test_calibration_joint_charuco import _IMG_SIZES, SPACING, _dataset
 
 from pivtools_gui.calibration.global_grid import resolve_global_grid
 from pivtools_gui.calibration.joint import (
@@ -23,7 +24,6 @@ from pivtools_gui.calibration.joint import (
     pose_diversity_to_meta,
     run_joint,
 )
-from test_calibration_joint_charuco import _IMG_SIZES, SPACING, _dataset
 
 _BOARD = np.array(
     [[x * 20.0, y * 20.0, 0.0] for x in range(8) for y in range(6)], dtype=np.float64

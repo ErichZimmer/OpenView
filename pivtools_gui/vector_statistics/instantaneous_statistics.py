@@ -145,14 +145,14 @@ def apply_cli_settings_to_config():
 def create_disk_structuring_element(radius: int):
     """
     Create a disk structuring element and return neighbor offsets.
-    Returns I, J offset arrays similar to MATLAB's strel('disk', radius).
+    Returns di, dj offset arrays similar to MATLAB's strel('disk', radius).
     """
     y, x = np.ogrid[-radius : radius + 1, -radius : radius + 1]
     mask = x**2 + y**2 <= radius**2
-    I, J = np.where(mask)
-    I = I - radius
-    J = J - radius
-    return I, J
+    di, dj = np.where(mask)
+    di = di - radius
+    dj = dj - radius
+    return di, dj
 
 
 def nansurround(arr, d):
@@ -180,7 +180,7 @@ def localvel(u, v, d):
     Optimized for memory: uses iterative summation instead of stacking.
     """
     s = u.shape
-    I, J = create_disk_structuring_element(d)
+    di, dj = create_disk_structuring_element(d)
 
     # Initialize accumulators
     sum_u = np.zeros(s, dtype=np.float64)
@@ -188,7 +188,7 @@ def localvel(u, v, d):
     count_u = np.zeros(s, dtype=np.float64)
     count_v = np.zeros(s, dtype=np.float64)
 
-    for i_offset, j_offset in zip(I, J):
+    for i_offset, j_offset in zip(di, dj):
         # Get shifted arrays
         u_shifted = np.roll(u, (i_offset, j_offset), axis=(0, 1))
         v_shifted = np.roll(v, (i_offset, j_offset), axis=(0, 1))
@@ -230,12 +230,12 @@ def gamma1(x, y, u, v, d=10):
     Optimized for memory: uses iterative summation.
     """
     s = u.shape
-    I, J = create_disk_structuring_element(d)
+    di, dj = create_disk_structuring_element(d)
 
     # Get center point indices
     i0, j0 = s[0] // 2, s[1] // 2
     ind0 = np.ravel_multi_index((i0, j0), s)
-    IN = np.ravel_multi_index((I + i0, J + j0), s)
+    IN = np.ravel_multi_index((di + i0, dj + j0), s)
 
     # Compute angles A (1D array of length N_neighbors)
     x_flat = x.ravel()
@@ -251,7 +251,7 @@ def gamma1(x, y, u, v, d=10):
     sum_s = np.zeros(S, dtype=np.float64)
 
     # Iterate over neighbors
-    for k, (i_offset, j_offset) in enumerate(zip(I, J)):
+    for k, (i_offset, j_offset) in enumerate(zip(di, dj)):
         u_shifted = np.roll(U, (i_offset, j_offset), axis=(0, 1))
         v_shifted = np.roll(V, (i_offset, j_offset), axis=(0, 1))
 
@@ -265,7 +265,7 @@ def gamma1(x, y, u, v, d=10):
         sum_s += np.nan_to_num(sine_val)
 
     # Final calculation (normalized by number of neighbors, not valid count, per Graftieaux)
-    G1 = -sum_s / len(I)
+    G1 = -sum_s / len(di)
     G1 = unsurround(G1, d)
 
     return G1
@@ -277,12 +277,12 @@ def gamma2(x, y, u, v, d=10):
     Optimized for memory: uses iterative summation.
     """
     s = u.shape
-    I, J = create_disk_structuring_element(d)
+    di, dj = create_disk_structuring_element(d)
 
     # Get center point indices
     i0, j0 = s[0] // 2, s[1] // 2
     ind0 = np.ravel_multi_index((i0, j0), s)
-    IN = np.ravel_multi_index((I + i0, J + j0), s)
+    IN = np.ravel_multi_index((di + i0, dj + j0), s)
 
     # Compute angles A
     x_flat = x.ravel()
@@ -302,7 +302,7 @@ def gamma2(x, y, u, v, d=10):
     # Accumulator
     sum_s = np.zeros(S, dtype=np.float64)
 
-    for k, (i_offset, j_offset) in enumerate(zip(I, J)):
+    for k, (i_offset, j_offset) in enumerate(zip(di, dj)):
         u_shifted = np.roll(U, (i_offset, j_offset), axis=(0, 1))
         v_shifted = np.roll(V, (i_offset, j_offset), axis=(0, 1))
 
@@ -316,7 +316,7 @@ def gamma2(x, y, u, v, d=10):
         # Accumulate
         sum_s += np.nan_to_num(sine_val)
 
-    G2 = -sum_s / len(I)
+    G2 = -sum_s / len(di)
     G2 = unsurround(G2, d)
 
     return G2

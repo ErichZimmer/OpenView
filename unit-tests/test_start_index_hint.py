@@ -60,7 +60,7 @@ def _write_frames(folder: Path, fmt: str, first: int, n: int = N_FILES) -> None:
 
 def test_detect_start_index_parses_with_the_pattern():
     """The camera digit in 'Cam1_' is not the frame index; the pattern says so."""
-    names = [f"Cam1_{i:05d}.tif" for i in range(0, 12)]
+    names = [f"Cam1_{i:05d}.tif" for i in range(12)]
     assert detect_start_index(names, "Cam1_%05d.tif") == 0
 
 
@@ -166,7 +166,7 @@ def _frame_value(index: int) -> int:
 def _cal_client(tmp_path, monkeypatch):
     folder = tmp_path / "cal_src"
     folder.mkdir()
-    for i in range(0, N_FILES):
+    for i in range(N_FILES):
         img = np.full((16, 16), _frame_value(i), dtype=np.uint8)
         assert cv2.imwrite(str(folder / (CAL_FMT % i)), img)
     save_settings(

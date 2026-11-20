@@ -27,7 +27,7 @@ _CAM_RVEC = {
     2: np.array([0.0, 0.25, 0.0]),
     3: np.array([0.0, -0.25, 0.0]),
 }
-_WINDOWS = {1: range(0, 7), 2: range(5, 12), 3: range(10, 16)}
+_WINDOWS = {1: range(7), 2: range(5, 12), 3: range(10, 16)}
 _N_VIEWS = 6
 
 

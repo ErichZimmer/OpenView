@@ -34,7 +34,7 @@ _CAM_RVEC = {
     3: np.array([0.0, -0.25, 0.0]),
 }
 # Overlapping global-index windows: adjacent cameras share corner ids (the charuco hallmark).
-_WINDOWS = {1: range(0, 6), 2: range(4, 10), 3: range(8, 14)}
+_WINDOWS = {1: range(6), 2: range(4, 10), 3: range(8, 14)}
 _N_VIEWS = 6
 
 

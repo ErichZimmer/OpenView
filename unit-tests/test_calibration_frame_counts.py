@@ -318,7 +318,7 @@ class _NeverDetects:
 @pytest.fixture
 def frame_client(tmp_path, monkeypatch):
     monkeypatch.setattr(V, "get_config", lambda: _FakeConfig(tmp_path))
-    monkeypatch.setattr(V, "_cfg", lambda: {})
+    monkeypatch.setattr(V, "_cfg", dict)
     monkeypatch.setattr(
         V,
         "_load_one",
