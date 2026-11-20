@@ -42,6 +42,7 @@ from .shared_utils import (
     load_and_plot_data,
     load_piv_result,
     parse_plot_params,
+    split_var_source,
     units_for_var,
     validate_and_get_paths,
 )
@@ -80,11 +81,8 @@ def plot_vector():
         stats_dir = Path(paths["stats_dir"])
         vector_fmt = get_config().vector_format
 
-        # Strip variable prefix (inst:, mean:, inst_stat:) if present
-        # Frontend sends prefixed names like "inst:ux" but mat structs use raw names like "ux"
-        raw_var = params["var"]
-        if ":" in raw_var:
-            _, raw_var = raw_var.split(":", 1)
+        # The source comes from var_source; a dropdown prefix on var is dropped.
+        _, raw_var = split_var_source(params["var"])
 
         # Determine data source
         var_source = request.args.get("var_source", default="inst", type=str)
@@ -274,11 +272,8 @@ def plot_ensemble():
         params = parse_plot_params(request)
         params["type_name"] = "ensemble"  # Override type
 
-        # Strip variable prefix (inst:, mean:, inst_stat:) if present
-        # Frontend sends prefixed names like "inst:ux" but ensemble structs use raw names like "ux"
-        raw_var = params["var"]
-        if ":" in raw_var:
-            _, raw_var = raw_var.split(":", 1)
+        # Ensemble structs use bare names; a dropdown prefix on var is dropped.
+        _, raw_var = split_var_source(params["var"])
 
         paths = validate_and_get_paths(params)
         data_dir = Path(paths["data_dir"])
@@ -537,23 +532,23 @@ def check_all_vars():
         return jsonify({"success": False, "error": "Internal server error"}), 500
 
 
-def _sampled_var_values(mat_path: Path, var: str) -> List[np.ndarray]:
+def _sampled_var_values(
+    mat_path: Path, var: str, struct_name: str = "piv_result"
+) -> List[np.ndarray]:
     """Finite values of ``var`` in every pass element of one sampled result file.
 
-    Every pass element of a ``piv_result`` shares one set of fields, so an element
+    Every pass element of a result struct shares one set of fields, so an element
     without ``var`` means the file does not carry it. That, a file that cannot be
-    loaded, a file without ``piv_result`` and a non-numeric ``var`` raise
+    loaded, a file without ``struct_name`` and a non-numeric ``var`` raise
     ``ValueError`` naming the file: colour limits silently drawn from fewer files
     than sampled are a wrong answer.
     """
-    piv_result = load_result_mat(mat_path, "piv_result")
-    elements = (
-        list(piv_result.flat) if isinstance(piv_result, np.ndarray) else [piv_result]
-    )
+    result = load_result_mat(mat_path, struct_name)
+    elements = list(result.flat) if isinstance(result, np.ndarray) else [result]
     arrays = []
     for el in elements:
         if var not in getattr(el, "_fieldnames", ()):
-            raise ValueError(f"{mat_path}: piv_result has no variable '{var}'")
+            raise ValueError(f"{mat_path}: {struct_name} has no variable '{var}'")
         arr = np.asarray(getattr(el, var)).ravel()
         try:
             arrays.append(arr[np.isfinite(arr)])
@@ -564,28 +559,71 @@ def _sampled_var_values(mat_path: Path, var: str) -> List[np.ndarray]:
     return arrays
 
 
+# Cap on the per-frame files sampled for a colour range, so a long run is not read
+# in full on every variable switch.
+LIMITS_SAMPLE_FILES = 50
+
+
 @vector_plot_bp.route("/check_limits", methods=["GET"])
 def check_limits():
-    """Sample .mat files to estimate min/max limits for a variable."""
+    """Estimate colour limits for one dropdown variable from the files it is drawn from.
+
+    ``var`` is the dropdown's prefixed name. Instantaneous (``inst``) and per-frame
+    statistics (``inst_stat``) variables sample up to :data:`LIMITS_SAMPLE_FILES`
+    of their per-frame files; mean statistics (``mean``) read ``mean_stats.mat`` and
+    ensemble (``ens``) variables ``ensemble_result.mat``. Correlation-quality
+    (``corrq``) figures are rendered server-side and have no colour range.
+    """
     try:
         params = parse_plot_params(request)
+        source, var = split_var_source(params["var"])
+        if source == "corrq":
+            raise ValueError(
+                f"'{params['var']}': correlation-quality (corrq) figures have no "
+                "colour range"
+            )
+        if source == "ens":
+            # Same override as plot_ensemble: the ensemble directory, not a frame one.
+            params["type_name"] = "ensemble"
         paths = validate_and_get_paths(params)
         data_dir = Path(paths["data_dir"])
+        stats_dir = Path(paths["stats_dir"])
 
-        cfg = get_config()
-        fmt = cfg.vector_format
-        all_mats = list_vector_files(data_dir, fmt, cfg.num_frame_pairs)
+        if source in ("inst", "inst_stat"):
+            struct_name = "piv_result"
+            frames_dir = (
+                data_dir if source == "inst" else stats_dir / "instantaneous_stats"
+            )
+            cfg = get_config()
+            all_mats = list_vector_files(
+                frames_dir, cfg.vector_format, cfg.num_frame_pairs
+            )
+            if not all_mats:
+                return (
+                    jsonify(
+                        {
+                            "success": False,
+                            "error": f"No .mat files found in {frames_dir}",
+                        }
+                    ),
+                    404,
+                )
+        else:
+            if source == "mean":
+                struct_name = "piv_result"
+                single = stats_dir / "mean_stats" / "mean_stats.mat"
+            else:
+                struct_name = "ensemble_result"
+                single = data_dir / "ensemble_result.mat"
+            if not single.exists():
+                return (
+                    jsonify({"success": False, "error": f"Not found: {single}"}),
+                    404,
+                )
+            all_mats = [single]
         files_total = len(all_mats)
 
-        if files_total == 0:
-            return (
-                jsonify(
-                    {"success": False, "error": f"No .mat files found in {data_dir}"}
-                ),
-                404,
-            )
-
-        sample_count = min(files_total, 50)
+        sample_count = min(files_total, LIMITS_SAMPLE_FILES)
         sampled = (
             random.sample(all_mats, sample_count)
             if files_total > sample_count
@@ -595,9 +633,8 @@ def check_limits():
         all_values = []
         files_checked = 0
 
-        var = params["var"]
         for mat_path in sampled:
-            vals = _sampled_var_values(mat_path, var)
+            vals = _sampled_var_values(mat_path, var, struct_name)
             # A pass outside runs_to_save holds an empty array, the normal layout
             # written by save_results; it contributes no values and is skipped.
             vals = [v for v in vals if v.size > 0]
@@ -1233,10 +1270,7 @@ def get_vector_at_position():
             if "ensemble_result" not in mat:
                 raise ValueError("Variable 'ensemble_result' not found in mat file")
             piv_result = mat["ensemble_result"]
-            # Strip variable prefix if present (e.g., "inst:ux" -> "ux")
-            var_name = params["var"]
-            if ":" in var_name:
-                _, var_name = var_name.split(":", 1)
+            _, var_name = split_var_source(params["var"])
         else:
             piv_result = load_piv_result(mat_path)
             var_name = params["var"]

@@ -103,10 +103,36 @@ _VAR_SUFFIXES = (
 )
 
 
+# Source prefixes the Results-tab variable dropdown puts on a name ("mean:uu"), as
+# parsed by parseVarType in gui/src/hooks/useVectorViewer.ts. An unprefixed name is
+# an instantaneous frame-file variable there too.
+VAR_SOURCES = ("inst", "inst_stat", "mean", "ens", "corrq")
+
+
+def split_var_source(var: str) -> Tuple[str, str]:
+    """
+    Split a dropdown variable name into (source, bare name).
+
+    ``"mean:uu"`` gives ``("mean", "uu")``; ``"ux"`` gives ``("inst", "ux")``.
+
+    Raises:
+        ValueError: The prefix is not one of :data:`VAR_SOURCES`.
+    """
+    if ":" not in var:
+        return "inst", var
+    source, name = var.split(":", 1)
+    if source not in VAR_SOURCES:
+        raise ValueError(
+            f"Unknown variable source '{source}' in '{var}'; "
+            f"expected one of {', '.join(VAR_SOURCES)}"
+        )
+    return source, name
+
+
 def normalize_var_name(var: str) -> str:
     """'ens:UU_stress_uncorrected' -> 'uu': strip source prefix, lowercase,
     strip ensemble suffixes until stable."""
-    v = var.split(":", 1)[-1].strip().lower()
+    v = split_var_source(var)[1].strip().lower()
     changed = True
     while changed:
         changed = False
