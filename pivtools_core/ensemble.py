@@ -250,8 +250,10 @@ def process_pass_worker_accumulate(
                 if pct > last_pct[0]:
                     logger.info(f"  Pass {pass_idx + 1} correlation: {pct}%")
                     last_pct[0] = pct
+            # Diagnostics only: the progress line must never kill the run, and the
+            # next tick retries. Logged so a persistent failure is diagnosable.
             except Exception:
-                pass
+                logger.debug("Progress poll failed", exc_info=True)
             stop_progress.wait(3)
 
     progress_thread = threading.Thread(target=poll_progress, daemon=True)
@@ -266,8 +268,9 @@ def process_pass_worker_accumulate(
                 "in": metrics.get("transfer_incoming_bytes", 0),
                 "out": metrics.get("transfer_outgoing_bytes", 0),
             }
+    # Diagnostics only: an empty baseline just skips the transfer report below.
     except Exception:
-        pass  # Non-critical diagnostics
+        logger.debug("Pre-pass transfer counters unavailable", exc_info=True)
 
     # Wait for all workers (check errors without pulling data to client)
     completed_count = 0
@@ -286,10 +289,11 @@ def process_pass_worker_accumulate(
     stop_progress.set()
     progress_thread.join(timeout=5)
     for v in progress_vars:
+        # Best-effort cleanup: the cluster teardown reclaims a leftover Variable.
         try:
             v.delete()
         except Exception:
-            pass
+            logger.debug("Progress Variable cleanup failed", exc_info=True)
 
     # Verify locality: check each result is on the worker we pinned it to
     for fut, pinned_worker in zip(worker_futures, pinned_workers, strict=True):
@@ -303,8 +307,9 @@ def process_pass_worker_accumulate(
                     f"held_on={[h.split('/')[-1] for h in held_on]} "
                     f"{'OK' if is_local else 'MOVED'}"
                 )
+        # Diagnostics only: the debug line above is the whole purpose of the block.
         except Exception:
-            pass
+            logger.debug("Locality check failed", exc_info=True)
 
     # Tree reduction of per-worker results
     futures = list(worker_futures)
@@ -363,8 +368,9 @@ def process_pass_worker_accumulate(
             f"  Transfer during pass: in={total_in / 1e6:.1f} MB, "
             f"out={total_out / 1e6:.1f} MB"
         )
+    # Diagnostics only: a missing counter skips the transfer report.
     except Exception:
-        pass
+        logger.debug("Transfer report failed", exc_info=True)
 
     return final
 
