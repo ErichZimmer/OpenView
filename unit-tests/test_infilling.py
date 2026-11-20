@@ -57,7 +57,7 @@ def _reference_fill_ls(u, fill, spacing, order):
             cs.append(idx[tuple(sl)].ravel())
         m = cs[0].size
         rr = r + np.arange(m)
-        for c, w in zip(cs, stencil):
+        for c, w in zip(cs, stencil, strict=True):
             rows.append(rr)
             cols.append(c)
             vals.append(np.full(m, w / h**order))

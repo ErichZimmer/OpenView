@@ -252,7 +252,7 @@ def test_dotboard_joint_polynomial_excluded_view_is_per_camera(tmp_path):
     )
 
     assert res.excluded_views == [(_DROP_CAM, _DROP_VIEW + 1)]
-    for cam, p in zip(res.cameras, res.paths):
+    for cam, p in zip(res.cameras, res.paths, strict=True):
         stored = parse_excluded_views(load_mono(p).board_meta["excluded_views"])
         assert stored == ([(_DROP_CAM, _DROP_VIEW + 1)] if cam == _DROP_CAM else [])
 

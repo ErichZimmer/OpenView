@@ -221,8 +221,12 @@ def same_side_scene():
     detections2 = [det.detect(im) for im in imgs2]
 
     gt_z = _gt_z()
-    pose_levels1 = [_level_a_label(d, p, gt_z) for d, p in zip(detections1, projs1)]
-    pose_levels2 = [_level_a_label(d, p, gt_z) for d, p in zip(detections2, projs2)]
+    pose_levels1 = [
+        _level_a_label(d, p, gt_z) for d, p in zip(detections1, projs1, strict=True)
+    ]
+    pose_levels2 = [
+        _level_a_label(d, p, gt_z) for d, p in zip(detections2, projs2, strict=True)
+    ]
 
     # Closed-form ground truth (see _cam2_pose derivation).
     R_stereo_gt = R_extra

@@ -65,7 +65,9 @@ def _stereo_models():
     pos1 = np.array([BASELINE_MM / 2.0, 0.0, z_cam])
     pos2 = np.array([-BASELINE_MM / 2.0, 0.0, z_cam])
 
-    def look_at(cam_pos, target=np.zeros(3)):
+    def look_at(cam_pos, target=None):
+        if target is None:
+            target = np.zeros(3)
         z_axis = target - cam_pos
         z_axis /= np.linalg.norm(z_axis)
         up = np.array([0.0, -1.0, 0.0])
@@ -82,7 +84,7 @@ def _stereo_models():
     return m1, m2
 
 
-def _render(particles, model):
+def _render(particles, model, rng):
     w, h = model.image_size
     image = np.zeros((h, w), dtype=np.float32)
     pts2d = model.project(particles)
@@ -98,7 +100,7 @@ def _render(particles, model):
             -((kxx - dx) ** 2 + (kyy - dy) ** 2) / (2 * PARTICLE_SIGMA**2)
         )
         image[iy - half : iy + half + 1, ix - half : ix + half + 1] += kernel
-    noise = np.random.normal(0, 5, image.shape).astype(np.float32)
+    noise = rng.normal(0, 5, image.shape).astype(np.float32)
     return np.clip(image + noise, 0, 255).astype(np.uint8)
 
 
@@ -120,16 +122,16 @@ def _stereo_record(m1, m2) -> REC.StereoRecord:
 
 @pytest.fixture(scope="module")
 def recovery():
-    np.random.seed(42)
+    rng = np.random.default_rng(42)
     m1, m2 = _stereo_models()
     imgs1, imgs2 = [], []
     for _ in range(N_IMAGE_PAIRS):
-        x = np.random.uniform(WORLD_BOUNDS[0], WORLD_BOUNDS[1], N_PARTICLES)
-        y = np.random.uniform(WORLD_BOUNDS[2], WORLD_BOUNDS[3], N_PARTICLES)
+        x = rng.uniform(WORLD_BOUNDS[0], WORLD_BOUNDS[1], N_PARTICLES)
+        y = rng.uniform(WORLD_BOUNDS[2], WORLD_BOUNDS[3], N_PARTICLES)
         z = TRUE_Z_OFFSET + x * np.tan(TRUE_TILT_Y) + y * np.tan(TRUE_TILT_X)
         particles = np.column_stack([x, y, z])
-        imgs1.append(_render(particles, m1))
-        imgs2.append(_render(particles, m2))
+        imgs1.append(_render(particles, m1, rng))
+        imgs2.append(_render(particles, m2, rng))
     record = _stereo_record(m1, m2)
     result = SC.run(
         record,

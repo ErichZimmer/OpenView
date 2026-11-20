@@ -353,7 +353,7 @@ def _clipped_dotboard_pair(n_views: int = 6):
     keep2 = gi_full[:, 0] >= _CAM2_CLIP_COLS
     gi_clip = gi_full[keep2] - np.array([_CAM2_CLIP_COLS, 0])
     det1, det2, datum_px = [], [], {}
-    for v, ((rv1, tv1), (rv2, tv2)) in enumerate(zip(poses1, poses2)):
+    for v, ((rv1, tv1), (rv2, tv2)) in enumerate(zip(poses1, poses2, strict=True)):
         p1, _ = cv2.projectPoints(obj_m, rv1, tv1, K, np.zeros(5))
         p2, _ = cv2.projectPoints(obj_m, rv2, tv2, K, np.zeros(5))
         p1, p2 = p1.reshape(-1, 2), p2.reshape(-1, 2)

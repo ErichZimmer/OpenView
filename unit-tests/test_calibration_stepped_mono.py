@@ -137,7 +137,9 @@ def stepped_mono_scene():
     gt_z = np.concatenate(
         [np.zeros(n_peak), np.full(TROUGH_COLS * TROUGH_ROWS, STEP_MM)]
     )
-    pose_levels = [_level_a_label(d, p, gt_z) for d, p in zip(detections, projs)]
+    pose_levels = [
+        _level_a_label(d, p, gt_z) for d, p in zip(detections, projs, strict=True)
+    ]
     return K_true, images, detections, fiducials, pose_levels
 
 

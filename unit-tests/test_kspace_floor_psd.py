@@ -108,7 +108,7 @@ def _dense_expected_spectrum(fx, fy, w_B, kernel, hole):
     def toeplitz_1d(f, n):
         taus, r = tap_autocorr(f, kernel)
         C = np.zeros((n, n))
-        for tau, rv in zip(taus, r):
+        for tau, rv in zip(taus, r, strict=True):
             idx = np.arange(max(0, -tau), min(n, n - tau))
             C[idx, idx + tau] = rv
         return C
