@@ -18,8 +18,8 @@ from pivtools_core.config import Config
 
 def _batch_policy(config: Config) -> int:
     if config.backend == "gpu":
-        # ~ (batch_size * H * W * bytes_per_pixel * intermediates)
-        # < GPU_RAM * safety
+        # Batch memory is about batch_size x H x W x bytes_per_pixel x intermediates,
+        # and must stay below GPU RAM times a safety factor.
         return 8  # e.g. start with 8 and tune
     else:
         return 1
@@ -221,9 +221,6 @@ def _piv_inst_batch(
         if hasattr(image_block, "compute"):
             image_block = image_block.compute()
 
-        # if image_block.ndim == 3:
-        # Shape: (2, H, W)
-        #    image_block = image_block[np.newaxis, ...]  # Shape: (1, 2, H, W)
         logging.debug(
             f"Starting PIV processing for image block with shape {image_block.shape}"
         )

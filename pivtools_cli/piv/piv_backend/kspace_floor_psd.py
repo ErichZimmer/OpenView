@@ -146,11 +146,11 @@ def analytic_floor_single(
     # v(x) = sum_tau r(tau) w(x + tau); taps beyond the window edge vanish
     # because w_B is only supported inside the window.
     vx = np.zeros_like(w_B)
-    for tau, rv in zip(taus_x, r_x):
+    for tau, rv in zip(taus_x, r_x, strict=True):
         if rv != 0.0:
             vx += rv * _shift_pad(w_B, int(tau), axis=1)
     v = np.zeros_like(w_B)
-    for tau, rv in zip(taus_y, r_y):
+    for tau, rv in zip(taus_y, r_y, strict=True):
         if rv != 0.0:
             v += rv * _shift_pad(vx, int(tau), axis=0)
 
@@ -165,11 +165,11 @@ def analytic_floor_single(
     phase_y = np.exp(-2j * np.pi * np.outer(my, taus_y) / sh)  # (sh, n_ty)
     phase_x = np.exp(-2j * np.pi * np.outer(mx, taus_x) / sw)  # (sw, n_tx)
     T1 = np.zeros((sh, sw))
-    for iy, (ty, ry) in enumerate(zip(taus_y, r_y)):
+    for iy, (ty, ry) in enumerate(zip(taus_y, r_y, strict=True)):
         if ry == 0.0:
             continue
         wy = _shift_pad(w_B, int(ty), axis=0)
-        for ix, (tx, rx) in enumerate(zip(taus_x, r_x)):
+        for ix, (tx, rx) in enumerate(zip(taus_x, r_x, strict=True)):
             if rx == 0.0:
                 continue
             A = float((w_B * _shift_pad(wy, int(tx), axis=1)).sum())
